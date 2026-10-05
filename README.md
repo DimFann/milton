@@ -34,7 +34,7 @@ This fork adds some quality of life features I've been wanting for years, as wel
 
 ### Notes, caution, from DimFann
 * I'm not committed to actively maintaining this fork.
-* I'm not committed ensuring that every commit I push maintains compatibility with files created either by source repo Milton, or previous commits of this fork.
+* I'm not committed to ensuring that every commit I push maintains compatibility with files created either by source repo Milton, or previous commits of this fork.
 * The changes made are just what work for how I draw. If you have suggestions DM me on twitter, but the goal of this fork will mostly be to minimize friction with how I want to draw.
 * The vast majority of changes I'll be making and be pushing will by implemented by Copilot (AI). At this point I don't think there's a clean path for a merge back into Milton. While that repo seems inactive, I wouldn't want to burden anyone with a huge pile of vibe code if they're by any chance still watching pull requests.
 * I take no credit for the hard work done by Sergio and all other original contributors, or by Copilot for that matter. I'm just someone who draws and really, really, really, misses Mischief.
