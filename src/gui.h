@@ -121,6 +121,11 @@ struct MiltonGui
 
     f32 scale;
 
+    // Right side panel: the color picker with the layers panel below it.
+    f32 panel_width;      // Pixels. User resizable.
+    f32 layers_height;    // Pixels. 0 = fill the space under the picker.
+    i32 panel_screen_w;   // Screen width the panel is anchored to.
+
     MiltonSettings* original_settings;
 
     char scratch_binding_key[Action_COUNT][2];
@@ -137,6 +142,7 @@ void milton_imgui_tick(MiltonInput* input, PlatformState* platform_state,  Milto
 
 //
 void                gui_init(Arena* root_arena, MiltonGui* gui, f32 scale);
+// Lays out the picker and its color buttons to fill the panel at the top right corner.
 void                gui_anchor_picker_top_right(MiltonGui* gui, i32 screen_width);
 void                gui_toggle_menu_visibility(MiltonGui* gui);
 void                gui_toggle_help(MiltonGui* gui);

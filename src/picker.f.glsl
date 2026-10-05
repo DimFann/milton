@@ -16,6 +16,10 @@ uniform vec4 u_colors[5]; // Colors for picker buttons.
 
 uniform vec2 u_screen_size;
 
+// Wheel geometry in normalized picker coordinates.
+uniform float u_wheel_radius;
+uniform float u_wheel_half_width;
+
 in vec2 v_norm;
 
 
@@ -111,11 +115,8 @@ is_inside_triangle(vec2 p)
 void
 main()
 {
-    // NOTE:
-    //  These constants gotten from gui.cc in gui_init. From bounds_radius_px, wheel_half_width, and so on.
-    float u_ui_scale = 1.75;
-    float half_width = 12.0 / 100.0;
-    float radius = (1.0 - (12.0 + 5) / 100.0);
+    float half_width = u_wheel_half_width;
+    float radius = u_wheel_radius;
 
     /* vec2 screen_point = vec2(gl_FragCoord.x, u_screen_size.y-gl_FragCoord.y); */
     /* vec2 coord = screen_point / u_screen_size; */

@@ -15,276 +15,340 @@
 void settings_init(MiltonSettings* s);  // milton.cc
 
 #define NUM_BUTTONS 5
-#define BOUNDS_RADIUS_PX 80
+#define GUI_PANEL_MIN_WIDTH 160
+#define GUI_PANEL_MAX_WIDTH 480
 
-// If reset_gui is true, the default window position and size will be set.
+// Moves `src` to the position `dst` currently occupies in the layer list (as displayed, top first).
+static void
+layer_reorder(CanvasState* canvas, Layer* src, Layer* dst)
+{
+    // Is src above dst? (next = higher layer)
+    bool src_above = false;
+    for ( Layer* l = src->prev; l; l = l->prev ) {
+        if ( l == dst ) { src_above = true; break; }
+    }
+
+    // Unlink src.
+    if ( src->prev ) { src->prev->next = src->next; }
+    if ( src->next ) { src->next->prev = src->prev; }
+
+    if ( src_above ) {
+        // Take dst's place; dst moves up. Insert directly below dst.
+        Layer* below = dst->prev;
+        src->prev = below;
+        src->next = dst;
+        dst->prev = src;
+        if ( below ) { below->next = src; }
+    }
+    else {
+        // Take dst's place; dst moves down. Insert directly above dst.
+        Layer* above = dst->next;
+        src->prev = dst;
+        src->next = above;
+        dst->next = src;
+        if ( above ) { above->prev = src; }
+    }
+
+    Layer* root = dst;
+    while ( root->prev ) { root = root->prev; }
+    canvas->root_layer = root;
+}
+
+// A thin invisible strip that can be dragged to resize the panel. Returns true while dragging and
+// stores the drag offset (from where the drag started) in `delta`.
+static bool
+panel_resize_handle(const char* id, ImVec2 pos, ImVec2 size, ImVec2* delta)
+{
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(size);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(1, 1));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground |
+                                   ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus;
+    bool dragging = false;
+    if ( ImGui::Begin(id, NULL, flags) ) {
+        ImGui::InvisibleButton("##handle", size);
+        bool active = ImGui::IsItemActive();
+        if ( ImGui::IsItemHovered() || active ) {
+            ImGui::GetWindowDrawList()->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
+                                                      ImGui::GetColorU32(ImVec4(0.4f, 0.6f, 0.9f, active ? 0.8f : 0.5f)));
+        }
+        if ( active ) {
+            *delta = ImGui::GetMouseDragDelta(0, 0.0f);
+            dragging = true;
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(3);
+    return dragging;
+}
+
+// Moves `src` to the position `dst` currently occupies in the layer list (as displayed, top first).
+// (layer_reorder is defined above.)
+
+// The layers panel sits directly under the color picker, with the same width. The left edge of the
+// panel resizes it horizontally and the bottom edge of the layers panel resizes it vertically.
 void
 gui_layer_window(MiltonInput* input, PlatformState* platform, Milton* milton, f32 brush_window_height, PlatformSettings* prefs, b32 reset_gui)
 {
     float ui_scale = milton->gui->scale;
     MiltonGui* gui = milton->gui;
-    const Rect pbounds = get_bounds_for_picker_and_colors(&gui->picker);
     CanvasState* canvas = milton->canvas;
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
 
-    // Layer window
-
-    // Use default size on first program start on this computer.
-    f32 width  = ui_scale*300;
-    f32 height = ui_scale*230;
-    f32 left   = (float)milton->view->screen_size.w - width - ui_scale*10;
-    f32 top    = ui_scale*10 + (float)pbounds.bottom;
+    static b32 first_frame = true;
+    if ( first_frame ) {
+        first_frame = false;
+        if ( prefs->layer_window_width > 0 ) { gui->panel_width = (f32)prefs->layer_window_width; }
+        if ( prefs->layer_window_height > 0 ) { gui->layers_height = (f32)prefs->layer_window_height; }
+        gui_anchor_picker_top_right(gui, milton->view->screen_size.w);
+        gpu_update_picker(milton->renderer, &gui->picker);
+    }
     if ( reset_gui ) {
-        ImGui::SetNextWindowPos(ImVec2(left, top));
-        ImGui::SetNextWindowSize(ImVec2(width, height));
-    }
-    else {
-        if ( prefs->layer_window_width != 0 && prefs->layer_window_height != 0 ) {
-            // If there are preferences already, use those for the layer window.
-            left   = prefs->layer_window_left;
-            top    = prefs->layer_window_top;
-            width  = prefs->layer_window_width;
-            height = prefs->layer_window_height;
-        }
-
-        ImGui::SetNextWindowPos(ImVec2(left, top), ImGuiSetCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiSetCond_FirstUseEver);
+        gui->panel_width = ui_scale*240;
+        gui->layers_height = 0;
+        gui_anchor_picker_top_right(gui, milton->view->screen_size.w);
+        gpu_update_picker(milton->renderer, &gui->picker);
     }
 
-    if ( ImGui::Begin(loc(TXT_layers)) ) {
-        i32 angle = (milton->view->angle / PI) * 180;
-        while (angle < 0) { angle += 360; }
-        while (angle > 360) { angle -= 360; }
-        if (ImGui::SliderInt(loc(TXT_rotation), &angle, 0.0f, 360)) {
-            milton->view->angle = (f32)angle / 180.0f * PI;
-            input->flags |= (i32)MiltonInputFlags_PANNING;
-            gpu_update_canvas(milton->renderer, milton->canvas, milton->view);
+    Rect pbounds = get_bounds_for_picker_and_colors(&gui->picker);
+    const f32 min_height = ui_scale*140;
+    const f32 layers_top = (f32)pbounds.bottom;
+    const f32 available = max(display.y - layers_top, min_height);
+    f32 height = (gui->layers_height > 0) ? clamp(gui->layers_height, min_height, available) : available;
+    f32 width = (f32)(pbounds.right - pbounds.left);
+    const f32 grip = ui_scale*6;
+
+    // Resize handles. The panel is anchored on the right, so dragging left makes it wider.
+    {
+        static f32 start_width = 0;
+        static f32 start_height = 0;
+        ImVec2 delta = {};
+        if ( ImGui::IsMouseClicked(0) ) {
+            start_width = gui->panel_width;
+            start_height = height;
+        }
+        ImVec2 hpos = ImVec2((f32)pbounds.left - grip*0.5f, (f32)pbounds.top);
+        ImVec2 hsize = ImVec2(grip, layers_top + height - pbounds.top);
+        if ( panel_resize_handle("##panel_width_handle", hpos, hsize, &delta) ) {
+            gui->panel_width = start_width - delta.x;
+            gui_anchor_picker_top_right(gui, milton->view->screen_size.w);
+            gpu_update_picker(milton->renderer, &gui->picker);
+            pbounds = get_bounds_for_picker_and_colors(&gui->picker);
+            width = (f32)(pbounds.right - pbounds.left);
+        }
+        ImVec2 vpos = ImVec2((f32)pbounds.left, layers_top + height - grip);
+        ImVec2 vsize = ImVec2(width, grip);
+        if ( panel_resize_handle("##panel_height_handle", vpos, vsize, &delta) ) {
+            f32 new_height = clamp(start_height + delta.y, min_height, available);
+            // Dragging all the way down goes back to filling the window.
+            gui->layers_height = (new_height >= available - 2) ? 0.0f : new_height;
+            height = new_height;
+        }
+    }
+    prefs->layer_window_width = (i32)gui->panel_width;
+    prefs->layer_window_height = (i32)gui->layers_height;
+
+    ImGui::SetNextWindowPos(ImVec2((f32)pbounds.left, (f32)(pbounds.bottom)));
+    ImGui::SetNextWindowSize(ImVec2(width, height));
+
+    static b32 is_renaming = false;
+    static i32 layer_renaming_idx = -1;
+    static b32 focus_rename_field = false;
+    static b32 deleting = false;
+
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse;
+    if ( ImGui::Begin(loc(TXT_layers), NULL, flags) ) {
+        // Opacity of the current layer.
+        {
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text(loc(TXT_opacity));
+            ImGui::SameLine();
+            f32 percent = canvas->working_layer->alpha * 100.0f;
+            ImGui::PushItemWidth(-1);
+            if ( ImGui::SliderFloat("##opacity", &percent, 0.0f, 100.0f, "%.0f%%") ) {
+                // Used the slider. Ask if it's OK to convert the binary format.
+                if ( milton->persist->mlt_binary_version < 3 ) {
+                    milton_log("Modified milton file from %d to 3\n", milton->persist->mlt_binary_version);
+                    milton->persist->mlt_binary_version = 3;
+                }
+                input->flags |= (i32)MiltonInputFlags_FULL_REFRESH;
+                canvas->working_layer->alpha = clamp(percent / 100.0f, 0.0f, 1.0f);
+            }
+            ImGui::PopItemWidth();
         }
 
-        CanvasView* view = milton->view;
-        // left
-        ImGui::BeginChild("left pane", ImVec2(150, 0), true);
+        // Effects of the current layer.
+        {
+            if ( ImGui::SmallButton(loc(TXT_blur)) ) {
+                LayerEffect* e = arena_alloc_elem(&milton->canvas_arena, LayerEffect);
+                e->next = milton->canvas->working_layer->effects;
+                milton->canvas->working_layer->effects = e;
+                e->enabled = true;
+                e->blur.original_scale = milton->view->scale;
+                e->blur.kernel_size = 10;
+                input->flags |= (i32)MiltonInputFlags_FULL_REFRESH;
+            }
 
-        static b32 is_renaming = false;
-        static i32 layer_renaming_idx = -1;
-        static b32 focus_rename_field = false;
+            LayerEffect* prev = NULL;
+            int effect_id = 1;
+            for ( LayerEffect* e = milton->canvas->working_layer->effects; e != NULL; e = e->next ) {
+                ImGui::PushID(effect_id);
+                if ( ImGui::Checkbox("##enabled", (bool*)&e->enabled) ) {
+                    input->flags |= MiltonInputFlags_FULL_REFRESH;
+                }
+                ImGui::SameLine();
+                ImGui::PushItemWidth(-ui_scale*34);
+                if ( ImGui::SliderInt("##level", &e->blur.kernel_size, 2, 100, "Blur %.0f") ) {
+                    if ( e->blur.kernel_size % 2 == 0 ) {
+                        --e->blur.kernel_size;
+                    }
+                    input->flags |= MiltonInputFlags_FULL_REFRESH;
+                }
+                ImGui::PopItemWidth();
+                ImGui::SameLine();
+                bool removed = false;
+                if ( ImGui::SmallButton("x") ) {
+                    if ( prev ) {
+                        prev->next = e->next;
+                    } else {  // Was the first.
+                        milton->canvas->working_layer->effects = e->next;
+                    }
+                    input->flags |= (i32)MiltonInputFlags_FULL_REFRESH;
+                    removed = true;
+                }
+                ImGui::PopID();
+                if ( removed ) { break; }
+                prev = e;
+                effect_id++;
+            }
+        }
 
+        // Layer list, top layer first. Drag a row to reorder.
+        Layer* drag_src = NULL;
+        Layer* drag_dst = NULL;
+        ImGui::BeginChild("layer_list", ImVec2(0, -(ImGui::GetFrameHeightWithSpacing() + ui_scale*4)), true);
+        if ( !ImGui::IsWindowFocused() ) {
+            is_renaming = false;
+        }
+
+        const f32 row_h = ui_scale*34;
+        const f32 box = ImGui::GetFrameHeight();
 
         Layer* layer = milton->canvas->root_layer;
         while ( layer->next ) { layer = layer->next; }  // Move to the top layer.
         while ( layer ) {
-
-            bool v = layer->flags & LayerFlags_VISIBLE;
             ImGui::PushID(layer->id);
 
-            if ( ImGui::Checkbox("##select", &v) ) {
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const f32 row_w = ImGui::GetContentRegionAvailWidth();
+
+            // Visibility checkbox, centered in the row.
+            ImGui::SetCursorScreenPos(ImVec2(p.x + ui_scale*4, p.y + (row_h - box)*0.5f));
+            bool v = layer->flags & LayerFlags_VISIBLE;
+            if ( ImGui::Checkbox("##visible", &v) ) {
                 layer::layer_toggle_visibility(layer);
                 input->flags |= (i32)MiltonInputFlags_FULL_REFRESH;
             }
 
-            ImGui::PopID();
-            ImGui::SameLine();
+            const f32 name_x = p.x + ui_scale*4 + box + ui_scale*6;
+            ImGui::SetCursorScreenPos(ImVec2(name_x, p.y));
+            const f32 name_w = p.x + row_w - name_x;
 
-            // Draw the layers list. If in renaming mode, draw the layer that's being renamed as an InputText.
-            // Else just draw them as a list of Selectables.
-            if ( !ImGui::IsWindowFocused() ) {
-                is_renaming = false;
-            }
-
-            if ( is_renaming ) {
-                if ( layer->id == layer_renaming_idx ) {
-                    if ( focus_rename_field ) {
-                        ImGui::SetKeyboardFocusHere(0);
-                        focus_rename_field = false;
-                    }
-                    if ( ImGui::InputText("##rename",
-                                          milton->canvas->working_layer->name,
-                                          13,
-                                          //MAX_LAYER_NAME_LEN,
-                                          ImGuiInputTextFlags_EnterReturnsTrue
-                                          //,ImGuiInputTextFlags flags = 0, ImGuiTextEditCallback callback = NULL, void* user_data = NULL
-                                         )) {
-                        is_renaming = false;
-                    }
+            if ( is_renaming && layer->id == layer_renaming_idx ) {
+                ImGui::SetCursorScreenPos(ImVec2(name_x, p.y + (row_h - box)*0.5f));
+                if ( focus_rename_field ) {
+                    ImGui::SetKeyboardFocusHere(0);
+                    focus_rename_field = false;
                 }
-                else {
-                    if ( ImGui::Selectable(layer->name,
-                                           milton->canvas->working_layer == layer,
-                                           ImGuiSelectableFlags_AllowDoubleClick) ) {
-                        if ( ImGui::IsMouseDoubleClicked(0) ) {
-                            layer_renaming_idx = layer->id;
-                            focus_rename_field = true;
-                        }
-                        is_renaming = false;
-                        milton_set_working_layer(milton, layer);
-                    }
+                ImGui::PushItemWidth(name_w);
+                if ( ImGui::InputText("##rename", layer->name, 13, ImGuiInputTextFlags_EnterReturnsTrue) ) {
+                    is_renaming = false;
                 }
+                ImGui::PopItemWidth();
             }
             else {
-                if ( ImGui::Selectable(layer->name,
+                if ( ImGui::Selectable("##row",
                                        milton->canvas->working_layer == layer,
-                                       ImGuiSelectableFlags_AllowDoubleClick) ) {
+                                       ImGuiSelectableFlags_AllowDoubleClick,
+                                       ImVec2(name_w, row_h)) ) {
                     if ( ImGui::IsMouseDoubleClicked(0) ) {
                         layer_renaming_idx = layer->id;
                         is_renaming = true;
                         focus_rename_field = true;
                     }
+                    else {
+                        is_renaming = false;
+                    }
                     milton_set_working_layer(milton, layer);
                 }
+                if ( ImGui::BeginDragDropSource() ) {
+                    ImGui::SetDragDropPayload("MILTON_LAYER", &layer, sizeof(Layer*));
+                    ImGui::Text("%s", layer->name);
+                    ImGui::EndDragDropSource();
+                }
+                if ( ImGui::BeginDragDropTarget() ) {
+                    if ( const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MILTON_LAYER") ) {
+                        drag_src = *(Layer**)payload->Data;
+                        drag_dst = layer;
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+                ImGui::GetWindowDrawList()->AddText(
+                    ImVec2(name_x + ui_scale*4, p.y + (row_h - ImGui::GetFontSize())*0.5f),
+                    ImGui::GetColorU32(ImGuiCol_Text), layer->name);
             }
 
+            ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + row_h + ui_scale*2));
+            ImGui::PopID();
             layer = layer->prev;
         }
         ImGui::EndChild();
-        ImGui::SameLine();
 
-        ImGui::BeginGroup();
-        ImGui::BeginChild("item view", ImVec2(0, 25));
-        if ( ImGui::Button(loc(TXT_new_layer)) ) {
-            milton_new_layer(milton);
-        }
-        ImGui::SameLine();
-
-
-        ImGui::Separator();
-        ImGui::EndChild();
-        ImGui::BeginChild("buttons");
-
-        ImGui::Text(loc(TXT_move));
-
-        Layer* a = NULL;
-        Layer* b = NULL;
-        if ( ImGui::Button(loc(TXT_up)) ) {
-            b = milton->canvas->working_layer;
-            a = b->next;
-        }
-        ImGui::SameLine();
-        if ( ImGui::Button(loc(TXT_down)) ) {
-            a = milton->canvas->working_layer;
-            b = a->prev;
-        }
-
-
-        if ( a && b ) {
-            // n <-> a <-> b <-> p
-            // n <-> b <-> a <-> p
-            Layer* n = a->next;
-            Layer* p = b->prev;
-            b->next = n;
-            if ( n ) n->prev = b;
-            a->prev = p;
-            if ( p ) p->next = a;
-
-            a->next = b;
-            b->prev = a;
-
-            // Make sure root is first
-            while ( milton->canvas->root_layer->prev ) {
-                milton->canvas->root_layer = milton->canvas->root_layer->prev;
-            }
+        if ( drag_src && drag_dst && drag_src != drag_dst ) {
+            layer_reorder(milton->canvas, drag_src, drag_dst);
             input->flags |= (i32)MiltonInputFlags_FULL_REFRESH;
         }
 
-        if ( milton->canvas->working_layer->next
-             || milton->canvas->working_layer->prev ) {
-            static bool deleting = false;
-            if ( deleting == false ) {
-                if ( ImGui::Button(loc(TXT_delete)) ) {
-                    deleting = true;
-                }
+        // Bottom bar: new / delete.
+        const bool can_delete = milton->canvas->working_layer->next || milton->canvas->working_layer->prev;
+        if ( !can_delete ) { deleting = false; }
+        if ( deleting ) {
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("%s", loc(TXT_are_you_sure));
+            ImGui::SameLine();
+            if ( ImGui::Button(loc(TXT_yes)) ) {
+                milton_delete_working_layer(milton);
+                input->flags |= MiltonInputFlags_FULL_REFRESH;
+                deleting = false;
             }
-            else if ( deleting ) {
-                ImGui::Text(loc(TXT_are_you_sure));
-                ImGui::Text(loc(TXT_cant_be_undone));
-                if ( ImGui::Button(loc(TXT_yes)) ) {
-                    milton_delete_working_layer(milton);
-                    input->flags |= MiltonInputFlags_FULL_REFRESH;
-                    deleting = false;
-                }
-                ImGui::SameLine();
-                if ( ImGui::Button(loc(TXT_no)) ) {
-                    deleting = false;
-                }
+            if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip("%s", loc(TXT_cant_be_undone)); }
+            ImGui::SameLine();
+            if ( ImGui::Button(loc(TXT_no)) ) {
+                deleting = false;
             }
         }
-        static b32 show_effects = false;
-        {
-            // ImGui::GetWindow(Pos|Size) works in here because we are inside Begin()/End() calls.
-            {
-                ImGui::Text(loc(TXT_opacity));
-                f32 alpha = canvas->working_layer->alpha;
-                if ( ImGui::SliderFloat("##opacity", &alpha, 0.0f, 1.0f) ) {
-                    // Used the slider. Ask if it's OK to convert the binary format.
-                    if ( milton->persist->mlt_binary_version < 3 ) {
-                        milton_log("Modified milton file from %d to 3\n", milton->persist->mlt_binary_version);
-                        milton->persist->mlt_binary_version = 3;
-                    }
-                    input->flags |= (i32)MiltonInputFlags_FULL_REFRESH;
-
-                    alpha = clamp(alpha, 0.0f, 1.0f);
-
-                    canvas->working_layer->alpha = alpha;
-                }
-
-                static b32 selecting = false;
-
-                ImGui::Separator();
-
-                if ( ImGui::Button(loc(TXT_blur)) ) {
-                    LayerEffect* e = arena_alloc_elem(&milton->canvas_arena, LayerEffect);
-                    e->next = milton->canvas->working_layer->effects;
-                    milton->canvas->working_layer->effects = e;
-                    e->enabled = true;
-                    e->blur.original_scale = milton->view->scale;
-                    e->blur.kernel_size = 10;
-                    input->flags |= (i32)MiltonInputFlags_FULL_REFRESH;
-                }
-
-                LayerEffect* prev = NULL;
-                int effect_id = 1;
-                for ( LayerEffect* e = milton->canvas->working_layer->effects; e != NULL; e = e->next ) {
-                    ImGui::PushID(effect_id);
-                    static bool v = 0;
-                    if ( ImGui::Checkbox(loc(TXT_enabled), (bool*)&e->enabled) ) {
-                        input->flags |= MiltonInputFlags_FULL_REFRESH;
-                    }
-                    if ( ImGui::SliderInt(loc(TXT_level), &e->blur.kernel_size, 2, 100, 0) ) {
-                        if (e->blur.kernel_size % 2 == 0) {
-                            --e->blur.kernel_size;
-                        }
-                        input->flags |= MiltonInputFlags_FULL_REFRESH;
-                    }
-                    {
-                        if (ImGui::Button(loc(TXT_delete_blur))) {
-                            if (prev) {
-                                prev->next = e->next;
-                            } else {  // Was the first.
-                                milton->canvas->working_layer->effects = e->next;
-                            }
-                            input->flags |= (i32)MiltonInputFlags_FULL_REFRESH;
-                        }
-                    }
-                    ImGui::PopID();
-                    prev = e;
-                    ImGui::Separator();
-                    effect_id++;
-                }
-                // ImGui::Slider
+        else {
+            const f32 bw = ImGui::GetFrameHeight() * 1.5f;
+            const ImGuiStyle& st = ImGui::GetStyle();
+            ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 2*bw - st.ItemSpacing.x - st.WindowPadding.x);
+            if ( ImGui::Button("+", ImVec2(bw, 0)) ) {
+                milton_new_layer(milton);
             }
+            if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip("%s", loc(TXT_new_layer)); }
+            ImGui::SameLine();
+            if ( !can_delete ) { ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.4f); }
+            if ( ImGui::Button("-", ImVec2(bw, 0)) && can_delete ) {
+                deleting = true;
+            }
+            if ( !can_delete ) { ImGui::PopStyleVar(); }
+            if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip("%s", loc(TXT_delete)); }
         }
-        ImGui::EndChild();
-        ImGui::EndGroup();
-
-        // Remember the current window layout for the next time the program runs.
-        ImVec2 pos  = ImGui::GetWindowPos();
-        ImVec2 size = ImGui::GetWindowSize();
-        prefs->layer_window_left   = pos.x;
-        prefs->layer_window_top    = pos.y;
-        prefs->layer_window_width  = size.x;
-        prefs->layer_window_height = size.y;
-
     } ImGui::End();
 }
-
 
 static char
 hotkey_sanitize_char(char c)
@@ -793,6 +857,27 @@ gui_menu(MiltonInput* input, PlatformState* platform, Milton* milton, b32& show_
 
             if ( ImGui::BeginMenu(msg, /*bool enabled = */false) ) {
                 ImGui::EndMenu();
+            }
+            // Canvas rotation and flip.
+            {
+                CanvasView* view = milton->view;
+                i32 angle = (i32)roundf(view->angle / PI * 180.0f) % 360;
+                if ( angle < 0 ) { angle += 360; }
+                ImGui::AlignTextToFramePadding();
+                ImGui::Text("%s", loc(TXT_rotation));
+                ImGui::PushItemWidth(gui->scale * 44);
+                if ( ImGui::InputInt("##rotation", &angle, 0, 0,
+                                     ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CharsDecimal) ) {
+                    view->angle = (f32)angle / 180.0f * PI;
+                    milton_set_zoom_at_screen_center(milton);
+                }
+                ImGui::PopItemWidth();
+                if ( ImGui::Button("Reset") ) {
+                    milton_reset_rotation(milton);
+                }
+                if ( ImGui::Button("Flip") ) {
+                    milton_flip_canvas_horizontal(milton);
+                }
             }
             ImGui::EndMainMenuBar();
         }
@@ -1441,7 +1526,7 @@ gui_picker_from_rgb(ColorPicker* picker, v3f rgb)
 static void
 update_button_bounds(ColorPicker* picker, f32 ui_scale)
 {
-    i32 bounds_radius_px = ui_scale*BOUNDS_RADIUS_PX;
+    i32 bounds_radius_px = picker->bounds_radius_px;
 
     i32 spacing = 4*ui_scale;
     i32 num_buttons = NUM_BUTTONS;
@@ -1743,25 +1828,16 @@ void
 gui_init(Arena* root_arena, MiltonGui* gui, f32 ui_scale)
 {
     gui->scale = ui_scale;
-    i32 bounds_radius_px = ui_scale*BOUNDS_RADIUS_PX;
-    f32 wheel_half_width = ui_scale*12;
-    gui->picker.center = v2i{ bounds_radius_px + int(ui_scale*20), bounds_radius_px + (int)(ui_scale*30) };
-    gui->picker.bounds_radius_px = bounds_radius_px;
-    gui->picker.wheel_half_width = wheel_half_width;
-    gui->picker.wheel_radius = (f32)bounds_radius_px - ui_scale*5.0f - wheel_half_width;
+    gui->panel_width = ui_scale*240;
+    gui->layers_height = 0;
+    gui->panel_screen_w = (i32)gui->panel_width;
     gui->picker.data.hsv = v3f{ 0.0f, 1.0f, 0.7f };
-    Rect bounds;
-    bounds.left = gui->picker.center.x - bounds_radius_px;
-    bounds.right = gui->picker.center.x + bounds_radius_px;
-    bounds.top = gui->picker.center.y - bounds_radius_px;
-    bounds.bottom = gui->picker.center.y + bounds_radius_px;
-    gui->picker.bounds = bounds;
-    gui->picker.pixels = arena_alloc_array(root_arena, (4 * bounds_radius_px * bounds_radius_px), u32);
+    // The pixels buffer is not used for rendering. Size it for the largest panel.
+    i32 max_radius = (i32)(ui_scale*GUI_PANEL_MAX_WIDTH/2);
+    gui->picker.pixels = arena_alloc_array(root_arena, (4 * max_radius * max_radius), u32);
     gui->visible = true;
     gui->picker.color_buttons = arena_alloc_elem(root_arena, ColorButton);
     gui->original_settings = arena_alloc_elem(root_arena, MiltonSettings);
-
-    picker_init(&gui->picker);
 
     i32 num_buttons = NUM_BUTTONS;
     auto* cur_button = gui->picker.color_buttons;
@@ -1769,7 +1845,8 @@ gui_init(Arena* root_arena, MiltonGui* gui, f32 ui_scale)
         cur_button->next = arena_alloc_elem(root_arena, ColorButton);
         cur_button = cur_button->next;
     }
-    update_button_bounds(&gui->picker, gui->scale);
+    gui_anchor_picker_top_right(gui, gui->panel_screen_w);
+    picker_init(&gui->picker);
 
     gui->preview_pos      = v2i{-1, -1};
     gui->preview_pos_prev = v2i{-1, -1};
@@ -1778,28 +1855,35 @@ gui_init(Arena* root_arena, MiltonGui* gui, f32 ui_scale)
     exporter_init(&gui->exporter);
 }
 
-// Anchors the picker (and its color buttons) to the top right corner.
+// Lays out the picker (and its color buttons) so that it spans the panel width at the top right.
 void
 gui_anchor_picker_top_right(MiltonGui* gui, i32 screen_width)
 {
     ColorPicker* picker = &gui->picker;
     f32 ui_scale = gui->scale;
-    i32 r = picker->bounds_radius_px;
-    v2i new_center = { screen_width - r - (i32)(ui_scale*20), r + (i32)(ui_scale*30) };
-    if ( new_center.x < r ) { new_center.x = r; }
-    v2f delta = v2f{ (f32)(new_center.x - picker->center.x), (f32)(new_center.y - picker->center.y) };
 
-    picker->data.a = picker->data.a + delta;
-    picker->data.b = picker->data.b + delta;
-    picker->data.c = picker->data.c + delta;
+    gui->panel_screen_w = screen_width;
+    f32 min_width = ui_scale*GUI_PANEL_MIN_WIDTH;
+    f32 max_width = min(ui_scale*GUI_PANEL_MAX_WIDTH, (f32)(screen_width*0.6f));
+    gui->panel_width = clamp(gui->panel_width, min_width, max(max_width, min_width));
+
+    i32 r = (i32)(gui->panel_width / 2);
+    if ( r > screen_width/2 ) { r = screen_width/2; }
+    v2i new_center = { screen_width - r, r + (i32)(ui_scale*30) };
+
+    picker->bounds_radius_px = r;
+    picker->wheel_half_width = r * 0.15f;
+    picker->wheel_radius = r - r*0.0625f - picker->wheel_half_width;
     picker->center = new_center;
     picker->bounds.left   = new_center.x - r;
     picker->bounds.right  = new_center.x + r;
     picker->bounds.top    = new_center.y - r;
     picker->bounds.bottom = new_center.y + r;
+
+    // The triangle follows the wheel and the new size.
+    picker_update_points(picker, picker->data.hsv.h * kPi / 180.0f);
     update_button_bounds(picker, ui_scale);
-}
-// When a selected color is used in a stroke, call this to update the color
+}// When a selected color is used in a stroke, call this to update the color
 // button list.
 b32
 gui_mark_color_used(MiltonGui* gui)

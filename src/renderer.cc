@@ -255,6 +255,8 @@ gpu_update_picker(RenderBackend* r, ColorPicker* picker)
     gl::set_uniform_vec2(r->picker_program, "u_pointb", 1, b.d);
     gl::set_uniform_vec2(r->picker_program, "u_pointc", 1, c.d);
     gl::set_uniform_f(r->picker_program, "u_angle", picker->data.hsv.h);
+    gl::set_uniform_f(r->picker_program, "u_wheel_radius", picker->wheel_radius / picker->bounds_radius_px);
+    gl::set_uniform_f(r->picker_program, "u_wheel_half_width", picker->wheel_half_width / picker->bounds_radius_px);
 
     v3f hsv = picker->data.hsv;
     gl::set_uniform_vec3(r->picker_program, "u_color", 1, hsv_to_rgb(hsv).d);

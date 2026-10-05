@@ -883,12 +883,12 @@ platform_settings_load(PlatformSettings* prefs)
 
             if (prefs_size <= sizeof(*prefs)) {
                 loaded = fread(prefs, prefs_size, 1, fd);
-                if ( prefs->layout_version != 2 ) {
+                if ( prefs->layout_version != 3 ) {
                     prefs->brush_window_left = prefs->brush_window_top = 0;
                     prefs->brush_window_width = prefs->brush_window_height = 0;
                     prefs->layer_window_left = prefs->layer_window_top = 0;
                     prefs->layer_window_width = prefs->layer_window_height = 0;
-                    prefs->layout_version = 2;
+                    prefs->layout_version = 3;
                 }
             }
         }
@@ -911,7 +911,7 @@ platform_settings_save(PlatformSettings* prefs)
     platform_fname_at_config(fname, MAX_PATH);
     FILE* fd = platform_fopen(fname, TO_PATH_STR("wb"));
     if ( fd && !ferror(fd) ) {
-        prefs->layout_version = 2;
+        prefs->layout_version = 3;
         u16 prefs_size = sizeof(PlatformSettings);
         fwrite(&prefs_size, sizeof(u16), 1, fd);
         fwrite(prefs, sizeof(*prefs), 1, fd);
