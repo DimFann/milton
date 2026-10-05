@@ -1317,6 +1317,37 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
         (void)display;
     }
 
+    // Zoom gizmo: an open box at the screen center. Neutral at the start of the drag; shrinks (red dot)
+    // as you zoom out, down to a minimum, and grows (green dot) as you zoom in.
+    if ( milton->current_mode == MiltonMode::DRAG_ZOOM ) {
+        CanvasView* view = milton->view;
+        const ImVec2 c = ImVec2((f32)view->screen_size.w * 0.5f, (f32)view->screen_size.h * 0.5f);
+        double ratio = (double)milton->drag_zoom->start_size / (double)max((i64)1, (i64)view->scale);
+        ratio = clamp(ratio, 0.2, 1000.0);
+        const f32 half_w = ui_scale * 70 * (f32)ratio;
+        const f32 half_h = ui_scale * 28 * (f32)ratio;
+        const f32 th = ui_scale * 3;
+
+        // Colour: red when smaller than neutral, blue when larger, white at neutral.
+        f32 t = clamp((f32)(log(ratio) / log(4.0)), -1.0f, 1.0f);
+        ImVec4 cf = t < 0 ? ImVec4(1.0f, 1.0f + t * 0.8f, 1.0f + t * 0.8f, 1) : ImVec4(1.0f - t * 0.8f, 1.0f - t * 0.5f, 1.0f, 1);
+        if ( t < 0 ) { cf.x = 0.9f; } else if ( t > 0 ) { cf.z = 0.95f; }
+        const ImU32 dot = ImGui::ColorConvertFloat4ToU32(cf);
+        const ImU32 dark = IM_COL32(0, 0, 0, 200);
+        const ImU32 light = IM_COL32(255, 255, 255, 230);
+
+        ImDrawList* dl = ImGui::GetOverlayDrawList();
+        ImVec2 tl = ImVec2(c.x - half_w, c.y - half_h);
+        ImVec2 tr = ImVec2(c.x + half_w, c.y - half_h);
+        ImVec2 bl = ImVec2(c.x - half_w, c.y + half_h);
+        ImVec2 br = ImVec2(c.x + half_w, c.y + half_h);
+        ImVec2 pts[4] = { tl, bl, br, tr };
+        dl->AddPolyline(pts, 4, dark, false, th + ui_scale * 2);
+        dl->AddPolyline(pts, 4, light, false, th);
+        dl->AddCircleFilled(c, ui_scale * 6, dark, 16);
+        dl->AddCircleFilled(c, ui_scale * 4.5f, dot, 16);
+    }
+
     // GUI Windows ----
 
     b32 should_show_windows = milton->current_mode != MiltonMode::EXPORTING
@@ -1325,7 +1356,9 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
     if ( gui->visible && should_show_windows ) {
         // While rotating (Alt held) keep showing the panels of the mode we came from.
         MiltonMode real_mode = milton->current_mode;
-        if ( (real_mode == MiltonMode::TRANSFORM || real_mode == MiltonMode::EYEDROPPER) && milton->n_mode_stack > 0 ) {
+        if ( (real_mode == MiltonMode::TRANSFORM || real_mode == MiltonMode::EYEDROPPER
+              || real_mode == MiltonMode::DRAG_ZOOM || real_mode == MiltonMode::DRAG_BRUSH_SIZE
+              || real_mode == MiltonMode::PEEK_OUT) && milton->n_mode_stack > 0 ) {
             milton->current_mode = milton->mode_stack[milton->n_mode_stack - 1];
         }
         i32 brush_window_height = gui_brush_window(input, platform, milton, prefs, reset_gui);
