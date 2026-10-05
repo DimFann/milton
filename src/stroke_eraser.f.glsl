@@ -5,10 +5,22 @@ in vec3 v_pointa;
 in vec3 v_pointb;
 
 uniform sampler2D u_canvas;
+uniform sampler2D u_info;
+uniform int u_from_info;
 
 void
 main()
 {
+    if ( u_from_info != 0 ) {
+        // Opacity accumulated by the stroke_info pass, so a re-pass at higher pressure erases more.
+        vec2 icoord = gl_FragCoord.xy / u_screen_size;
+        vec4 info = texture(u_info, icoord);
+        float a = max(info.g, min(info.a, info.r));
+        if ( a <= 0.0 ) { discard; }
+        out_color = texture(u_canvas, icoord) * a;
+        return;
+    }
+
     vec2 screen_point = vec2(gl_FragCoord.x, u_screen_size.y - gl_FragCoord.y);
 
     vec2 canvas_point = raster_to_canvas_gl(screen_point);

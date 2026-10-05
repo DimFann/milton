@@ -588,6 +588,13 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
             }
         }
 
+        if ( milton->working_stroke.flags & StrokeFlag_ERASER ) {
+            ImGui::Checkbox(loc(TXT_opacity_pressure), &milton->eraser_pressure_opacity);
+            if ( milton->eraser_pressure_opacity ) {
+                ImGui::SliderFloat(loc(TXT_minimum), &milton->brushes[BrushEnum_ERASER].pressure_opacity_min, 0.0f, 1.0f);
+            }
+        }
+
         ImGui::CheckboxFlags(loc(TXT_size_relative_to_canvas),
                              reinterpret_cast<u32*>(&milton->working_stroke.flags),
                              StrokeFlag_RELATIVE_TO_CANVAS);

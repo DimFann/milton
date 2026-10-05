@@ -1642,9 +1642,26 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     // Mode tick
     if (milton->current_mode == MiltonMode::ERASER) {
         milton->working_stroke.flags |= StrokeFlag_ERASER;
+        if ( !milton->flags_in_eraser_mode ) {
+            milton->pen_pressure_opacity_stash = (milton->working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY) != 0;
+            milton->flags_in_eraser_mode = true;
+        }
+        if ( milton->eraser_pressure_opacity ) {
+            milton->working_stroke.flags |= StrokeFlag_PRESSURE_TO_OPACITY;
+        } else {
+            milton->working_stroke.flags &= ~StrokeFlag_PRESSURE_TO_OPACITY;
+        }
     }
     else {
         milton->working_stroke.flags &= ~StrokeFlag_ERASER;
+        if ( milton->flags_in_eraser_mode ) {
+            if ( milton->pen_pressure_opacity_stash ) {
+                milton->working_stroke.flags |= StrokeFlag_PRESSURE_TO_OPACITY;
+            } else {
+                milton->working_stroke.flags &= ~StrokeFlag_PRESSURE_TO_OPACITY;
+            }
+            milton->flags_in_eraser_mode = false;
+        }
     }
     if ( current_mode_is_for_drawing(milton) &&
         (input->input_count > 0 || end_stroke) ) {

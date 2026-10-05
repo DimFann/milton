@@ -211,6 +211,10 @@ struct Milton
     i32         brush_ref_size[BrushEnum_COUNT];
 
     Stroke      working_stroke;
+    // The pressure-to-opacity flag is per tool; the eraser's lives here while the pen's is stashed.
+    bool        eraser_pressure_opacity;
+    bool        pen_pressure_opacity_stash;
+    bool        flags_in_eraser_mode;
     // ----  // gui->picker.info also stored
 
     // Read only

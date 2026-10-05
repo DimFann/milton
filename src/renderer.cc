@@ -516,6 +516,7 @@ gpu_init(RenderBackend* r, CanvasView* view, ColorPicker* picker)
         gl::link_program(r->stroke_eraser_program, objs, array_count(objs));
 
         gl::set_uniform_i(r->stroke_eraser_program, "u_canvas", 0);
+        gl::set_uniform_i(r->stroke_eraser_program, "u_info", 1);
     }
     // Stroke info program
     {
@@ -1565,8 +1566,38 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
 
             if ( re->count > 0 ) {
                 if (re->flags & RenderElementFlags_ERASER) {
-                    glBindTexture(texture_target, r->eraser_texture);
-                    stroke_pass(re, r->stroke_eraser_program);
+                    if ( re->flags & RenderElementFlags_PRESSURE_TO_OPACITY ) {
+                        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                                  texture_target, r->stroke_info_texture, 0);
+                        glDisable(GL_DEPTH_TEST);
+                        glDisable(GL_BLEND);
+                        stroke_pass(re, r->stroke_clear_program);
+
+                        glEnable(GL_BLEND);
+                        glBlendEquationSeparate(GL_MAX, GL_FUNC_ADD);
+                        glBlendFunc(GL_ONE, GL_ONE);
+                        gl::set_uniform_i(r->stroke_info_program, "u_use_pressure", 1);
+                        gl::set_uniform_i(r->stroke_info_program, "u_use_distance", 0);
+                        gl::set_uniform_f(r->stroke_info_program, "u_opacity_min", re->min_opacity);
+                        gl::set_uniform_f(r->stroke_info_program, "u_hardness", re->hardness);
+                        stroke_pass(re, r->stroke_info_program);
+
+                        glBlendEquation(GL_FUNC_ADD);
+                        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+                        glEnable(GL_DEPTH_TEST);
+                        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                                  texture_target, layer_texture, 0);
+                        glActiveTexture(GL_TEXTURE1);
+                        glBindTexture(texture_target, r->stroke_info_texture);
+                        glActiveTexture(GL_TEXTURE0);
+                        glBindTexture(texture_target, r->eraser_texture);
+                        gl::set_uniform_i(r->stroke_eraser_program, "u_from_info", 1);
+                        stroke_pass(re, r->stroke_eraser_program);
+                        gl::set_uniform_i(r->stroke_eraser_program, "u_from_info", 0);
+                    } else {
+                        glBindTexture(texture_target, r->eraser_texture);
+                        stroke_pass(re, r->stroke_eraser_program);
+                    }
                 }
                 else if ( (re->flags & (RenderElementFlags_PRESSURE_TO_OPACITY | RenderElementFlags_DISTANCE_TO_OPACITY)) ) {
                     glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
