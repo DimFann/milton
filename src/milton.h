@@ -117,6 +117,7 @@ struct MiltonSettings
     char  rotate_key;           // Hold + LMB drag rotates the canvas. Lowercase ASCII.
     u8    unbound_prims_migrated;  // Rectangle/grid hotkeys were unbound by default in a later version.
     float hardness_min_percent;    // Real hardness (0-100) shown as 0% on the brush hardness slider.
+    u8    light_theme;             // 0 = dark UI theme (default), 1 = light.
 };
 #pragma pack(pop)
 

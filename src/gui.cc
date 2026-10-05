@@ -567,7 +567,25 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
     char title_id[64];
     snprintf(title_id, sizeof(title_id), "%s###brush_options", title);
 
+    static bool options_collapsed = false;
     if ( ImGui::Begin(title_id, NULL, flags) ) {
+        // Clicking the title bar toggles the panel's contents.
+        {
+            ImVec2 wp = ImGui::GetWindowPos();
+            ImVec2 mp = ImGui::GetIO().MousePos;
+            f32 title_h = ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y * 2;
+            if ( ImGui::IsMouseClicked(0)
+                 && mp.x >= wp.x && mp.x < wp.x + ImGui::GetWindowWidth()
+                 && mp.y >= wp.y && mp.y < wp.y + title_h ) {
+                options_collapsed = !options_collapsed;
+            }
+        }
+        if ( options_collapsed ) {
+            window_height = (i32)ImGui::GetWindowSize().y;
+            ImGui::End();
+            ImGui::PopStyleVar(3);
+            return window_height;
+        }
         ImGui::PushItemWidth(s*110);
 
         if ( milton->current_mode == MiltonMode::PEN || mode_is_for_primitives(milton->current_mode) ) {
@@ -996,6 +1014,36 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
     static auto color_text_selected  = ImVec4{ 0.509804f, 0.627451f, 0.823529f,1};
     static auto color_header_hovered = color_buttons;
 
+    if ( !milton->settings->light_theme ) {
+        // VS Code Dark+ inspired palette.
+        color_window_background = ImVec4{ 0x25/255.f, 0x25/255.f, 0x26/255.f, 1 };
+        color_title_bg          = ImVec4{ 0x1e/255.f, 0x1e/255.f, 0x1e/255.f, 1 };
+        color_title_fg          = ImVec4{ 0x33/255.f, 0x33/255.f, 0x37/255.f, 1 };
+        color_buttons           = ImVec4{ 0x3c/255.f, 0x3c/255.f, 0x3c/255.f, 1 };
+        color_buttons_hovered   = ImVec4{ 0x50/255.f, 0x50/255.f, 0x52/255.f, 1 };
+        color_buttons_active    = ImVec4{ 0x0e/255.f, 0x63/255.f, 0x9c/255.f, 1 };
+        color_menu_bg           = color_title_bg;
+        color_text              = ImVec4{ 0xcc/255.f, 0xcc/255.f, 0xcc/255.f, 1 };
+        color_slider            = ImVec4{ 0x00/255.f, 0x7a/255.f, 0xcc/255.f, 1 };
+        frame_background        = ImVec4{ 0x3c/255.f, 0x3c/255.f, 0x3c/255.f, 1 };
+        color_text_selected     = ImVec4{ 0x26/255.f, 0x4f/255.f, 0x78/255.f, 1 };
+        color_header_hovered    = color_buttons_hovered;
+    }
+    else {
+        color_window_background = ImVec4{.929f, .949f, .957f, 1};
+        color_title_bg          = color_window_background;
+        color_title_fg          = ImVec4{151/255.f, 184/255.f, 210/255.f, 1};
+        color_buttons           = ImVec4{.686f, .796f, 1.0f, 1};
+        color_buttons_active    = ImVec4{.886f, .796f, 1.0f, 1};
+        color_buttons_hovered   = ImVec4{.706f, .816f, 1.0f, 1};
+        color_menu_bg           = ImVec4{.784f, .392f, .784f, 1};
+        color_text              = ImVec4{.2f,.2f,.2f,1};
+        color_slider            = ImVec4{ 148/255.f, 182/255.f, 182/255.f,1};
+        frame_background        = ImVec4{ 0.862745f, 0.862745f, 0.862745f,1};
+        color_text_selected     = ImVec4{ 0.509804f, 0.627451f, 0.823529f,1};
+        color_header_hovered    = color_buttons;
+    }
+
     // Helper Imgui code to select color scheme
 #if 0
     ImGui::ColorEdit3("Window Background", (float*)&color_window_background);
@@ -1085,14 +1133,13 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
 
     // GUI Windows ----
 
-    b32 should_show_windows = milton->current_mode != MiltonMode::EYEDROPPER
-                                && milton->current_mode != MiltonMode::EXPORTING
+    b32 should_show_windows = milton->current_mode != MiltonMode::EXPORTING
                                 && milton->current_mode != MiltonMode::HISTORY;
 
     if ( gui->visible && should_show_windows ) {
         // While rotating (Alt held) keep showing the panels of the mode we came from.
         MiltonMode real_mode = milton->current_mode;
-        if ( real_mode == MiltonMode::TRANSFORM && milton->n_mode_stack > 0 ) {
+        if ( (real_mode == MiltonMode::TRANSFORM || real_mode == MiltonMode::EYEDROPPER) && milton->n_mode_stack > 0 ) {
             milton->current_mode = milton->mode_stack[milton->n_mode_stack - 1];
         }
         i32 brush_window_height = gui_brush_window(input, platform, milton, prefs, reset_gui);
@@ -1235,6 +1282,14 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
                 
                 ImGui::Separator();
                 ImGui::BeginChild("ScrollRegion");
+
+                {
+                    bool dark = !milton->settings->light_theme;
+                    if ( ImGui::Checkbox("Dark mode", &dark) ) {
+                        milton->settings->light_theme = dark ? 0 : 1;
+                    }
+                    ImGui::Separator();
+                }
 
                 ImGui::Text(loc(TXT_default_background_color));
 

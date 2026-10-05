@@ -208,7 +208,8 @@ get_gui_visibility_index(Milton* milton)
 {
     size_t idx = Milton::GuiVisibleCategory_OTHER;
     // Rotating with Alt is a temporary mode; it keeps the drawing UI.
-    if (current_mode_is_for_drawing(milton) || milton->current_mode == MiltonMode::TRANSFORM) {
+    if (current_mode_is_for_drawing(milton) || milton->current_mode == MiltonMode::TRANSFORM
+        || milton->current_mode == MiltonMode::EYEDROPPER) {
         idx = Milton::GuiVisibleCategory_DRAWING;
     }
     else if (milton->current_mode == MiltonMode::EXPORTING) {
@@ -687,6 +688,7 @@ settings_init(MiltonSettings* s)
     s->zoom_drag_speed = 0.005f;
     s->rotate_key = 'w';
     s->hardness_min_percent = 75.0f;
+    s->light_theme = 0;
 }
 
 int milton_save_thread(void* state_);  // forward
@@ -1892,6 +1894,9 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     }
     if ( selection_cursor(milton) != 0 ) {
         brush_outline_should_draw = false;
+    }
+    if ( (SDL_GetModState() & KMOD_ALT) && current_mode_is_for_drawing(milton) ) {
+        brush_outline_should_draw = false;  // Alt primes the eyedropper
     }
 
     if ( !(milton->gui->flags & MiltonGuiFlags_SHOWING_PREVIEW) ) {

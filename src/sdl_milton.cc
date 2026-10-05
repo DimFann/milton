@@ -184,6 +184,28 @@ shortcut_handle_key(Milton* milton, PlatformState* platform, SDL_Event* event, M
     }
 }
 
+#if defined(_WIN32)
+// Dark or light native title bar (Windows 10 1809+/11). Silently does nothing if unsupported.
+static void
+window_set_dark_titlebar(SDL_Window* window, bool dark)
+{
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if ( !SDL_GetWindowWMInfo(window, &info) ) { return; }
+    HMODULE dwm = LoadLibraryA("dwmapi.dll");
+    if ( !dwm ) { return; }
+    typedef HRESULT (WINAPI *SetAttrFn)(HWND, DWORD, LPCVOID, DWORD);
+    SetAttrFn fn = (SetAttrFn)GetProcAddress(dwm, "DwmSetWindowAttribute");
+    if ( fn ) {
+        BOOL v = dark ? TRUE : FALSE;
+        if ( FAILED(fn(info.info.win.window, 20, &v, sizeof(v))) ) {
+            fn(info.info.win.window, 19, &v, sizeof(v));
+        }
+    }
+    FreeLibrary(dwm);
+}
+#endif
+
 void
 panning_update(PlatformState* platform)
 {
@@ -285,7 +307,22 @@ sdl_event_loop(Milton* milton, PlatformState* platform)
                                            && bit_touch
                                            && !( bit_upper || bit_lower );
 
-                    if ( taking_pen_input ) {
+                    b32 pen_alt_pick = false;
+                    if ( bit_touch && !bit_touch_old && (SDL_GetModState() & KMOD_ALT)
+                         && current_mode_is_for_drawing(milton) ) {
+                        pen_alt_pick = true;
+                        milton_input.mode_to_set = MiltonMode::EYEDROPPER;
+                        if ( EasyTab->NumPackets > 0 ) {
+                            v2i p = { EasyTab->PosX[EasyTab->NumPackets-1], EasyTab->PosY[EasyTab->NumPackets-1] };
+                            platform_point_to_pixel_i(platform, &p);
+                            platform->pointer = p;
+                        }
+                    }
+
+                    if ( pen_alt_pick ) {
+                        // Eyedropper sampling uses platform->pointer; no stroke input.
+                    }
+                    else if ( taking_pen_input && milton->current_mode != MiltonMode::EYEDROPPER ) {
                         platform->is_pointer_down = true;
 
                         for ( int pi = 0; pi < EasyTab->NumPackets; ++pi ) {
@@ -305,6 +342,9 @@ sdl_event_loop(Milton* milton, PlatformState* platform)
                     }
 
                     if ( !bit_touch && bit_touch_old ) {
+                        if ( milton->current_mode == MiltonMode::EYEDROPPER ) {
+                            milton_input.flags |= MiltonInputFlags_CLICKUP;
+                        }
                         pointer_up = true;  // Wacom does not seem to send button-up messages after
                                             // using stylus buttons while stroking.
                     }
@@ -346,7 +386,14 @@ sdl_event_loop(Milton* milton, PlatformState* platform)
 
                         v2i point = v2i{(int)long_point.x, (int)long_point.y};
 
-                        if ( !platform->is_panning && point.x >= 0 && point.y > 0 ) {
+                        if ( !platform->is_panning && point.x >= 0 && point.y > 0
+                             && event.button.button == SDL_BUTTON_LEFT && (keymod & KMOD_ALT)
+                             && current_mode_is_for_drawing(milton) ) {
+                            // Alt+LMB: eyedropper, sampled live until release.
+                            platform->pointer = point;
+                            milton_input.mode_to_set = MiltonMode::EYEDROPPER;
+                        }
+                        else if ( !platform->is_panning && point.x >= 0 && point.y > 0 ) {
                             milton_input.click = point;
 
                             platform->is_pointer_down = true;
@@ -812,6 +859,24 @@ milton_main(bool is_fullscreen, char* file_to_open)
             }
         }
 
+        // Alt + pen tip down starts the eyedropper (level-triggered so it doesn't depend on seeing the touch edge).
+        {
+            static b32 pen_pick_latched = false;
+            b32 touching = EasyTab != NULL && EasyTab->PenInProximity && (EasyTab->Buttons & EasyTab_Buttons_Pen_Touch);
+            b32 alt_down = (SDL_GetModState() & KMOD_ALT) != 0;
+#if defined(_WIN32)
+            alt_down = alt_down || (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+#endif
+            if ( !touching ) {
+                pen_pick_latched = false;
+            }
+            else if ( alt_down && !pen_pick_latched && current_mode_is_for_drawing(milton)
+                      && milton->current_mode != MiltonMode::EYEDROPPER ) {
+                pen_pick_latched = true;
+                milton_input.mode_to_set = MiltonMode::EYEDROPPER;
+            }
+        }
+
         // Alt+RMB hold + horizontal scrub resizes the brush. Takes priority over Alt's transform mode.
         {
             b32 want_scrub = (SDL_GetModState() & KMOD_ALT) && platform.is_right_button_down;
@@ -907,7 +972,9 @@ milton_main(bool is_fullscreen, char* file_to_open)
                         cursor_set_and_show(platform.cursor_default);
                         was_exporting = false;
                     }
-                    else if ( milton->current_mode == MiltonMode::EYEDROPPER ) {
+                    else if ( milton->current_mode == MiltonMode::EYEDROPPER
+                              || (current_mode_is_for_drawing(milton) && (SDL_GetModState() & KMOD_ALT)
+                                  && !platform.is_right_button_down) ) {
                         cursor_set_and_show(platform.cursor_crosshair);
                         platform.is_pointer_down = false;
                     }
@@ -974,6 +1041,16 @@ milton_main(bool is_fullscreen, char* file_to_open)
             input_flags |= MiltonInputFlags_IMGUI_GRABBED_INPUT;
         }
 
+#if defined(_WIN32)
+        {
+            static int applied_light = -1;
+            int want_light = milton->settings->light_theme ? 1 : 0;
+            if ( applied_light != want_light ) {
+                window_set_dark_titlebar(window, !want_light);
+                applied_light = want_light;
+            }
+        }
+#endif
         milton_imgui_tick(&milton_input, &platform, milton, &prefs);
 
         // Clear pan delta if we are zooming
