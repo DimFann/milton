@@ -1,6 +1,13 @@
 # Fork Info
-
 This fork adds some quality of life features I've been wanting for years, as well as some rendering & functionality improvements.
+
+----
+
+### Downloading
+[Releases](https://github.com/DimFann/milton/releases)
+1) Download milton_YYYYMMDD_HHmm.zip from the latest release.
+2) Extract to a folder of your choosing.
+3) Run milton.exe
 
 ### Notable additions
 * Rebindable hotkeys
