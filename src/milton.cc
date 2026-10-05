@@ -462,6 +462,13 @@ milton_stroke_input(Milton* milton, MiltonInput const* input)
         if ( input->pressures[input_i] != NO_PRESSURE_INFO ) {
             f32 pressure_min = 0.01f;
             pressure = pressure_min + input->pressures[input_i] * (1.0f - pressure_min);
+
+            // Low-pass the raw tablet pressure against the previous point of this stroke.
+            if ( ws->num_points > 0 ) {
+                const f32 pressure_smoothing = 0.35f;  // 1.0 = raw, lower = smoother
+                f32 prev = ws->pressures[ws->num_points - 1];
+                pressure = prev + pressure_smoothing * (pressure - prev);
+            }
         } else {
             pressure = 1.0f;
         }

@@ -16,7 +16,8 @@ main()
     vec2 ab = b - a;
     float len_ab = length(ab);
 
-    float t = clamp(dot((canvas_point - a)/len_ab, ab / len_ab), 0.0, 1.0);
+    float t_raw = dot((canvas_point - a)/len_ab, ab / len_ab);
+    float t = clamp(t_raw, 0.0, 1.0);
 
     vec2 stroke_point = mix(a, b, t);
 
@@ -26,9 +27,19 @@ main()
     float dist = distance(stroke_point, canvas_point);
 
     float rad = u_radius * pressure;
-    out_color.r = dist / rad;
-    out_color.a = 0.0f;
-    if (dist < rad) {
-        out_color.a = pressure;
+    if (dist >= rad) {
+        discard;
     }
+    // In the round caps, continue the pressure gradient instead of holding it flat. A flat cap
+    // stamps a disc of constant opacity over the neighboring segment, which shows as banding.
+    // The extrapolation is capped at the endpoint's pressure so it never exceeds it, which would
+    // stamp darker discs whenever pressure is changing.
+    float cap_pressure = pressure;
+    if (t_raw < 0.0) {
+        cap_pressure = clamp(mix(v_pointa.z, v_pointb.z, t_raw), 0.0, v_pointa.z);
+    } else if (t_raw > 1.0) {
+        cap_pressure = clamp(mix(v_pointa.z, v_pointb.z, t_raw), 0.0, v_pointb.z);
+    }
+    out_color.r = dist / rad;
+    out_color.a = cap_pressure;
 }

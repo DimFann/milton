@@ -1572,11 +1572,13 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                     stroke_pass(re, r->stroke_clear_program);
 
                     glEnable(GL_BLEND);
+                    // RGB: min normalized distance. A: max pressure. The shader extrapolates
+                    // pressure into the round caps so they don't stamp flat discs (banding).
                     glBlendEquationSeparate(GL_MIN, GL_MAX);
-
                     stroke_pass(re, r->stroke_info_program);
 
                     glBlendEquation(GL_FUNC_ADD);
+                    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
                     glEnable(GL_DEPTH_TEST);
                     glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
