@@ -142,6 +142,11 @@ struct RenderBackend
     // See MAX_DEPTH_VALUE
     i32 stroke_z;
 
+    // Time-sliced GPU upload. A deadline of 0 means no limit.
+    u64 cook_deadline;
+    i64 cook_pending;     // Visible strokes skipped this pass because the budget ran out.
+    i64 cook_burst_done;  // Strokes uploaded since the backlog was last empty.
+
     // TODO: Re-enable these?
     // Cached values for stroke rendering uniforms.
     // v4f current_color;
@@ -1255,6 +1260,19 @@ gpu_free_strokes(RenderBackend* r, CanvasState* canvas)
 }
 
 void
+gpu_set_cook_budget(RenderBackend* r, float seconds)
+{
+    r->cook_deadline = seconds > 0 ? perf_counter() + (u64)(seconds / perf_count_to_sec(1000000) * 1000000.0f) : 0;
+}
+
+void
+gpu_get_cook_progress(RenderBackend* r, i64* pending, i64* done)
+{
+    *pending = r->cook_pending;
+    *done = r->cook_burst_done;
+}
+
+void
 gpu_clip_strokes_and_update(Arena* arena,
                             RenderBackend* r,
                             CanvasView* view,
@@ -1270,6 +1288,8 @@ gpu_clip_strokes_and_update(Arena* arena,
     Rect screen_bounds = raster_to_canvas_bounding_rect(view, x, y, w, h, scale);
 
     reset(clip_array);
+    r->cook_pending = 0;
+    i64 cooked_this_pass = 0;
 
     if (screen_bounds.left != screen_bounds.right &&
         screen_bounds.top != screen_bounds.bottom) {
@@ -1325,6 +1345,13 @@ gpu_clip_strokes_and_update(Arena* arena,
                             // Area might be 0 if the stroke is smaller than
                             // a pixel. We don't draw it in that case.
                             if ( !stroke_outside && area!=0 ) {
+                                RenderElement* existing = (RenderElement*)s->render_handle;
+                                b32 needs_cook = existing == NULL || existing->vbo_stroke == 0;
+                                if ( needs_cook && r->cook_deadline != 0 && cooked_this_pass > 0 && perf_counter() > r->cook_deadline ) {
+                                    r->cook_pending++;
+                                    continue;
+                                }
+                                if ( needs_cook ) { cooked_this_pass++; r->cook_burst_done++; }
                                 gpu_cook_stroke(arena, r, s);
                                 push(clip_array, *get_render_element(s->render_handle));
                             }
@@ -1374,6 +1401,7 @@ gpu_clip_strokes_and_update(Arena* arena,
             p->effects = l->effects;
         }
     }
+    if ( r->cook_pending == 0 ) { r->cook_burst_done = 0; }
 }
 
 static void

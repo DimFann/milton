@@ -1268,6 +1268,79 @@ gui_menu(MiltonInput* input, PlatformState* platform, Milton* milton, b32& show_
 }
 
 
+// Progress of the time-sliced stroke upload. Strokes are uploaded a few ms per frame so the UI stays responsive.
+static void
+gui_loading_indicator(Milton* milton)
+{
+    i64 pending = 0, done = 0;
+    gpu_get_cook_progress(milton->renderer, &pending, &done);
+    if ( pending == 0 ) { return; }
+    i64 shown_burst_total = done + pending;
+    f32 ui = milton->gui->scale;
+    f32 frac = (f32)((double)done / (double)max((i64)1, shown_burst_total));
+    ImVec2 ds = ImGui::GetIO().DisplaySize;
+    ImVec2 size = ImVec2(ui * 240, ui * 38);
+    ImVec2 p0 = ImVec2((ds.x - size.x) * 0.5f, ds.y - size.y - ui * (milton->settings->show_perf_stats ? 56 : 24));
+    ImVec2 p1 = ImVec2(p0.x + size.x, p0.y + size.y);
+    ImDrawList* dl = ImGui::GetOverlayDrawList();
+    dl->AddRectFilled(p0, p1, IM_COL32(20, 20, 22, 220), ui * 6);
+    char label[96];
+    snprintf(label, sizeof(label), "Loading strokes... %d%%  (%lld left)", (int)(frac * 100), (long long)pending);
+    dl->AddText(ImVec2(p0.x + ui * 12, p0.y + ui * 6), IM_COL32(235, 235, 235, 255), label);
+    ImVec2 b0 = ImVec2(p0.x + ui * 12, p1.y - ui * 12);
+    ImVec2 b1 = ImVec2(p1.x - ui * 12, p1.y - ui * 7);
+    dl->AddRectFilled(b0, b1, IM_COL32(70, 70, 75, 255), ui * 2);
+    dl->AddRectFilled(b0, ImVec2(b0.x + (b1.x - b0.x) * frac, b1.y), IM_COL32(0, 160, 255, 255), ui * 2);
+}
+
+// Faint CPU / GPU / memory readout in the bottom centre, refreshed about once a second.
+static void
+gui_perf_stats(Milton* milton)
+{
+    if ( !milton->settings->show_perf_stats ) { return; }
+    static SystemStats stats = {};
+    static u64 last = 0;
+    u64 now = perf_counter();
+    if ( last == 0 || perf_count_to_sec(now - last) >= 1.0f ) {
+        platform_system_stats(&stats);
+        last = now;
+    }
+    char lines[4][96];
+    int n = 0;
+    if ( stats.gpu_percent >= 0 ) {
+        snprintf(lines[n++], 96, "GPU %.0f%%  (Milton %.0f%%)", stats.gpu_percent, stats.gpu_app_percent);
+    } else {
+        snprintf(lines[n++], 96, "GPU n/a");
+    }
+    if ( stats.vram_budget_mb > 0 ) {
+        snprintf(lines[n++], 96, "VRAM %.0f / %.0f MB", stats.vram_used_mb, stats.vram_budget_mb);
+    }
+    if ( stats.cpu_percent >= 0 ) {
+        snprintf(lines[n++], 96, "CPU %.0f%%", stats.cpu_percent);
+    }
+    if ( stats.ram_total_mb > 0 ) {
+        snprintf(lines[n++], 96, "RAM %.0f MB  (system %.0f / %.0f MB)", stats.ram_used_mb,
+                 stats.ram_system_used_mb, stats.ram_total_mb);
+    }
+    // One compact line at the bottom centre, on a faint backing so it reads on any canvas colour.
+    char text[400] = "";
+    for ( int i = 0; i < n; ++i ) {
+        if ( i ) { strcat(text, "   |   "); }
+        strcat(text, lines[i]);
+    }
+    f32 ui = milton->gui->scale;
+    ImVec2 ds = ImGui::GetIO().DisplaySize;
+    ImFont* font = ImGui::GetFont();
+    f32 fsize = ImGui::GetFontSize() * 0.8f;
+    ImVec2 sz = font->CalcTextSizeA(fsize, FLT_MAX, 0.0f, text);
+    f32 pad = ui * 5;
+    ImVec2 p0 = ImVec2((ds.x - sz.x) * 0.5f - pad, ds.y - sz.y - pad * 2 - ui * 4);
+    ImVec2 p1 = ImVec2(p0.x + sz.x + pad * 2, p0.y + sz.y + pad * 2);
+    ImDrawList* dl = ImGui::GetOverlayDrawList();
+    const bool light = milton->settings->light_theme != 0;
+    dl->AddRectFilled(p0, p1, light ? IM_COL32(255, 255, 255, 70) : IM_COL32(0, 0, 0, 90), ui * 4);
+    dl->AddText(font, fsize, ImVec2(p0.x + pad, p0.y + pad), light ? IM_COL32(30, 30, 30, 170) : IM_COL32(230, 230, 230, 160), text);
+}
 void
 milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, PlatformSettings* prefs)
 {
@@ -1627,6 +1700,10 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
                     if ( scrub < 0 || scrub > 2 ) { scrub = 2; }
                     if ( ImGui::Combo("Brush size scrub", &scrub, scrub_items, 3) ) {
                         milton->settings->brush_scrub_trigger = (u8)scrub;
+                    }
+                    bool show_stats = milton->settings->show_perf_stats != 0;
+                    if ( ImGui::Checkbox("Show performance stats", &show_stats) ) {
+                        milton->settings->show_perf_stats = show_stats ? 1 : 0;
                     }
                     ImGui::Separator();
                 }

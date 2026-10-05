@@ -124,6 +124,7 @@ struct MiltonSettings
     u8    pressure_curve_count;    // Control points of the pressure response curve (2..PRESSURE_CURVE_MAX).
     float pressure_curve_x[8];     // Input pressure of each point, ascending, first = 0, last = 1.
     float pressure_curve_y[8];     // Output pressure of each point.
+    u8    show_perf_stats;         // Faint resource readout in the corner (default on).
 };
 #pragma pack(pop)
 

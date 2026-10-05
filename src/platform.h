@@ -228,6 +228,20 @@ i32 platform_monitor_refresh_hz();
 u64 perf_counter();
 float perf_count_to_sec(u64 counter);
 
+// System resource readout. Fields that can't be queried are negative.
+struct SystemStats
+{
+    float cpu_percent;        // Whole-machine CPU utilisation.
+    float gpu_percent;        // Whole-machine GPU 3D engine utilisation.
+    float gpu_app_percent;    // Share of that used by this process.
+    double vram_used_mb;      // This process.
+    double vram_budget_mb;    // OS budget for this process.
+    double ram_used_mb;       // This process (working set).
+    double ram_total_mb;      // Physical memory in the machine.
+    double ram_system_used_mb;
+};
+void platform_system_stats(SystemStats* out);
+
     
 #if defined(__cplusplus)
 }

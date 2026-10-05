@@ -84,6 +84,8 @@ enum ClipFlags
     ClipFlags_UPDATE_GPU_DATA   = 1<<0,  // Free all strokes that are far away.
     ClipFlags_JUST_CLIP         = 1<<1,
 };
+void gpu_set_cook_budget(RenderBackend* renderer, float seconds);
+void gpu_get_cook_progress(RenderBackend* renderer, i64* pending, i64* done);
 void gpu_clip_strokes_and_update(Arena* arena,
                                  RenderBackend* renderer,
                                  CanvasView* view, i64 render_scale,

@@ -5,6 +5,10 @@
 #include "platform.h"
 
 #include "memory.h"
+#include <dxgi1_4.h>
+#include <pdh.h>
+#include <pdhmsg.h>
+#include <psapi.h>
 
 extern "C" {
 
@@ -904,6 +908,123 @@ perf_counter()
     time = (u64)li.QuadPart;
 
     return time;
+}
+
+void
+platform_system_stats(SystemStats* out)
+{
+    *out = {};
+    out->cpu_percent = out->gpu_percent = out->gpu_app_percent = -1.0f;
+    const double MB = 1024.0 * 1024.0;
+
+    // CPU: delta of system times since the last call.
+    {
+        static ULARGE_INTEGER prev_idle, prev_kernel, prev_user;
+        static bool have_prev = false;
+        FILETIME fi, fk, fu;
+        if ( GetSystemTimes(&fi, &fk, &fu) ) {
+            ULARGE_INTEGER i, k, u;
+            i.LowPart = fi.dwLowDateTime; i.HighPart = fi.dwHighDateTime;
+            k.LowPart = fk.dwLowDateTime; k.HighPart = fk.dwHighDateTime;
+            u.LowPart = fu.dwLowDateTime; u.HighPart = fu.dwHighDateTime;
+            if ( have_prev ) {
+                double idle = (double)(i.QuadPart - prev_idle.QuadPart);
+                double total = (double)((k.QuadPart - prev_kernel.QuadPart) + (u.QuadPart - prev_user.QuadPart));
+                if ( total > 0 ) { out->cpu_percent = (float)(100.0 * (total - idle) / total); }
+            }
+            prev_idle = i; prev_kernel = k; prev_user = u;
+            have_prev = true;
+        }
+    }
+
+    // RAM
+    {
+        PROCESS_MEMORY_COUNTERS pmc = {};
+        pmc.cb = sizeof(pmc);
+        if ( GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)) ) {
+            out->ram_used_mb = (double)pmc.WorkingSetSize / MB;
+        }
+        MEMORYSTATUSEX ms = {};
+        ms.dwLength = sizeof(ms);
+        if ( GlobalMemoryStatusEx(&ms) ) {
+            out->ram_total_mb = (double)ms.ullTotalPhys / MB;
+            out->ram_system_used_mb = (double)(ms.ullTotalPhys - ms.ullAvailPhys) / MB;
+        }
+    }
+
+    // VRAM via DXGI: use the adapter with the most dedicated memory.
+    {
+        static IDXGIAdapter3* adapter = NULL;
+        static bool tried = false;
+        if ( !tried ) {
+            tried = true;
+            IDXGIFactory1* factory = NULL;
+            if ( SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&factory)) ) {
+                SIZE_T best = 0;
+                IDXGIAdapter1* a = NULL;
+                for ( UINT i = 0; factory->EnumAdapters1(i, &a) != DXGI_ERROR_NOT_FOUND; ++i ) {
+                    DXGI_ADAPTER_DESC1 desc;
+                    a->GetDesc1(&desc);
+                    IDXGIAdapter3* a3 = NULL;
+                    if ( !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) && desc.DedicatedVideoMemory >= best
+                         && SUCCEEDED(a->QueryInterface(__uuidof(IDXGIAdapter3), (void**)&a3)) ) {
+                        if ( adapter ) { adapter->Release(); }
+                        adapter = a3;
+                        best = desc.DedicatedVideoMemory;
+                    }
+                    a->Release();
+                }
+                factory->Release();
+            }
+        }
+        if ( adapter ) {
+            DXGI_QUERY_VIDEO_MEMORY_INFO info = {};
+            if ( SUCCEEDED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)) ) {
+                out->vram_used_mb = (double)info.CurrentUsage / MB;
+                out->vram_budget_mb = (double)info.Budget / MB;
+            }
+        }
+    }
+
+    // GPU utilisation from the Windows performance counters.
+    {
+        static PDH_HQUERY query = NULL;
+        static PDH_HCOUNTER counter = NULL;
+        static bool tried = false;
+        static bool primed = false;
+        if ( !tried ) {
+            tried = true;
+            if ( PdhOpenQueryW(NULL, 0, &query) != ERROR_SUCCESS
+                 || PdhAddEnglishCounterW(query, L"\\GPU Engine(*)\\Utilization Percentage", 0, &counter) != ERROR_SUCCESS ) {
+                query = NULL;
+            }
+        }
+        if ( query ) {
+            PdhCollectQueryData(query);
+            if ( primed ) {
+                DWORD bytes = 0, count = 0;
+                PDH_STATUS st = PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &bytes, &count, NULL);
+                if ( st == PDH_MORE_DATA && bytes > 0 ) {
+                    PDH_FMT_COUNTERVALUE_ITEM_W* items = (PDH_FMT_COUNTERVALUE_ITEM_W*)malloc(bytes);
+                    if ( PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &bytes, &count, items) == ERROR_SUCCESS ) {
+                        wchar_t pid_tag[32];
+                        swprintf(pid_tag, 32, L"pid_%lu_", GetCurrentProcessId());
+                        double total = 0, app = 0;
+                        for ( DWORD i = 0; i < count; ++i ) {
+                            if ( !wcsstr(items[i].szName, L"engtype_3D") ) { continue; }
+                            double v = items[i].FmtValue.doubleValue;
+                            total += v;
+                            if ( wcsstr(items[i].szName, pid_tag) ) { app += v; }
+                        }
+                        out->gpu_percent = (float)min(total, 100.0);
+                        out->gpu_app_percent = (float)min(app, 100.0);
+                    }
+                    free(items);
+                }
+            }
+            primed = true;
+        }
+    }
 }
 
 float

@@ -1109,6 +1109,14 @@ milton_main(bool is_fullscreen, char* file_to_open)
             platform.num_point_results = platform.num_pressure_results;
         }
 
+        {
+            // Strokes still waiting for GPU upload: keep redrawing until they are all in.
+            static b32 upload_backlog = false;
+            if ( upload_backlog ) { input_flags |= MiltonInputFlags_FULL_REFRESH; }
+            i64 pending, done;
+            gpu_get_cook_progress(milton->renderer, &pending, &done);
+            upload_backlog = pending > 0;
+        }
         milton_input.flags = (MiltonInputFlags)( input_flags | (int)milton_input.flags );
 
         mlt_assert (platform.num_point_results <= platform.num_pressure_results);
@@ -1132,6 +1140,13 @@ milton_main(bool is_fullscreen, char* file_to_open)
         PROFILE_GRAPH_BEGIN(GL);
         milton_update_and_render(milton, &milton_input);
         selection_draw_overlay(milton);
+        gui_loading_indicator(milton);
+        gui_perf_stats(milton);
+        {
+            i64 pending, done;
+            gpu_get_cook_progress(milton->renderer, &pending, &done);
+            if ( pending > 0 ) { platform.force_next_frame = true; }
+        }
         if ( !(milton->flags & MiltonStateFlags_RUNNING) ) {
             platform.should_quit = true;
         }
@@ -1163,7 +1178,11 @@ milton_main(bool is_fullscreen, char* file_to_open)
         #endif
         // IMGUI events might update until the frame after they are created.
         if ( !platform.force_next_frame ) {
-            SDL_WaitEvent(NULL);
+            if ( milton->settings->show_perf_stats ) {
+                SDL_WaitEventTimeout(NULL, 1000);  // Wake up to refresh the stats readout.
+            } else {
+                SDL_WaitEvent(NULL);
+            }
         }
         else {
             platform.force_next_frame = false;

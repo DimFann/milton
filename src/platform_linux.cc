@@ -389,3 +389,10 @@ platform_cursor_set_position(PlatformState* platform, v2i pos)
     SDL_FlushEvent(SDL_MOUSEMOTION);
     SDL_FlushEvent(SDL_SYSWMEVENT);
 }
+
+void
+platform_system_stats(SystemStats* out)
+{
+    *out = {};
+    out->cpu_percent = out->gpu_percent = out->gpu_app_percent = -1.0f;
+}

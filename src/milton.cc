@@ -713,6 +713,7 @@ settings_init(MiltonSettings* s)
     s->picker_triangle_rotates = 0;
     s->brush_scrub_trigger = 2;
     pressure_curve_reset(s);
+    s->show_perf_stats = 1;
 }
 
 void
@@ -2175,9 +2176,12 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
 
     i64 render_scale = milton_render_scale(milton);
 
+    gpu_set_cook_budget(milton->renderer, 0.008f);
+
     gpu_clip_strokes_and_update(&milton->root_arena, milton->renderer, milton->view, render_scale,
                                 milton->canvas->root_layer, &milton->working_stroke,
                                 view_x, view_y, view_width, view_height, clip_flags);
+    gpu_set_cook_budget(milton->renderer, 0);
     PROFILE_GRAPH_END(clipping);
 
     gpu_render(milton->renderer, view_x, view_y, view_width, view_height);
