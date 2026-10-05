@@ -150,8 +150,31 @@ milton_get_brush(Milton const* milton)
     int brush_enum = milton_get_brush_enum(milton);
 
     Brush brush = milton->brushes[brush_enum];
+    brush.shape_aspect = clamp(brush.shape_aspect, 0.05f, 1.0f);
+    brush.pressure_size_min = clamp(brush.pressure_size_min, 0.0f, 1.0f);
+
+    // The angle is relative to the screen; strokes store the axis in canvas space.
+    const float rad = brush.shape_angle * 3.14159265f / 180.0f;
+    v2f dir = { cosf(rad), sinf(rad) };
+    v2l c0 = raster_to_canvas(milton->view, { 0, 0 });
+    v2l c1 = raster_to_canvas(milton->view, { (i32)(dir.x * 1024.0f), (i32)(dir.y * 1024.0f) });
+    v2f axis = normalized(v2f{ (float)(c1.x - c0.x), (float)(c1.y - c0.y) });
+    brush.shape_axis_x = axis.x;
+    brush.shape_axis_y = axis.y;
 
     return brush;
+}
+
+// Outline shape for the pen and eraser; other tools use a circle.
+static void
+get_outline_shape(Milton const* milton, i32* shape, f32* aspect, f32* angle)
+{
+    if ( milton->current_mode == MiltonMode::PEN || milton->current_mode == MiltonMode::ERASER ) {
+        Brush const& b = milton->brushes[milton_get_brush_enum(milton)];
+        *shape = b.shape;
+        *aspect = clamp(b.shape_aspect, 0.05f, 1.0f);
+        *angle = b.shape_angle;
+    }
 }
 
 static i32*
@@ -765,6 +788,8 @@ milton_init(Milton* milton, i32 width, i32 height, f32 ui_scale, PATH_CHAR* file
     {
         for ( int i = 0; i < BrushEnum_COUNT; ++i ) {
 
+            milton->brushes[i].alpha = 1.0f;
+            milton->brushes[i] = default_brush();
             milton->brushes[i].alpha = 1.0f;
             milton->brushes[i].hardness = k_max_hardness;
 
@@ -1618,6 +1643,8 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
             auto preview_pos = milton->gui->preview_pos;
             mlt_assert(preview_pos.x >= 0);
             mlt_assert(preview_pos.y >= 0);
+            i32 outline_shape = 0; f32 outline_aspect = 1.0f; f32 outline_angle = 0.0f;
+            get_outline_shape(milton, &outline_shape, &outline_aspect, &outline_angle);
             v4f color = {};
             color.rgb = milton->view->background_color;
             color.a = 1;
@@ -1627,7 +1654,8 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
             }
             gpu_update_brush_outline(milton->renderer,
                                      preview_pos.x, preview_pos.y,
-                                     milton_get_brush_radius(milton), BrushOutline_FILL, color);
+                                     milton_get_brush_radius(milton), BrushOutline_FILL, color,
+                                     outline_shape, outline_aspect, outline_angle);
         }
     } else {
         gui_imgui_set_ungrabbed(milton->gui);
@@ -1858,9 +1886,12 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
             brush_point = milton->drag_brush->start_point;
         }
 
+        i32 outline_shape = 0; f32 outline_aspect = 1.0f; f32 outline_angle = 0.0f;
+        get_outline_shape(milton, &outline_shape, &outline_aspect, &outline_angle);
         gpu_update_brush_outline(milton->renderer,
                                 brush_point.x, brush_point.y,
-                                radius);
+                                radius, BrushOutline_NO_FILL, {},
+                                outline_shape, outline_aspect, outline_angle);
     }
 
     PROFILE_GRAPH_END(update);

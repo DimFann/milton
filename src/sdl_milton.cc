@@ -925,7 +925,13 @@ milton_main(bool is_fullscreen, char* file_to_open)
                               milton->current_mode == MiltonMode::ERASER ||
                               mode_is_for_primitives(milton->current_mode) ) {
                         #if MILTON_HARDWARE_BRUSH_CURSOR
-                            cursor_set_and_show(platform.cursor_brush);
+                            // The shaped outline already marks the tip; skip the small round cursor.
+                            if ( (milton->current_mode == MiltonMode::PEN || milton->current_mode == MiltonMode::ERASER)
+                                 && milton->brushes[milton_get_brush_enum(milton)].shape != BrushShape_ROUND ) {
+                                platform_cursor_hide();
+                            } else {
+                                cursor_set_and_show(platform.cursor_brush);
+                            }
                         #else
                             platform_cursor_hide();
                         #endif

@@ -46,7 +46,8 @@ enum BrushOutlineEnum
 };
 void gpu_update_brush_outline(RenderBackend* renderer, i32 cx, i32 cy, i32 radius,
                               BrushOutlineEnum outline_enum = BrushOutline_NO_FILL,
-                              v4f color = {});
+                              v4f color = {},
+                              i32 shape = 0, f32 shape_aspect = 1.0f, f32 shape_angle_deg = 0.0f);
 
 
 

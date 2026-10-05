@@ -35,15 +35,25 @@ main()
     float t_raw = dot((canvas_point - a)/len_ab, ab / len_ab);
     float t = clamp(t_raw, 0.0, 1.0);
 
-    vec2 stroke_point = mix(a, b, t);
-
-    float pressure = mix(v_pointa.z, v_pointb.z, t);
-
-    // Distance between fragment and stroke
-    float dist = distance(stroke_point, canvas_point);
-
-    float rad = u_radius * pressure;
-    if (dist >= rad + 0.5 * float(u_scale)) {
+    float dist;
+    float rad;
+    float pressure;
+    float aa = float(u_scale);
+    if ( u_shape == 1 ) {
+        // Rectangle: dist and rad are in rectangle space (see rect_metric).
+        vec2 rm = rect_metric(canvas_point, a, b);
+        dist = rm.x;
+        pressure = mix(v_pointa.z, v_pointb.z, rm.y);
+        rad = u_radius * mix(1.0, mix(u_size_min, 1.0, pressure), float(u_size_pressure)) * u_shape_aspect;
+        aa = max(length(vec2(dFdx(dist), dFdy(dist))), 0.001);
+    } else {
+        vec2 stroke_point = mix(a, b, t);
+        pressure = mix(v_pointa.z, v_pointb.z, t);
+        // Distance between fragment and stroke
+        dist = distance(stroke_point, canvas_point);
+        rad = u_radius * mix(1.0, mix(u_size_min, 1.0, pressure), float(u_size_pressure));
+    }
+    if (dist >= rad + 0.5 * aa) {
         discard;
     }
     // In the round caps, continue the pressure gradient instead of holding it flat. A flat cap
@@ -75,11 +85,16 @@ main()
             shape_mean += feather((float(k) + 0.5) / 8.0, h) / 8.0;
         }
     }
-    float coverage = clamp(0.5 + (rad - dist) / float(u_scale), 0.0, 1.0);
+    float coverage = clamp(0.5 + (rad - dist) / aa, 0.0, 1.0);
     float alpha = coverage * pressure_opacity * shape;
 
     // Weight so that a straight pass sums to about the single-segment profile.
-    float weight = min(len_ab, rad) / max(2.0 * rad * shape_mean, 0.0001);
+    float seg_len = len_ab;
+    if ( u_shape == 1 ) {
+        vec2 eq = shape_q(ab);
+        seg_len = max(abs(eq.x), abs(eq.y));
+    }
+    float weight = min(seg_len, rad) / max(2.0 * rad * shape_mean, 0.0001);
     // The ceiling is feathered too (with a wider profile than a single segment, so it can fill the
     // gaps between passes). A flat ceiling would show as a hard-edged plateau.
     float ceiling_opacity = coverage * pressure_opacity * sqrt(shape);

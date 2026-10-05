@@ -6,12 +6,21 @@ in vec2 v_sizes;
 uniform int u_radius;
 uniform bool u_fill;
 uniform vec4 u_color;
+uniform int u_shape;
+uniform vec2 u_shape_axis;
+uniform float u_shape_aspect;
 
 
 void
 main()
 {
     float r = length(v_sizes);
+    if ( u_shape == 1 ) {
+        // Rectangle: signed distance to the box, expressed as a radius so the ring logic below is shared.
+        vec2 q = vec2(dot(v_sizes, u_shape_axis), dot(v_sizes, vec2(-u_shape_axis.y, u_shape_axis.x)));
+        vec2 e = abs(q) - vec2(float(u_radius), float(u_radius) * u_shape_aspect);
+        r = float(u_radius) + max(e.x, e.y);
+    }
 
     float girth = u_fill ? 2.0 : 1.0;
     const float ring_alpha = 0.4;

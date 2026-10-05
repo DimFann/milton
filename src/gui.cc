@@ -553,6 +553,34 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
             gui->flags |= (i32)MiltonGuiFlags_SHOWING_PREVIEW;
         }
 
+        if ( milton->current_mode == MiltonMode::PEN || milton->current_mode == MiltonMode::ERASER ) {
+            Brush* shape_brush = &milton->brushes[milton_get_brush_enum(milton)];
+            bool size_pressure = shape_brush->pressure_size != 0;
+            if ( ImGui::Checkbox("Size from pressure", &size_pressure) ) {
+                shape_brush->pressure_size = size_pressure ? 1 : 0;
+            }
+            if ( size_pressure ) {
+                f32 min_percent = shape_brush->pressure_size_min * 100.0f;
+                if ( ImGui::SliderFloat("Min size", &min_percent, 0.0f, 100.0f, "%.0f%%") ) {
+                    shape_brush->pressure_size_min = clamp(min_percent, 0.0f, 100.0f) / 100.0f;
+                }
+            }
+            int shape = shape_brush->shape;
+            ImGui::RadioButton("Round", &shape, BrushShape_ROUND);
+            ImGui::SameLine();
+            ImGui::RadioButton("Rectangle", &shape, BrushShape_RECTANGLE);
+            shape_brush->shape = shape;
+            if ( shape == BrushShape_RECTANGLE ) {
+                f32 aspect_percent = shape_brush->shape_aspect * 100.0f;
+                if ( ImGui::SliderFloat("Aspect", &aspect_percent, 5.0f, 100.0f, "%.0f%%") ) {
+                    shape_brush->shape_aspect = clamp(aspect_percent, 5.0f, 100.0f) / 100.0f;
+                }
+                shape_brush->shape_aspect = clamp(shape_brush->shape_aspect, 0.05f, 1.0f);
+                ImGui::SliderFloat("Angle", &shape_brush->shape_angle, 0.0f, 180.0f, "%.0f deg");
+                shape_brush->shape_angle = clamp(shape_brush->shape_angle, 0.0f, 180.0f);
+            }
+        }
+
         if ( milton->current_mode == MiltonMode::PRIMITIVE_GRID ) {
             ImGui::SliderInt(loc(TXT_grid_columns), &milton->grid_columns, 1, MILTON_MAX_GRID_SIZE);
             ImGui::SliderInt(loc(TXT_grid_rows), &milton->grid_rows, 1, MILTON_MAX_GRID_SIZE);

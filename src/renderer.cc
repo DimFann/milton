@@ -53,6 +53,12 @@ struct RenderElement
             i32     radius;
             f32     min_opacity;
             f32     hardness;
+            i32     shape;
+            i32     pressure_size;
+            f32     pressure_size_min;
+            f32     shape_aspect;
+            f32     shape_axis_x;
+            f32     shape_axis_y;
         };
         struct {  // For when element is layer.
             f32          layer_alpha;
@@ -325,7 +331,8 @@ gpu_update_picker(RenderBackend* r, ColorPicker* picker)
 
 void
 gpu_update_brush_outline(RenderBackend* r, i32 cx, i32 cy, i32 radius,
-                         BrushOutlineEnum outline_enum, v4f color)
+                         BrushOutlineEnum outline_enum, v4f color,
+                         i32 shape, f32 shape_aspect, f32 shape_angle_deg)
 {
     if ( r->vbo_outline == 0 ) {
         mlt_assert(r->vbo_outline_sizes == 0);
@@ -334,7 +341,9 @@ gpu_update_brush_outline(RenderBackend* r, i32 cx, i32 cy, i32 radius,
     }
     mlt_assert(r->vbo_outline_sizes != 0);
 
-    float radius_plus_girth = radius + 4.0f; // Girth defined in outline.f.glsl
+    // A rectangle's corners reach past its long half-extent.
+    float reach = (shape == 1) ? sqrtf(1.0f + shape_aspect*shape_aspect) : 1.0f;
+    float radius_plus_girth = radius*reach + 4.0f; // Girth defined in outline.f.glsl
 
     auto w = r->width;
     auto h = r->height;
@@ -363,6 +372,10 @@ gpu_update_brush_outline(RenderBackend* r, i32 cx, i32 cy, i32 radius,
     glBufferData(GL_ARRAY_BUFFER, array_count(data)*sizeof(*data), data, GL_DYNAMIC_DRAW);
 
     gl::set_uniform_i(r->outline_program, "u_radius", radius);
+    gl::set_uniform_i(r->outline_program, "u_shape", shape);
+    gl::set_uniform_vec2(r->outline_program, "u_shape_axis",
+                         cosf(shape_angle_deg * 3.14159265f / 180.0f), sinf(shape_angle_deg * 3.14159265f / 180.0f));
+    gl::set_uniform_f(r->outline_program, "u_shape_aspect", shape_aspect);
     if ( outline_enum == BrushOutline_FILL ) {
         gl::set_uniform_i(r->outline_program, "u_fill", true);
         gl::set_uniform_vec4(r->outline_program, "u_color", 1, color.d);
@@ -989,8 +1002,16 @@ gpu_cook_stroke(Arena* arena, RenderBackend* r, Stroke* stroke, CookStrokeOpt co
                 Brush brush = stroke->brush;
                 // Pad by one pixel so the anti-aliased rim is inside the geometry.
                 float pad = (float)r->scale;
-                float radius_i = stroke->pressures[i]*brush.radius + pad;
-                float radius_j = stroke->pressures[i+1]*brush.radius + pad;
+                // A rectangle's corners reach past its long half-extent.
+                float reach = 1.0f;
+                if ( brush.shape == BrushShape_RECTANGLE ) {
+                    reach = sqrtf(1.0f + brush.shape_aspect*brush.shape_aspect);
+                }
+                const float smin = clamp(brush.pressure_size_min, 0.0f, 1.0f);
+                float size_p_i = brush.pressure_size ? smin + (1.0f - smin)*stroke->pressures[i] : 1.0f;
+                float size_p_j = brush.pressure_size ? smin + (1.0f - smin)*stroke->pressures[i+1] : 1.0f;
+                float radius_i = size_p_i*brush.radius*reach + pad;
+                float radius_j = size_p_j*brush.radius*reach + pad;
 
                 u16 idx = (u16)bounds_i;
                 if ( point_i == point_j ) {
@@ -1151,6 +1172,12 @@ gpu_cook_stroke(Arena* arena, RenderBackend* r, Stroke* stroke, CookStrokeOpt co
             re->radius = stroke->brush.radius;
             re->min_opacity = stroke->brush.pressure_opacity_min;
             re->hardness = stroke->brush.hardness;
+            re->shape = stroke->brush.shape;
+            re->pressure_size = stroke->brush.pressure_size;
+            re->pressure_size_min = clamp(stroke->brush.pressure_size_min, 0.0f, 1.0f);
+            re->shape_aspect = stroke->brush.shape_aspect;
+            re->shape_axis_x = stroke->brush.shape_axis_x;
+            re->shape_axis_y = stroke->brush.shape_axis_y;
 
             re->flags = 0;
             if (stroke->flags & StrokeFlag_ERASER) {
@@ -1549,6 +1576,11 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                 gl::use_program(program_for_stroke);
                 gl::set_uniform_vec4(program_for_stroke, "u_brush_color", 1, re->color.d);
                 gl::set_uniform_i(program_for_stroke, "u_radius", re->radius);
+                gl::set_uniform_i(program_for_stroke, "u_shape", re->shape);
+                gl::set_uniform_i(program_for_stroke, "u_size_pressure", re->pressure_size);
+                gl::set_uniform_f(program_for_stroke, "u_size_min", re->pressure_size_min);
+                gl::set_uniform_vec2(program_for_stroke, "u_shape_axis", re->shape_axis_x, re->shape_axis_y);
+                gl::set_uniform_f(program_for_stroke, "u_shape_aspect", re->shape_aspect);
 
                 DEBUG_gl_validate_buffer(re->vbo_stroke);
                 DEBUG_gl_validate_buffer(re->vbo_pointa);

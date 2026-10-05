@@ -18,6 +18,21 @@ struct Brush
     f32 alpha;
     f32 pressure_opacity_min;  // Opacity from pressure.
     f32 hardness;
+    // Appended fields: older files shorter than this struct keep the defaults.
+    i32 shape;          // BrushShape
+    i32 pressure_size;  // Non-zero: pen pressure scales the brush size.
+    f32 pressure_size_min;  // Size fraction (0-1) at zero pressure.
+    f32 shape_aspect;   // Short / long extent of the rectangle.
+    f32 shape_angle;    // Degrees, relative to the screen. Set in the UI.
+    f32 shape_axis_x;   // Canvas-space direction of the long axis. Set when a stroke starts.
+    f32 shape_axis_y;
+};
+
+enum BrushShape
+{
+    BrushShape_ROUND = 0,
+    BrushShape_RECTANGLE = 1,
+    BrushShape_COUNT,
 };
 
 
@@ -77,5 +92,11 @@ static inline Brush default_brush()
     brush.radius = 10240;
     brush.alpha = 1.0f;
     brush.hardness = 10.0f;
+    brush.shape = BrushShape_ROUND;
+    brush.pressure_size = 1;
+    brush.shape_aspect = 0.4f;
+    brush.shape_angle = 45.0f;
+    brush.shape_axis_x = 1.0f;
+    brush.shape_axis_y = 0.0f;
     return brush;
 }
