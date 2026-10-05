@@ -15,11 +15,12 @@ This fork adds some quality of life features I've been wanting for years, as wel
     * Arm with S
     * D to delete selected strokes
     * Ctrl+T to transform selected strokes
-* Common art program shortcuts
+* Common art program shortcuts    
     * Hold W and drag to rotate, can be rebound
     * Hold Ctrl+Space and drag to zoom
     * Hold Alt+RMB + scrub to resize brush, alternatively Ctrl+Alt+Drag (PaintToolSai)
     * Hold Alt for eyedropper
+    * Press V to flip canvas horizontally
 * Improved loading times, and responsiveness during loading for stroke-heavy files
 
 ### Current Issues
