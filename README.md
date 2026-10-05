@@ -1,6 +1,6 @@
 # Fork Info
 
-This fork add some quality of life features I've been wanting for years, as well as some rendering & functionality improvements.
+This fork adds some quality of life features I've been wanting for years, as well as some rendering & functionality improvements.
 
 ### Notable additions
 * Rebindable hotkeys
