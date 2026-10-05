@@ -197,5 +197,17 @@ main()
         color.rgb = vec3(1- color.r, 1 - color.g, 1 - color.b);
     }
 
+    // Hue indicator: a ring on the wheel at the selected hue.
+    {
+        float a = u_angle * PI / 180.0;
+        vec2 hue_pos = radius * vec2(cos(a), -sin(a));
+        float dh = distance(v_norm, hue_pos);
+        float hr = half_width * 0.85;
+        if ( dh < hr ) {
+            if ( dh > hr - 0.02 ) { color.rgb = vec3(1.0); }
+            else if ( dh > hr - 0.04 ) { color.rgb = vec3(0.0); }
+        }
+    }
+
     out_color = color;
 }

@@ -1070,6 +1070,13 @@ gui_menu(MiltonInput* input, PlatformState* platform, Milton* milton, b32& show_
                         input->flags |= MiltonInputFlags_OPEN_FILE;
                     }
                 }
+                if ( ImGui::MenuItem("Save Milton Canvas", "Ctrl+S") ) {
+                    if ( !(milton->flags & MiltonStateFlags_DEFAULT_CANVAS) ) {
+                        input->flags |= MiltonInputFlags_SAVE_FILE;
+                    } else {
+                        save_requested = true;
+                    }
+                }
                 if ( ImGui::MenuItem(loc(TXT_save_milton_canvas_as_DOTS)) || save_requested ) {
                     // NOTE(possible refactor): There is a copy of this at milton.c end of file
                     PATH_CHAR* name = platform_save_dialog(FileKind_MILTON_CANVAS);
