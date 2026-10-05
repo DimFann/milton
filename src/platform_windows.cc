@@ -574,6 +574,13 @@ platform_save_dialog(FileKind kind)
     /* ofn.lpfnHook; */
     /* ofn.lpTemplateName; */
 
+    if ( kind == FileKind_MILTON_CANVAS ) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        swprintf(save_filename, MAX_PATH, L"%04d%02d%02d_%02d%02d%02d.mlt",
+                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    }
+
     b32 ok = GetSaveFileNameW(&ofn);
 
     if ( !ok ) {

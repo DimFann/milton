@@ -63,6 +63,7 @@ set_default_bindings(MiltonBindings* bs)
     binding(bs, Modifier_CTRL, 'q', Action_QUIT);
     binding(bs, Modifier_CTRL, 'n', Action_NEW);
     binding(bs, Modifier_CTRL, 'o', Action_OPEN);
+    binding(bs, Modifier_CTRL, 's', Action_SAVE);
     binding(bs, (ModifierFlags)(Modifier_CTRL | Modifier_SHIFT), 's', Action_SAVE_AS);
 
     binding(bs, Modifier_NONE, 'm', Action_TOGGLE_MENU);
@@ -161,10 +162,13 @@ binding_dispatch_action(BindableAction a, MiltonInput* input, Milton* milton, v2
             input->flags |= MiltonInputFlags_FULL_REFRESH;
             milton->flags |= MiltonStateFlags_DEFAULT_CANVAS;
         } break;
-        case Action_SAVE: {
-            INVALID_CODE_PATH;
-        } break;
+        case Action_SAVE:
         case Action_SAVE_AS: {
+            // Plain save on a canvas that is already tied to a file just writes it.
+            if ( a == Action_SAVE && !(milton->flags & MiltonStateFlags_DEFAULT_CANVAS) ) {
+                input->flags |= MiltonInputFlags_SAVE_FILE;
+                break;
+            }
             PATH_CHAR* name = platform_save_dialog(FileKind_MILTON_CANVAS);
             if ( name ) {
                 milton_log("Saving to %s\n", name);
