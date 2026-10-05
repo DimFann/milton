@@ -38,7 +38,9 @@ This fork adds some quality of life features I've been wanting for years, as wel
 * The vast majority of changes I'll be making and be pushing will by implemented by Copilot (AI). At this point I don't think there's a clean path for a merge back into Milton. While that repo seems inactive, I wouldn't want to burden anyone with a huge pile of vibe code if they're by any chance still watching pull requests.
 * I take no credit for the hard work done by Sergio and all other original contributors, or by Copilot for that matter. I'm just someone who draws and really, really, really, misses Mischief.
 
-Preserving the readme below for posterity.
+![LatestUi](https://i.imgur.com/iwFWa1o.png)
+
+**Preserving the readme below for posterity.**
 
 ----
 
