@@ -541,7 +541,8 @@ milton_stroke_input(Milton* milton, MiltonInput const* input)
 
         if ( input->pressures[input_i] != NO_PRESSURE_INFO ) {
             f32 pressure_min = milton->settings->pressure_min;
-            pressure = pressure_min + input->pressures[input_i] * (1.0f - pressure_min);
+            f32 curved = pressure_curve_eval(milton->settings, clamp(input->pressures[input_i], 0.0f, 1.0f));
+            pressure = pressure_min + curved * (1.0f - pressure_min);
 
             // Low-pass the raw tablet pressure against the previous point of this stroke.
             if ( ws->num_points > 0 ) {
@@ -711,6 +712,59 @@ settings_init(MiltonSettings* s)
     s->light_theme = 0;
     s->picker_triangle_rotates = 0;
     s->brush_scrub_trigger = 2;
+    pressure_curve_reset(s);
+}
+
+void
+pressure_curve_reset(MiltonSettings* s)
+{
+    s->pressure_curve_count = 2;
+    s->pressure_curve_x[0] = 0; s->pressure_curve_y[0] = 0;
+    s->pressure_curve_x[1] = 1; s->pressure_curve_y[1] = 1;
+}
+
+// Smooth monotone cubic (Fritsch-Carlson) through the control points, so the curve never overshoots.
+float
+pressure_curve_eval(const MiltonSettings* s, float x)
+{
+    int n = s->pressure_curve_count;
+    if ( n < 2 || n > PRESSURE_CURVE_MAX ) { return x; }
+    const float* px = s->pressure_curve_x;
+    const float* py = s->pressure_curve_y;
+    if ( x <= px[0] ) { return py[0]; }
+    if ( x >= px[n-1] ) { return py[n-1]; }
+
+    float delta[PRESSURE_CURVE_MAX];
+    float m[PRESSURE_CURVE_MAX];
+    for ( int i = 0; i < n-1; ++i ) {
+        float h = px[i+1] - px[i];
+        delta[i] = h > 1e-6f ? (py[i+1] - py[i]) / h : 0.0f;
+    }
+    m[0] = delta[0];
+    m[n-1] = delta[n-2];
+    for ( int i = 1; i < n-1; ++i ) {
+        m[i] = (delta[i-1] * delta[i] <= 0.0f) ? 0.0f : 0.5f * (delta[i-1] + delta[i]);
+    }
+    for ( int i = 0; i < n-1; ++i ) {
+        if ( delta[i] == 0.0f ) { m[i] = 0; m[i+1] = 0; continue; }
+        float a = m[i] / delta[i];
+        float b = m[i+1] / delta[i];
+        float r = a*a + b*b;
+        if ( r > 9.0f ) {
+            float t = 3.0f / sqrtf(r);
+            m[i] = t * a * delta[i];
+            m[i+1] = t * b * delta[i];
+        }
+    }
+
+    int k = 0;
+    while ( k < n-2 && x > px[k+1] ) { ++k; }
+    float h = px[k+1] - px[k];
+    float t = (x - px[k]) / h;
+    float t2 = t*t, t3 = t2*t;
+    float y = (2*t3 - 3*t2 + 1) * py[k] + (t3 - 2*t2 + t) * h * m[k]
+            + (-2*t3 + 3*t2) * py[k+1] + (t3 - t2) * h * m[k+1];
+    return clamp(y, 0.0f, 1.0f);
 }
 
 int milton_save_thread(void* state_);  // forward
@@ -1413,6 +1467,7 @@ drag_zoom_start(Milton* milton, v2i pointer)
         milton->drag_zoom->start_size = size;
         milton->drag_zoom->new_zoom_center = milton->platform->pointer;
         milton_enter_mode(milton, MiltonMode::DRAG_ZOOM);
+        milton->drag_zoom->start_size = milton->view->scale;
     }
 }
 
@@ -1433,7 +1488,11 @@ drag_zoom_tick(Milton* milton, MiltonInput const* input)
     v2i cursor = platform_cursor_get_position(milton->platform);
 
     // Zoom only while the pointer is held. Otherwise keep re-anchoring to the current state.
-    if ( !milton->platform->is_pointer_down ) {
+    // The first frame of contact also re-anchors, so a stale position never produces a jump.
+    static b32 was_down = false;
+    b32 first_contact = !was_down;
+    was_down = milton->platform->is_pointer_down;
+    if ( !milton->platform->is_pointer_down || first_contact ) {
         drag->start_point = cursor;
         drag->start_size = milton->view->scale;
         drag->new_zoom_center = milton->platform->pointer;
@@ -1475,6 +1534,7 @@ transform_start(Milton* milton, v2i pointer)
 {
     if (milton->current_mode != MiltonMode::TRANSFORM) {
         milton_enter_mode(milton, MiltonMode::TRANSFORM);
+        milton->transform->fsm = TransformModeFSM::START;
         milton_set_zoom_at_screen_center(milton);
     }
 }
@@ -1508,16 +1568,17 @@ transform_tick(Milton* milton, MiltonInput const* input)
             if (lena > 0.0f && lenb > 0.0f) {
                 const f32 cos_angle = clamp(DOT(b, a) / (lena * lenb), 0.0f, 1.0f);
                 const f32 sign = orientation(center, t->last_point, point) > 0 ? -1.0f : 1.0f;
-                milton->view->angle += (milton->view->flipped ? -sign : sign) * acosf(cos_angle);
+                // Near the center a tiny motion sweeps a huge angle; damp it inside a minimum radius.
+                const f32 min_radius = 120.0f * milton->gui->scale;
+                const f32 damp = clamp(min(lena, lenb) / min_radius, 0.0f, 1.0f);
+                milton->view->angle += (milton->view->flipped ? -sign : sign) * acosf(cos_angle) * damp;
                 t->last_point = point;
                 gpu_update_canvas(milton->renderer, milton->canvas, milton->view);
             }
         }
     }
     if (input->flags & MiltonInputFlags_CLICKUP) {
-        if (t->fsm == TransformModeFSM::ROTATING) {
-            t->fsm = TransformModeFSM::START;
-        }
+        t->fsm = TransformModeFSM::START;
     }
 }
 

@@ -221,7 +221,7 @@ window_set_dark_titlebar(SDL_Window* window, bool dark)
 #endif
 
 void
-panning_update(PlatformState* platform)
+panning_update(PlatformState* platform, b32 rotating)
 {
     auto reset_pan_start = [platform]() {
         platform->pan_start = VEC2L(platform->pointer);
@@ -229,6 +229,13 @@ panning_update(PlatformState* platform)
     };
 
     platform->was_panning = platform->is_panning;
+
+    // Panning and rotating never overlap: rotation cancels any pan and blocks new ones.
+    if ( rotating ) {
+        platform->is_panning = false;
+        platform->waiting_for_pan_input = false;
+        return;
+    }
 
     // Panning from GUI menu, waiting for input
     if ( platform->waiting_for_pan_input ) {
@@ -358,7 +365,7 @@ sdl_event_loop(Milton* milton, PlatformState* platform)
                     }
 
                     if ( !bit_touch && bit_touch_old ) {
-                        if ( milton->current_mode == MiltonMode::EYEDROPPER ) {
+                        if ( milton->current_mode == MiltonMode::EYEDROPPER || milton->current_mode == MiltonMode::TRANSFORM ) {
                             milton_input.flags |= MiltonInputFlags_CLICKUP;
                         }
                         pointer_up = true;  // Wacom does not seem to send button-up messages after
@@ -939,7 +946,7 @@ milton_main(bool is_fullscreen, char* file_to_open)
             }
         }
 
-        panning_update(&platform);
+        panning_update(&platform, milton->current_mode == MiltonMode::TRANSFORM);
 
         static b32 first_run = true;
         if ( first_run ) {
@@ -1031,6 +1038,9 @@ milton_main(bool is_fullscreen, char* file_to_open)
                         #else
                             platform_cursor_hide();
                         #endif
+                    }
+                    else if ( milton->current_mode == MiltonMode::TRANSFORM ) {
+                        cursor_set_and_show(platform.cursor_crosshair);
                     }
                     else if ( milton->current_mode == MiltonMode::HISTORY ) {
                         cursor_set_and_show(platform.cursor_default);

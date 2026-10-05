@@ -120,8 +120,15 @@ struct MiltonSettings
     u8    light_theme;             // 0 = dark UI theme (default), 1 = light.
     u8    picker_triangle_rotates; // 0 = colour triangle keeps a fixed orientation (default).
     u8    brush_scrub_trigger;     // 0 = Alt+RMB hover scrub, 1 = Ctrl+Alt+pen tip drag, 2 = both (default).
+    u8    pressure_curve_count;    // Control points of the pressure response curve (2..PRESSURE_CURVE_MAX).
+    float pressure_curve_x[8];     // Input pressure of each point, ascending, first = 0, last = 1.
+    float pressure_curve_y[8];     // Output pressure of each point.
 };
 #pragma pack(pop)
+
+#define PRESSURE_CURVE_MAX 8
+float pressure_curve_eval(const MiltonSettings* s, float x);
+void  pressure_curve_reset(MiltonSettings* s);
 
 struct Eyedropper
 {

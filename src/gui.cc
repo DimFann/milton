@@ -447,6 +447,101 @@ hotkey_resolve_rotate_conflicts(Milton* milton)
 // Thin tool selector fixed to the left edge, under the menu bar.
 void picker_set_fixed_triangle(ColorPicker* picker, int fixed);
 
+// Editable pressure response curve. Click empty space to add a point, drag to move, right-click a point to remove.
+static void
+gui_pressure_curve_editor(MiltonSettings* s, f32 ui_scale)
+{
+    if ( s->pressure_curve_count < 2 || s->pressure_curve_count > PRESSURE_CURVE_MAX ) {
+        pressure_curve_reset(s);
+    }
+    const f32 size = ui_scale * 220.0f;
+    const f32 pad = ui_scale * 6.0f;
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##pressure_curve", ImVec2(size + 2*pad, size + 2*pad));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p0 = ImVec2(origin.x + pad, origin.y + pad);
+    auto to_screen = [&](float x, float y) { return ImVec2(p0.x + x*size, p0.y + (1.0f - y)*size); };
+
+    dl->AddRectFilled(origin, ImVec2(origin.x + size + 2*pad, origin.y + size + 2*pad), IM_COL32(40, 40, 42, 255));
+    for ( int i = 0; i <= 4; ++i ) {
+        float g = i / 4.0f;
+        ImU32 col = (i == 0 || i == 4) ? IM_COL32(150, 150, 150, 255) : IM_COL32(90, 90, 92, 255);
+        dl->AddLine(to_screen(g, 0), to_screen(g, 1), col);
+        dl->AddLine(to_screen(0, g), to_screen(1, g), col);
+    }
+    dl->AddLine(to_screen(0, 0), to_screen(1, 1), IM_COL32(80, 80, 90, 255));
+
+    static int drag = -1;
+    ImVec2 mouse = ImGui::GetMousePos();
+    float mx = (mouse.x - p0.x) / size;
+    float my = 1.0f - (mouse.y - p0.y) / size;
+    int n = s->pressure_curve_count;
+    const f32 hit = ui_scale * 9.0f;
+
+    auto nearest = [&]() {
+        int best = -1; float best_d = hit;
+        for ( int i = 0; i < n; ++i ) {
+            ImVec2 sp = to_screen(s->pressure_curve_x[i], s->pressure_curve_y[i]);
+            float dx = sp.x - mouse.x, dy = sp.y - mouse.y;
+            float dist = sqrtf(dx*dx + dy*dy);
+            if ( dist < best_d ) { best_d = dist; best = i; }
+        }
+        return best;
+    };
+
+    if ( ImGui::IsItemHovered() ) {
+        if ( ImGui::IsMouseClicked(0) ) {
+            int hitp = nearest();
+            if ( hitp < 0 && n < PRESSURE_CURVE_MAX && mx > 0.0f && mx < 1.0f ) {
+                int at = 1;
+                while ( at < n-1 && s->pressure_curve_x[at] < mx ) { ++at; }
+                for ( int i = n; i > at; --i ) {
+                    s->pressure_curve_x[i] = s->pressure_curve_x[i-1];
+                    s->pressure_curve_y[i] = s->pressure_curve_y[i-1];
+                }
+                s->pressure_curve_x[at] = mx;
+                s->pressure_curve_y[at] = clamp(pressure_curve_eval(s, mx), 0.0f, 1.0f);
+                s->pressure_curve_count = (u8)(++n);
+                hitp = at;
+            }
+            drag = hitp;
+        }
+        else if ( ImGui::IsMouseClicked(1) ) {
+            int hitp = nearest();
+            if ( hitp > 0 && hitp < n-1 ) {
+                for ( int i = hitp; i < n-1; ++i ) {
+                    s->pressure_curve_x[i] = s->pressure_curve_x[i+1];
+                    s->pressure_curve_y[i] = s->pressure_curve_y[i+1];
+                }
+                s->pressure_curve_count = (u8)(--n);
+                drag = -1;
+            }
+        }
+    }
+    if ( !ImGui::IsMouseDown(0) ) { drag = -1; }
+    if ( drag >= 0 && drag < n ) {
+        const float gap = 0.01f;
+        if ( drag > 0 && drag < n-1 ) {
+            s->pressure_curve_x[drag] = clamp(mx, s->pressure_curve_x[drag-1] + gap, s->pressure_curve_x[drag+1] - gap);
+        }
+        s->pressure_curve_y[drag] = clamp(my, 0.0f, 1.0f);
+    }
+
+    ImVec2 pts[65];
+    for ( int i = 0; i <= 64; ++i ) {
+        float x = i / 64.0f;
+        pts[i] = to_screen(x, pressure_curve_eval(s, x));
+    }
+    dl->AddPolyline(pts, 65, IM_COL32(255, 255, 255, 255), false, 1.5f*ui_scale);
+    for ( int i = 0; i < n; ++i ) {
+        ImVec2 sp = to_screen(s->pressure_curve_x[i], s->pressure_curve_y[i]);
+        float r = ui_scale * 4.0f;
+        dl->AddRectFilled(ImVec2(sp.x - r, sp.y - r), ImVec2(sp.x + r, sp.y + r), IM_COL32(130, 130, 255, 255));
+    }
+    ImGui::TextWrapped("X: input pressure, Y: output pressure. Click to add a point, drag to move, right-click a point to remove.");
+    if ( ImGui::Button("Reset curve") ) { pressure_curve_reset(s); }
+}
+
 static void
 gui_tools_window(MiltonInput* input, Milton* milton)
 {
@@ -1454,6 +1549,8 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
                 ImGui::SliderFloat("Pressure smoothing", &s->pressure_smoothing, 0.05f, 1.0f, "%.2f");
                 ImGui::TextWrapped("Lower = smoother, more lag. 1.0 = raw tablet pressure.");
                 ImGui::SliderFloat("Minimum pressure", &s->pressure_min, 0.0f, 0.5f, "%.3f");
+                ImGui::Text("Pressure response curve");
+                gui_pressure_curve_editor(s, ui_scale);
                 ImGui::Separator();
                 ImGui::Text("Stroke");
                 ImGui::SliderFloat("Position smoothing", &s->position_smoothing, 0.05f, 1.0f, "%.2f");
@@ -1481,6 +1578,7 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
                     settings_init(&defaults);
                     s->pressure_smoothing = defaults.pressure_smoothing;
                     s->pressure_min = defaults.pressure_min;
+                    pressure_curve_reset(s);
                     s->position_smoothing = defaults.position_smoothing;
                     s->brush_scrub_speed = defaults.brush_scrub_speed;
                     s->zoom_drag_speed = defaults.zoom_drag_speed;
