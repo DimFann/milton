@@ -155,6 +155,11 @@ init_localization()
         EN(TXT_Action_TRANSFORM, "Rotate");
         EN(TXT_Action_FLIP_CANVAS_H, "Flip canvas horizontally");
         EN(TXT_Action_RESET_ROTATION, "Reset canvas rotation");
+        EN(TXT_Action_SELECT_LASSO, "Lasso select");
+        EN(TXT_Action_SELECT_DELETE, "Delete selection");
+        EN(TXT_Action_SELECT_NONE, "Deselect");
+        EN(TXT_Action_SELECT_TRANSFORM, "Free transform selection");
+        EN(TXT_Action_SELECT_COMMIT, "Apply free transform");
     #if MILTON_ENABLE_PROFILING
         EN(TXT_Action_TOGGLE_DEBUG_WINDOW, "Toggle debug window");
     #endif

@@ -486,6 +486,21 @@ gui_tools_window(MiltonInput* input, Milton* milton)
                 ImGui::SetTooltip("%s [%s]", name, key);
             }
         }
+        {
+            const bool armed = selection_lasso_armed(milton);
+            if ( armed ) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+            }
+            if ( ImGui::Button("Lasso", ImVec2(w, s*30)) ) {
+                selection_command(milton, SelCmd_ARM_LASSO);
+            }
+            if ( armed ) { ImGui::PopStyleColor(); }
+            if ( ImGui::IsItemHovered() ) {
+                char key[64];
+                hotkey_label(&milton->settings->bindings.bindings[Action_SELECT_LASSO], key, sizeof(key));
+                ImGui::SetTooltip("Lasso select [%s]", key);
+            }
+        }
     }
     ImGui::End();
     ImGui::PopStyleVar(2);
@@ -1087,7 +1102,7 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
 
                 MiltonBindings* bs = &st->bindings;
                 for ( int i = Action_FIRST; i < Action_COUNT; ++i ) {
-                    if ( i == Action_DRAG_BRUSH_SIZE || i == Action_DRAG_ZOOM || i == Action_TRANSFORM ) {
+                    if ( i == Action_DRAG_BRUSH_SIZE || i == Action_DRAG_ZOOM || i == Action_TRANSFORM || i == Action_SELECT_COMMIT ) {
                         continue;  // Fixed modifier gestures.
                     }
                     Binding* b = &bs->bindings[i];

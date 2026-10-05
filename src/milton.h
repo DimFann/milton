@@ -58,6 +58,7 @@ enum BrushEnum
 enum HistoryElementType
 {
     HistoryElement_STROKE_ADD,
+    HistoryElement_SELECTION_OP,  // layer_id is -1. Details live in the selection op stacks.
     //HistoryElement_LAYER_DELETE,
 };
 
@@ -73,6 +74,7 @@ struct CanvasView;
 struct Layer;
 struct MiltonPersist;
 struct MiltonBindings;
+struct Selection;
 
 // Stuff than can be reset when unloading a canvas
 struct CanvasState
@@ -252,6 +254,7 @@ struct Milton
     MiltonDragZoom* drag_zoom;
     PeekOut* peek_out;
     TransformMode* transform;
+    Selection* selection;
 
     // Primitives
     i32 grid_rows;
@@ -394,3 +397,5 @@ void milton_flip_canvas_horizontal(Milton* milton);
 void milton_reset_rotation(Milton* milton);
 void drag_zoom_start(Milton* milton, v2i pointer);
 void drag_zoom_stop(Milton* milton);
+
+#include "selection.h"

@@ -74,6 +74,11 @@ set_default_bindings(MiltonBindings* bs)
     binding(bs, Modifier_NONE, Binding::UNBOUND, Action_MODE_PRIMITIVE_GRID);
     binding(bs, Modifier_NONE, 'v', Action_FLIP_CANVAS_H);
     binding(bs, Modifier_NONE, Binding::ESC, Action_RESET_ROTATION);
+    binding(bs, Modifier_NONE, 's', Action_SELECT_LASSO);
+    binding(bs, Modifier_NONE, 'd', Action_SELECT_DELETE);
+    binding(bs, Modifier_CTRL, 'd', Action_SELECT_NONE);
+    binding(bs, Modifier_CTRL, 't', Action_SELECT_TRANSFORM);
+    binding(bs, Modifier_NONE, '\r', Action_SELECT_COMMIT);
     binding(bs, Modifier_NONE, Binding::F1, Action_HELP);
     binding(bs, Modifier_NONE, Binding::TAB, Action_TOGGLE_GUI);
 
@@ -282,8 +287,27 @@ binding_dispatch_action(BindableAction a, MiltonInput* input, Milton* milton, v2
             input->flags |= MiltonInputFlags_FULL_REFRESH;
         } break;
         case Action_RESET_ROTATION: {
+            if ( selection_transform_active(milton) ) {
+                selection_command(milton, SelCmd_CANCEL);
+                break;
+            }
             milton_reset_rotation(milton);
             input->flags |= MiltonInputFlags_FULL_REFRESH;
+        } break;
+        case Action_SELECT_LASSO: {
+            selection_command(milton, SelCmd_ARM_LASSO);
+        } break;
+        case Action_SELECT_DELETE: {
+            selection_command(milton, SelCmd_DELETE);
+        } break;
+        case Action_SELECT_NONE: {
+            selection_command(milton, SelCmd_DESELECT);
+        } break;
+        case Action_SELECT_TRANSFORM: {
+            selection_command(milton, SelCmd_TRANSFORM);
+        } break;
+        case Action_SELECT_COMMIT: {
+            selection_command(milton, SelCmd_COMMIT);
         } break;
         case Action_TRANSFORM: {
             transform_start(milton, pointer);

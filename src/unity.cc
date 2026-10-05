@@ -10,6 +10,7 @@
 #include "localization.cc"
 #include "memory.cc"
 #include "milton.cc"
+#include "selection.cc"
 #include "persist.cc"
 #include "profiler.cc"
 #include "renderer.cc"

@@ -74,6 +74,7 @@ void gpu_cook_stroke(Arena* arena, RenderBackend* renderer, Stroke* stroke,
                      CookStrokeOpt cook_option = CookStroke_NEW);
 
 void gpu_free_strokes(RenderBackend* renderer, CanvasState* canvas);
+void gpu_free_strokes(Stroke* strokes, i64 count, RenderBackend* renderer);
 
 
 // Creates OpenGL objects for strokes that are in view but are not loaded on the GPU. Deletes

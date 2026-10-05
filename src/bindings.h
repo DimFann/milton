@@ -46,6 +46,11 @@ enum BindableAction
     Action_TRANSFORM,
     Action_FLIP_CANVAS_H,
     Action_RESET_ROTATION,
+    Action_SELECT_LASSO,
+    Action_SELECT_DELETE,
+    Action_SELECT_NONE,
+    Action_SELECT_TRANSFORM,
+    Action_SELECT_COMMIT,
 
     #if MILTON_ENABLE_PROFILING
         // Debug bindings

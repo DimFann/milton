@@ -251,15 +251,9 @@ clear_stroke_redo(Milton* milton)
     while ( milton->canvas->stroke_graveyard.count > 0 ) {
         Stroke s = pop(&milton->canvas->stroke_graveyard);
     }
-    for ( i64 i = 0; i < milton->canvas->redo_stack.count; ++i ) {
-        HistoryElement h = milton->canvas->redo_stack.data[i];
-        if ( h.type == HistoryElement_STROKE_ADD ) {
-            for ( i64 j = i; j < milton->canvas->redo_stack.count-1; ++j ) {
-                milton->canvas->redo_stack.data[j] = milton->canvas->redo_stack.data[j+1];
-            }
-            pop(&milton->canvas->redo_stack);
-        }
-    }
+    // Any new edit invalidates everything that could be redone.
+    reset(&milton->canvas->redo_stack);
+    selection_clear_redo(milton);
 }
 
 static void
@@ -737,6 +731,7 @@ milton_init(Milton* milton, i32 width, i32 height, f32 ui_scale, PATH_CHAR* file
     milton->drag_brush = arena_alloc_elem(&milton->root_arena, MiltonDragBrush);
     milton->drag_zoom = arena_alloc_elem(&milton->root_arena, MiltonDragZoom);
     milton->transform = arena_alloc_elem(&milton->root_arena, TransformMode);
+    milton->selection = selection_create(&milton->root_arena);
 
     milton->persist->target_MB_per_sec = 0.2f;
 
@@ -903,6 +898,8 @@ milton_reset_canvas(Milton* milton)
     gpu_free_strokes(milton->renderer, milton->canvas);
     milton->persist->mlt_binary_version = MILTON_MINOR_VERSION;
     milton->persist->last_save_time = {};
+
+    selection_reset(milton);
 
     // Clear history
     release(&canvas->history);
@@ -1578,10 +1575,19 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     }
 
     { // Undo / Redo
+        if ( (input->flags & (MiltonInputFlags_UNDO | MiltonInputFlags_REDO)) ) {
+            selection_finish(milton);
+        }
         if ( (input->flags & MiltonInputFlags_UNDO) ) {
             // Grab undo elements. They might be from deleted layers, so discard dead results.
             while ( milton->canvas->history.count > 0 ) {
                 HistoryElement h = pop(&milton->canvas->history);
+                if ( h.type == HistoryElement_SELECTION_OP ) {
+                    if ( selection_undo_op(milton) ) {
+                        push(&milton->canvas->redo_stack, h);
+                    }
+                    break;
+                }
                 Layer* l = layer::get_by_id(milton->canvas->root_layer, h.layer_id);
                 // found a thing to undo.
                 if ( l ) {
@@ -1601,6 +1607,11 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
             if ( milton->canvas->redo_stack.count > 0 ) {
                 HistoryElement h = pop(&milton->canvas->redo_stack);
                 switch ( h.type ) {
+                case HistoryElement_SELECTION_OP: {
+                    if ( selection_redo_op(milton) ) {
+                        push(&milton->canvas->history, h);
+                    }
+                } break;
                 case HistoryElement_STROKE_ADD: {
                     Layer* l = layer::get_by_id(milton->canvas->root_layer, h.layer_id);
                     if ( l && count(&milton->canvas->stroke_graveyard) > 0 ) {
@@ -1667,6 +1678,11 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
         render_flags &= ~RenderBackendFlags_GUI_VISIBLE;
     }
 
+    b32 sel_consumed = selection_tick(milton, input);
+    if ( selection_take_dirty(milton) ) {
+        should_save = true;
+    }
+
     // Mode tick
     if (milton->current_mode == MiltonMode::ERASER) {
         milton->working_stroke.flags |= StrokeFlag_ERASER;
@@ -1691,7 +1707,7 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
             milton->flags_in_eraser_mode = false;
         }
     }
-    if ( current_mode_is_for_drawing(milton) &&
+    if ( current_mode_is_for_drawing(milton) && !sel_consumed &&
         (input->input_count > 0 || end_stroke) ) {
         if ( !is_user_drawing(milton)
              && gui_consume_input(milton->gui, input) ) {
@@ -1872,6 +1888,9 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
 
     // Disable hover if panning.
     if ( input->flags & MiltonInputFlags_PANNING ) {
+        brush_outline_should_draw = false;
+    }
+    if ( selection_cursor(milton) != 0 ) {
         brush_outline_should_draw = false;
     }
 

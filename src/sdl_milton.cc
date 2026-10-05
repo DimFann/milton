@@ -915,6 +915,12 @@ milton_main(bool is_fullscreen, char* file_to_open)
                               && is_inside_rect_scalar(get_bounds_for_picker_and_colors(&milton->gui->picker), x,y) ) {
                         cursor_set_and_show(platform.cursor_default);
                     }
+                    else if ( current_mode_is_for_drawing(milton) && selection_cursor(milton) == 1 ) {
+                        cursor_set_and_show(platform.cursor_crosshair);
+                    }
+                    else if ( current_mode_is_for_drawing(milton) && selection_cursor(milton) == 2 ) {
+                        cursor_set_and_show(platform.cursor_default);
+                    }
                     else if ( milton->current_mode == MiltonMode::PEN ||
                               milton->current_mode == MiltonMode::ERASER ||
                               mode_is_for_primitives(milton->current_mode) ) {
@@ -1009,6 +1015,7 @@ milton_main(bool is_fullscreen, char* file_to_open)
         PROFILE_GRAPH_END(polling);
         PROFILE_GRAPH_BEGIN(GL);
         milton_update_and_render(milton, &milton_input);
+        selection_draw_overlay(milton);
         if ( !(milton->flags & MiltonStateFlags_RUNNING) ) {
             platform.should_quit = true;
         }
