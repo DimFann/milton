@@ -127,6 +127,8 @@ struct SmoothFilter
 {
     b32 first;
     v2f prediction;
+    v2f last_raw;
+    f32 speed;      // Averaged pointer speed in pixels per sample.
     v2l center;
 };
 

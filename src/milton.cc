@@ -371,22 +371,48 @@ stroke_append_point(Stroke* stroke, v2l canvas_point, f32 pressure)
     }
 }
 
-static v2l
+// Returns the filtered position in raster space with sub-pixel precision. Input positions are whole
+// pixels, so slow strokes show stair steps unless they are smoothed harder. The filter strength
+// therefore adapts to the pointer speed: heavy when slow, `alpha` when fast.
+static v2f
 smooth_filter(SmoothFilter* filter, v2l input, f32 alpha)
 {
-    v2f point = v2l_to_v2f(input - filter->center);
+    v2f point = v2f{ (f32)(input.x - filter->center.x), (f32)(input.y - filter->center.y) };
 
     if (filter->first)
     {
         filter->prediction = point;
+        filter->last_raw = point;
+        filter->speed = 0;
         filter->first = false;
     }
     else
     {
-        filter->prediction = alpha * point + (1 - alpha) * filter->prediction;
+        v2f d = point - filter->last_raw;
+        filter->last_raw = point;
+        filter->speed += 0.2f * (sqrtf(d.x*d.x + d.y*d.y) - filter->speed);
+
+        f32 t = clamp(filter->speed / 8.0f, 0.0f, 1.0f);
+        f32 a = alpha * (0.15f + 0.85f * t);
+        filter->prediction = a * point + (1 - a) * filter->prediction;
     }
-    v2l result = v2f_to_v2l(filter->prediction) + filter->center;
-    return result;
+    return v2f{ filter->prediction.x + filter->center.x, filter->prediction.y + filter->center.y };
+}
+
+// Same as raster_to_canvas but keeps the fractional part of the raster position.
+static v2l
+raster_to_canvas_f(CanvasView* view, v2f p)
+{
+    f32 cos_angle = cosf(view->angle);
+    f32 sin_angle = sinf(view->angle);
+    f32 x = p.x - view->zoom_center.x;
+    f32 y = p.y - view->zoom_center.y;
+    if ( view->flipped ) { x = -x; }
+    double scale = (double)view->scale;
+    return v2l{
+        (i64)((double)(x * cos_angle - y * sin_angle) * scale) + view->pan_center.x,
+        (i64)((double)(y * cos_angle + x * sin_angle) * scale) + view->pan_center.y,
+    };
 }
 
 static void
@@ -464,11 +490,13 @@ milton_stroke_input(Milton* milton, MiltonInput const* input)
     for ( int input_i = 0; input_i < input->input_count; ++input_i ) {
 
         v2l in_point = input->points[input_i];
+        v2l canvas_point;
         if (milton->flags & MiltonStateFlags_BRUSH_SMOOTHING) {
-            in_point = smooth_filter(milton->smooth_filter, in_point, milton->settings->position_smoothing);
+            v2f smoothed = smooth_filter(milton->smooth_filter, in_point, milton->settings->position_smoothing);
+            canvas_point = raster_to_canvas_f(milton->view, smoothed);
+        } else {
+            canvas_point = raster_to_canvas(milton->view, in_point);
         }
-
-        v2l canvas_point = raster_to_canvas(milton->view, in_point);
 
         f32 pressure = NO_PRESSURE_INFO;
 
