@@ -533,6 +533,179 @@ gui_tools_window(MiltonInput* input, Milton* milton)
 }
 
 // Compact options for the selected tool, floating at the top left next to the tool panel.
+// ---- Brush presets (pen and eraser). Stored in presets.bin next to the settings.
+struct BrushPreset
+{
+    char name[32];
+    i32  kind;  // BrushEnum_PEN or BrushEnum_ERASER
+    i32  size;
+    f32  alpha;
+    f32  hardness;
+    f32  pressure_opacity_min;
+    i32  shape;
+    i32  pressure_size;
+    f32  pressure_size_min;
+    f32  shape_aspect;
+    f32  shape_angle;
+    i32  pressure_opacity;
+    i32  relative_to_canvas;
+};
+
+#define MAX_BRUSH_PRESETS 64
+static BrushPreset g_presets[MAX_BRUSH_PRESETS];
+static i32  g_num_presets = 0;
+static bool g_presets_loaded = false;
+
+static void
+presets_path(PATH_CHAR* fname)
+{
+    PATH_CHAR tmp[MAX_PATH] = TO_PATH_STR("presets.bin");
+    platform_fname_at_config(tmp, MAX_PATH);
+    memcpy(fname, tmp, sizeof(tmp));
+}
+
+static void
+presets_save()
+{
+    PATH_CHAR fname[MAX_PATH];
+    presets_path(fname);
+    FILE* fd = platform_fopen(fname, TO_PATH_STR("wb"));
+    if ( fd ) {
+        u32 sz = sizeof(BrushPreset);
+        fwrite(&sz, sizeof(sz), 1, fd);
+        fwrite(&g_num_presets, sizeof(g_num_presets), 1, fd);
+        fwrite(g_presets, sizeof(BrushPreset), g_num_presets, fd);
+        fclose(fd);
+    }
+}
+
+static void
+presets_load()
+{
+    g_presets_loaded = true;
+    PATH_CHAR fname[MAX_PATH];
+    presets_path(fname);
+    FILE* fd = platform_fopen(fname, TO_PATH_STR("rb"));
+    if ( fd ) {
+        u32 sz = 0;
+        i32 n = 0;
+        if ( fread(&sz, sizeof(sz), 1, fd) == 1 && sz == sizeof(BrushPreset)
+             && fread(&n, sizeof(n), 1, fd) == 1 && n >= 0 && n <= MAX_BRUSH_PRESETS ) {
+            g_num_presets = (i32)fread(g_presets, sizeof(BrushPreset), n, fd);
+        }
+        fclose(fd);
+    }
+}
+
+static void
+preset_capture(Milton* milton, BrushPreset* p, int kind)
+{
+    const Brush& b = milton->brushes[kind];
+    p->kind = kind;
+    p->size = milton->brush_sizes[kind];
+    p->alpha = b.alpha;
+    p->hardness = b.hardness;
+    p->pressure_opacity_min = b.pressure_opacity_min;
+    p->shape = b.shape;
+    p->pressure_size = b.pressure_size;
+    p->pressure_size_min = b.pressure_size_min;
+    p->shape_aspect = b.shape_aspect;
+    p->shape_angle = b.shape_angle;
+    p->pressure_opacity = (kind == BrushEnum_ERASER) ? (milton->eraser_pressure_opacity ? 1 : 0)
+                                                      : ((milton->working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY) ? 1 : 0);
+    p->relative_to_canvas = (milton->working_stroke.flags & StrokeFlag_RELATIVE_TO_CANVAS) ? 1 : 0;
+}
+
+static void
+preset_apply(Milton* milton, const BrushPreset* p)
+{
+    int kind = p->kind;
+    Brush* b = &milton->brushes[kind];
+    if ( kind == BrushEnum_PEN ) { b->alpha = clamp(p->alpha, 0.0f, 1.0f); }
+    b->hardness = clamp(p->hardness, 1.0f, k_max_hardness);
+    b->pressure_opacity_min = p->pressure_opacity_min;
+    b->shape = p->shape;
+    b->pressure_size = p->pressure_size;
+    b->pressure_size_min = clamp(p->pressure_size_min, 0.0f, 1.0f);
+    b->shape_aspect = clamp(p->shape_aspect, 0.05f, 1.0f);
+    b->shape_angle = p->shape_angle;
+
+    if ( kind == BrushEnum_ERASER ) { milton->eraser_pressure_opacity = p->pressure_opacity != 0; }
+    else if ( p->pressure_opacity ) { milton->working_stroke.flags |= StrokeFlag_PRESSURE_TO_OPACITY; }
+    else { milton->working_stroke.flags &= ~StrokeFlag_PRESSURE_TO_OPACITY; }
+
+    if ( p->relative_to_canvas ) { milton->working_stroke.flags |= StrokeFlag_RELATIVE_TO_CANVAS; }
+    else { milton->working_stroke.flags &= ~StrokeFlag_RELATIVE_TO_CANVAS; }
+
+    milton_set_brush_size(milton, clamp(p->size, 1, MILTON_MAX_BRUSH_SIZE));  // Also refreshes the brushes.
+}
+
+static void
+gui_presets_section(Milton* milton, f32 s)
+{
+    int kind = milton_get_brush_enum(milton);
+    if ( kind != BrushEnum_PEN && kind != BrushEnum_ERASER ) { return; }
+    if ( !g_presets_loaded ) { presets_load(); }
+
+    static int rename_idx = -1;
+    static int rename_grace = 0;
+
+    ImGui::Separator();
+    ImGui::Text("Presets");
+    ImGui::SameLine();
+    if ( ImGui::SmallButton("+##add_preset") && g_num_presets < MAX_BRUSH_PRESETS ) {
+        BrushPreset* p = &g_presets[g_num_presets++];
+        memset(p, 0, sizeof(*p));
+        int n = 0;
+        for ( int i = 0; i < g_num_presets; ++i ) { n += g_presets[i].kind == kind; }
+        snprintf(p->name, sizeof(p->name), "%s %d", kind == BrushEnum_PEN ? "Brush" : "Eraser", n + 1);
+        preset_capture(milton, p, kind);
+        presets_save();
+    }
+
+    const f32 remove_w = ImGui::CalcTextSize("-").x + ImGui::GetStyle().FramePadding.x * 2;
+    int to_remove = -1;
+    for ( int i = 0; i < g_num_presets; ++i ) {
+        BrushPreset* p = &g_presets[i];
+        if ( p->kind != kind ) { continue; }
+        ImGui::PushID(i);
+        if ( rename_idx == i ) {
+            if ( rename_grace == 2 ) { ImGui::SetKeyboardFocusHere(); }
+            ImGui::PushItemWidth(ImGui::GetContentRegionAvailWidth() - remove_w - ImGui::GetStyle().ItemSpacing.x);
+            bool done = ImGui::InputText("##rename", p->name, sizeof(p->name), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+            ImGui::PopItemWidth();
+            if ( rename_grace > 0 ) { --rename_grace; }
+            else if ( !ImGui::IsItemActive() ) { done = true; }
+            if ( done ) {
+                if ( p->name[0] == 0 ) { snprintf(p->name, sizeof(p->name), "Preset"); }
+                rename_idx = -1;
+                presets_save();
+            }
+        }
+        else {
+            f32 w = ImGui::GetContentRegionAvailWidth() - remove_w - ImGui::GetStyle().ItemSpacing.x;
+            if ( ImGui::Selectable(p->name, false, ImGuiSelectableFlags_AllowDoubleClick, ImVec2(w, 0)) ) {
+                if ( ImGui::IsMouseDoubleClicked(0) ) {
+                    rename_idx = i;
+                    rename_grace = 2;
+                }
+                else {
+                    preset_apply(milton, p);
+                    milton->gui->flags |= (i32)MiltonGuiFlags_SHOWING_PREVIEW;
+                }
+            }
+        }
+        ImGui::SameLine();
+        if ( ImGui::SmallButton("-") ) { to_remove = i; }
+        ImGui::PopID();
+    }
+    if ( to_remove >= 0 ) {
+        for ( int i = to_remove; i < g_num_presets - 1; ++i ) { g_presets[i] = g_presets[i+1]; }
+        --g_num_presets;
+        rename_idx = -1;
+        presets_save();
+    }
+}
 // Returns the height of the window.
 i32
 gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, PlatformSettings* prefs, b32 reset_gui)
@@ -687,6 +860,8 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
                              StrokeFlag_RELATIVE_TO_CANVAS);
 
         ImGui::PopItemWidth();
+
+        gui_presets_section(milton, s);
 
         ImVec2 pos  = ImGui::GetWindowPos();
         ImVec2 size_w = ImGui::GetWindowSize();
