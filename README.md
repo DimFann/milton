@@ -5,11 +5,11 @@ This fork adds some quality of life features I've been wanting for years, as wel
 ### Notable additions
 * Rebindable hotkeys
 * Reorganized UI, with dark mode
-* Pressure response tuning, and pressure smoothing
-* From 8 to 16 bit values for smoother stroke appearances
+* Pressure response tuning, pressure and position smoothing
+* From 8 to 16 bit color values for smoother stroke appearances
 * Better precision for stroke placement
 * Allow for deeper zoom, start canvas zoom further out for more in/out by default.
-* Variable harness for brush and eraser + other options & tilt support
+* Variable hardness for brush and eraser + other brush options & tilt support
 * Rectangular brushes
 * Lasso Functions
     * Arm with S
