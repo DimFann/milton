@@ -266,6 +266,7 @@ gpu_update_picker(RenderBackend* r, ColorPicker* picker)
 
     v3f hsv = picker->data.hsv;
     gl::set_uniform_vec3(r->picker_program, "u_color", 1, hsv_to_rgb(hsv).d);
+    gl::set_uniform_vec4(r->picker_program, "u_bg_color", 1, picker->bg_color.d);
 
     // Point within triangle
     {

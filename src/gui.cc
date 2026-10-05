@@ -1199,6 +1199,16 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
     static auto color_header_hovered = color_buttons;
 
     picker_set_fixed_triangle(&milton->gui->picker, milton->settings->picker_triangle_rotates ? 0 : 1);
+    {
+        v4f want = milton->settings->light_theme ? v4f{ 0.5f, 0.5f, 0.55f, 0.6f }
+                                                  : v4f{ 0x25/255.f, 0x25/255.f, 0x26/255.f, 1.0f };
+        ColorPicker* cp = &milton->gui->picker;
+        if ( cp->bg_color.r != want.r || cp->bg_color.g != want.g || cp->bg_color.b != want.b || cp->bg_color.a != want.a ) {
+            cp->bg_color = want;
+            gpu_update_picker(milton->renderer, cp);
+            milton->render_settings.do_full_redraw = true;
+        }
+    }
 
     if ( !milton->settings->light_theme ) {
         // VS Code Dark+ inspired palette.
@@ -2273,7 +2283,10 @@ gui_anchor_picker_top_right(MiltonGui* gui, i32 screen_width)
 
     i32 r = (i32)(gui->panel_width / 2);
     if ( r > screen_width/2 ) { r = screen_width/2; }
-    v2i new_center = { screen_width - r, r + (i32)(ui_scale*30) };
+    // Sit flush under the menu bar so the canvas doesn't show through.
+    f32 top_px = ui_scale*30;
+    if ( ImGui::GetCurrentContext() ) { top_px = ImGui::GetFrameHeight(); }
+    v2i new_center = { screen_width - r, r + (i32)ceilf(top_px) };
 
     picker->bounds_radius_px = r;
     picker->wheel_half_width = r * 0.15f;

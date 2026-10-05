@@ -8,6 +8,7 @@ uniform vec2 u_pointb;
 uniform vec2 u_pointc;
 
 uniform vec3 u_color;
+uniform vec4 u_bg_color;
 uniform float u_angle;
 
 uniform vec2 u_triangle_point;
@@ -121,7 +122,7 @@ main()
     /* vec2 screen_point = vec2(gl_FragCoord.x, u_screen_size.y-gl_FragCoord.y); */
     /* vec2 coord = screen_point / u_screen_size; */
     /* coord.y = 1-coord.y; */
-    vec4 color = vec4(0.5, 0.5, 0.55, 0.6);
+    vec4 color = u_bg_color;
 
     float dist = distance(vec2(0), v_norm);
     // Wheel and triangle
