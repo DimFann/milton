@@ -17,7 +17,8 @@ void
 main()
 {
     vec2 coord = gl_FragCoord.xy / u_screen_size;
-    float alpha = texture(u_info, coord).a;
+    vec4 info = texture(u_info, coord);
+    float alpha = max(info.g, min(info.a, info.r));
     if ( alpha > 0.0 ) {
         out_color = u_brush_color * alpha;
     }

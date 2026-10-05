@@ -114,6 +114,7 @@ struct MiltonSettings
     float zoom_drag_speed;      // Exponential zoom per pixel of Ctrl+Space drag
     char  rotate_key;           // Hold + LMB drag rotates the canvas. Lowercase ASCII.
     u8    unbound_prims_migrated;  // Rectangle/grid hotkeys were unbound by default in a later version.
+    float hardness_min_percent;    // Real hardness (0-100) shown as 0% on the brush hardness slider.
 };
 #pragma pack(pop)
 

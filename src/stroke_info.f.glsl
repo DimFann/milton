@@ -9,6 +9,17 @@ uniform float u_hardness;
 uniform int u_use_pressure;
 uniform int u_use_distance;
 
+// Opacity profile across the brush. x is distance / radius in [0, 1].
+float
+feather(float x, float h)
+{
+    float core = h * h;
+    float t = clamp((x - core) / max(1.0 - core, 0.0001), 0.0, 1.0);
+    float g = exp(-4.0 * t * t);
+    float g1 = exp(-4.0);
+    return (g - g1) / (1.0 - g1);
+}
+
 void
 main()
 {
@@ -45,16 +56,32 @@ main()
     } else if (t_raw > 1.0) {
         cap_pressure = clamp(mix(v_pointa.z, v_pointb.z, t_raw), 0.0, v_pointb.z);
     }
-    // Final opacity contributed by this segment. The MAX blend keeps the strongest contribution per
-    // pixel, so re-treading a stroke never darkens it and each pixel uses its own nearest segment.
-    float alpha = clamp(0.5 + (rad - dist) / float(u_scale), 0.0, 1.0);
+    // Channels (see the blend setup in the renderer):
+    //   R (MAX): feathered pressure opacity. It caps the accumulated opacity.
+    //   G (MAX): strongest single-segment opacity at this pixel.
+    //   A (ADD): arc-length weighted sum of opacities, which fills the gap between nearby passes.
+    // The result is max(G, min(A, R)): a re-tread at the same pressure can never exceed R.
+    float pressure_opacity = 1.0;
     if (u_use_pressure != 0) {
-        alpha *= (1.0 - u_opacity_min) * cap_pressure + u_opacity_min;
+        pressure_opacity = (1.0 - u_opacity_min) * cap_pressure + u_opacity_min;
     }
+    float h = clamp((u_hardness - 1.0) / 9.0, 0.0, 1.0);
+    float shape = 1.0;
+    float shape_mean = 1.0;
     if (u_use_distance != 0) {
-        float h = clamp((u_hardness - 1.0) / 9.0, 0.0, 1.0);
-        float fall = clamp((1.0 - dist / rad) / max(1.0 - h, 0.0001), 0.0, 1.0);
-        alpha *= fall * fall * (3.0 - 2.0 * fall);
+        shape = feather(clamp(dist / rad, 0.0, 1.0), h);
+        shape_mean = 0.0;
+        for (int k = 0; k < 8; ++k) {
+            shape_mean += feather((float(k) + 0.5) / 8.0, h) / 8.0;
+        }
     }
-    out_color = vec4(0.0, 0.0, 0.0, alpha);
+    float coverage = clamp(0.5 + (rad - dist) / float(u_scale), 0.0, 1.0);
+    float alpha = coverage * pressure_opacity * shape;
+
+    // Weight so that a straight pass sums to about the single-segment profile.
+    float weight = min(len_ab, rad) / max(2.0 * rad * shape_mean, 0.0001);
+    // The ceiling is feathered too (with a wider profile than a single segment, so it can fill the
+    // gaps between passes). A flat ceiling would show as a hard-edged plateau.
+    float ceiling_opacity = coverage * pressure_opacity * sqrt(shape);
+    out_color = vec4(ceiling_opacity, alpha, 0.0, alpha * weight);
 }

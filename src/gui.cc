@@ -493,8 +493,17 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
                 {
                     int brush_enum = milton_get_brush_enum(milton);
                     f32* hardness = &milton->brushes[brush_enum].hardness;
+                    // Very soft edges show seams between nearby passes, so the slider starts at a minimum.
+                    const f32 k_min_hardness_percent = clamp(milton->settings->hardness_min_percent, 0.0f, 95.0f);
                     f32 percent = (*hardness - 1.0f) / (k_max_hardness - 1.0f) * 100.0f;
-                    if ( ImGui::SliderFloat(loc(TXT_hardness), &percent, 0.0f, 100.0f, "%.0f%%") ) {
+                    if ( percent < k_min_hardness_percent ) {
+                        percent = k_min_hardness_percent;
+                        *hardness = 1.0f + percent / 100.0f * (k_max_hardness - 1.0f);
+                    }
+                    // The slider shows 0-100%, mapped onto the real range of 50-100%.
+                    f32 shown = (percent - k_min_hardness_percent) / (100.0f - k_min_hardness_percent) * 100.0f;
+                    if ( ImGui::SliderFloat(loc(TXT_hardness), &shown, 0.0f, 100.0f, "%.0f%%") ) {
+                        percent = k_min_hardness_percent + shown / 100.0f * (100.0f - k_min_hardness_percent);
                         *hardness = 1.0f + percent / 100.0f * (k_max_hardness - 1.0f);
                     }
                     // A hard brush uses the fast path; anything softer needs the feathered path.
@@ -976,6 +985,10 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
                 ImGui::Text("Shortcuts");
                 ImGui::InputFloat("Brush resize speed (Alt+RMB)", &s->brush_scrub_speed, 0.05f, 0.25f, 2);
                 ImGui::InputFloat("Zoom drag speed (Ctrl+Space+LMB)", &s->zoom_drag_speed, 0.001f, 0.005f, 4);
+                ImGui::Separator();
+                ImGui::Text("Brush");
+                ImGui::SliderFloat("Minimum hardness (%)", &s->hardness_min_percent, 0.0f, 95.0f, "%.0f");
+                ImGui::TextWrapped("The brush panel hardness slider spans this value (shown as 0%) to 100%.");
                 s->pressure_smoothing = clamp(s->pressure_smoothing, 0.05f, 1.0f);
                 s->pressure_min = clamp(s->pressure_min, 0.0f, 0.5f);
                 s->position_smoothing = clamp(s->position_smoothing, 0.05f, 1.0f);
@@ -994,6 +1007,7 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
                     s->position_smoothing = defaults.position_smoothing;
                     s->brush_scrub_speed = defaults.brush_scrub_speed;
                     s->zoom_drag_speed = defaults.zoom_drag_speed;
+                    s->hardness_min_percent = defaults.hardness_min_percent;
                 }
             } ImGui::End();
             if ( !open ) {

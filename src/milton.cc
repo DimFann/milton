@@ -640,6 +640,7 @@ settings_init(MiltonSettings* s)
     s->brush_scrub_speed = 0.5f;
     s->zoom_drag_speed = 0.005f;
     s->rotate_key = 'w';
+    s->hardness_min_percent = 75.0f;
 }
 
 int milton_save_thread(void* state_);  // forward

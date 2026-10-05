@@ -1578,7 +1578,8 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                     glEnable(GL_BLEND);
                     // RGB: min normalized distance. A: max pressure. The shader extrapolates
                     // pressure into the round caps so they don't stamp flat discs (banding).
-                    glBlendEquation(GL_MAX);
+                    glBlendEquationSeparate(GL_MAX, GL_FUNC_ADD);
+                    glBlendFunc(GL_ONE, GL_ONE);
                     gl::set_uniform_i(r->stroke_info_program, "u_use_pressure", (re->flags & RenderElementFlags_PRESSURE_TO_OPACITY) ? 1 : 0);
                     gl::set_uniform_i(r->stroke_info_program, "u_use_distance", (re->flags & RenderElementFlags_DISTANCE_TO_OPACITY) ? 1 : 0);
                     gl::set_uniform_f(r->stroke_info_program, "u_opacity_min", re->min_opacity);
