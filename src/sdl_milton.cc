@@ -947,7 +947,17 @@ milton_main(bool is_fullscreen, char* file_to_open)
             {
                     static b32 was_exporting = false;
 
-                    if ( platform.is_panning || platform.waiting_for_pan_input ) {
+                    // Outside the client area (OS title bar, borders) the cursor must be visible.
+                    int gmx = 0, gmy = 0, wx = 0, wy = 0, ww = 0, wh = 0;
+                    SDL_GetGlobalMouseState(&gmx, &gmy);
+                    SDL_GetWindowPosition(window, &wx, &wy);
+                    SDL_GetWindowSize(window, &ww, &wh);
+                    b32 pointer_outside_client = gmx < wx || gmy < wy || gmx >= wx + ww || gmy >= wy + wh;
+
+                    if ( pointer_outside_client && !platform.is_pointer_down && !platform.is_panning ) {
+                        cursor_set_and_show(platform.cursor_default);
+                    }
+                    else if ( platform.is_panning || platform.waiting_for_pan_input ) {
                         cursor_set_and_show(platform.cursor_sizeall);
                     }
                     // Show resize icon

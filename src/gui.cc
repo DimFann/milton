@@ -445,6 +445,8 @@ hotkey_resolve_rotate_conflicts(Milton* milton)
     rel->bound_key = st->bindings.bindings[Action_PEEK_OUT].bound_key;
 }
 // Thin tool selector fixed to the left edge, under the menu bar.
+void picker_set_fixed_triangle(ColorPicker* picker, int fixed);
+
 static void
 gui_tools_window(MiltonInput* input, Milton* milton)
 {
@@ -1014,6 +1016,8 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
     static auto color_text_selected  = ImVec4{ 0.509804f, 0.627451f, 0.823529f,1};
     static auto color_header_hovered = color_buttons;
 
+    picker_set_fixed_triangle(&milton->gui->picker, milton->settings->picker_triangle_rotates ? 0 : 1);
+
     if ( !milton->settings->light_theme ) {
         // VS Code Dark+ inspired palette.
         color_window_background = ImVec4{ 0x25/255.f, 0x25/255.f, 0x26/255.f, 1 };
@@ -1287,6 +1291,10 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
                     bool dark = !milton->settings->light_theme;
                     if ( ImGui::Checkbox("Dark mode", &dark) ) {
                         milton->settings->light_theme = dark ? 0 : 1;
+                    }
+                    bool rotates = milton->settings->picker_triangle_rotates != 0;
+                    if ( ImGui::Checkbox("Rotate color triangle with hue", &rotates) ) {
+                        milton->settings->picker_triangle_rotates = rotates ? 1 : 0;
                     }
                     ImGui::Separator();
                 }
@@ -1605,6 +1613,7 @@ static void
 picker_update_points(ColorPicker* picker, float angle)
 {
     picker->data.hsv.h = radians_to_degrees(angle);
+    if ( picker->fixed_triangle ) { angle = 0; }
     // Update the triangle
     float radius = 0.9f * (picker->wheel_radius - picker->wheel_half_width);
     v2f center = v2l_to_v2f(VEC2L(picker->center));
@@ -1625,6 +1634,15 @@ picker_update_points(ColorPicker* picker, float angle)
     }
 }
 
+
+void
+picker_set_fixed_triangle(ColorPicker* picker, int fixed)
+{
+    if ( picker->fixed_triangle != fixed ) {
+        picker->fixed_triangle = fixed;
+        picker_update_points(picker, picker->data.hsv.h * kPi / 180.0f);
+    }
+}
 
 static void
 picker_update_wheel(ColorPicker* picker, v2f polar_point)

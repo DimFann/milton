@@ -49,6 +49,7 @@ struct ColorPicker
     Rect    bounds;
     float   wheel_radius;
     float   wheel_half_width;
+    int     fixed_triangle;  // Non-zero: triangle does not rotate with the hue.
 
     u32*    pixels;  // Blit this to render picker. Dimensions: picker_get_bounds(..)
 
