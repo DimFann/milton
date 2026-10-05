@@ -997,6 +997,7 @@ milton_reset_canvas(Milton* milton)
 void
 milton_reset_canvas_and_set_default(Milton* milton)
 {
+    milton->flags &= ~MiltonStateFlags_AUTOSAVE_BLOCKED;
     milton_reset_canvas(milton);
 
     // New Root
@@ -2042,8 +2043,34 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
         platform_cursor_show();
     }
 
-    if ( should_save ) {
+    b32 skip_write = false;
+    if ( (input->flags & (MiltonInputFlags_SAVE_FILE | MiltonInputFlags_OPEN_FILE)) ) {
+        milton->flags &= ~MiltonStateFlags_AUTOSAVE_BLOCKED;
+    }
+    if ( (milton->flags & MiltonStateFlags_AUTOSAVE_BLOCKED) ) {
         if ( !(milton->flags & MiltonStateFlags_RUNNING) ) {
+            if ( platform_dialog_yesno("You have unsaved changes from an irreversible operation (autosave was paused). Save now?", "Save?") ) {
+                milton->flags &= ~MiltonStateFlags_AUTOSAVE_BLOCKED;
+            }
+        }
+        if ( (milton->flags & MiltonStateFlags_AUTOSAVE_BLOCKED) ) {
+            skip_write = true;
+#if MILTON_SAVE_ASYNC
+            // Drop any save request queued before the irreversible edit.
+            SDL_LockMutex(milton->save_mutex);
+            if ( milton->save_flag == SaveEnum_SAVE_REQUESTED ) { milton->save_flag = SaveEnum_WAITING; }
+            SDL_UnlockMutex(milton->save_mutex);
+#endif
+            // Quitting without saving still has to shut down cleanly.
+            if ( !(milton->flags & MiltonStateFlags_RUNNING) ) { should_save = true; }
+            else { should_save = false; }
+        }
+    }
+
+    if ( should_save ) {
+        if ( skip_write ) {
+            // Autosave is paused. Do not touch the file.
+        } else if ( !(milton->flags & MiltonStateFlags_RUNNING) ) {
             // Always save synchronously when exiting.
             milton_save(milton);
         } else {
@@ -2054,7 +2081,8 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
 #endif
         }
         // We're about to close and the last save failed and the drawing changed.
-        if (    !(milton->flags & MiltonStateFlags_RUNNING)
+        if (    !skip_write
+             && !(milton->flags & MiltonStateFlags_RUNNING)
              && (milton->flags & MiltonStateFlags_LAST_SAVE_FAILED)
              && (milton->flags & MiltonStateFlags_MOVE_FILE_FAILED)
              && milton->persist->last_save_stroke_count != layer::count_strokes(milton->canvas->root_layer) ) {

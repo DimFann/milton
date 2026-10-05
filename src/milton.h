@@ -288,7 +288,7 @@ enum MiltonStateFlags
     MiltonStateFlags_JUST_SAVED             = 1 << 3,
     MiltonStateFlags_NEW_CANVAS             = 1 << 4,
     MiltonStateFlags_DEFAULT_CANVAS         = 1 << 5,
-                                            // 1 << 6 unused
+    MiltonStateFlags_AUTOSAVE_BLOCKED       = 1 << 6,  // After an irreversible edit: nothing is written until the user saves.
                                             // 1 << 7 unused
                                             // 1 << 8 unused
     MiltonStateFlags_LAST_SAVE_FAILED       = 1 << 9,

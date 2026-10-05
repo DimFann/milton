@@ -159,6 +159,9 @@ gui_layer_window(MiltonInput* input, PlatformState* platform, Milton* milton, f3
     static i32 layer_renaming_idx = -1;
     static b32 focus_rename_field = false;
     static b32 deleting = false;
+    static int merge_stage = 0;  // 1 below hidden (error), 2 selected hidden (unhide?), 3 confirm
+    static b32 merge_open = false;
+    static b32 merge_harden = false;
 
     const ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse;
     if ( ImGui::Begin(loc(TXT_layers), NULL, flags) ) {
@@ -183,7 +186,8 @@ gui_layer_window(MiltonInput* input, PlatformState* platform, Milton* milton, f3
 
         // Effects of the current layer.
         {
-            if ( ImGui::SmallButton(loc(TXT_blur)) ) {
+            // The blur button is hidden; effects from older files are still listed so they can be removed.
+            if ( false && ImGui::SmallButton(loc(TXT_blur)) ) {
                 LayerEffect* e = arena_alloc_elem(&milton->canvas_arena, LayerEffect);
                 e->next = milton->canvas->working_layer->effects;
                 milton->canvas->working_layer->effects = e;
@@ -334,6 +338,20 @@ gui_layer_window(MiltonInput* input, PlatformState* platform, Milton* milton, f3
         else {
             const f32 bw = ImGui::GetFrameHeight() * 1.5f;
             const ImGuiStyle& st = ImGui::GetStyle();
+            {
+                const bool can_merge = milton->canvas->working_layer->prev != NULL;
+                if ( !can_merge ) { ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.4f); }
+                if ( ImGui::Button("Merge Down") && can_merge ) {
+                    Layer* wl = milton->canvas->working_layer;
+                    if ( !(wl->prev->flags & LayerFlags_VISIBLE) ) { merge_stage = 1; }
+                    else if ( !(wl->flags & LayerFlags_VISIBLE) ) { merge_stage = 2; }
+                    else { merge_stage = 3; }
+                    merge_open = true;
+                }
+                if ( !can_merge ) { ImGui::PopStyleVar(); }
+                if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip("Combine this layer's strokes into the layer below"); }
+                ImGui::SameLine();
+            }
             ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 2*bw - st.ItemSpacing.x - st.WindowPadding.x);
             if ( ImGui::Button("+", ImVec2(bw, 0)) ) {
                 milton_new_layer(milton);
@@ -347,8 +365,68 @@ gui_layer_window(MiltonInput* input, PlatformState* platform, Milton* milton, f3
             if ( !can_delete ) { ImGui::PopStyleVar(); }
             if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip("%s", loc(TXT_delete)); }
         }
-    } ImGui::End();
-}
+
+        // Merge down dialogs.
+        if ( merge_stage != 0 ) {
+            Layer* wl = milton->canvas->working_layer;
+            if ( !wl->prev ) { merge_stage = 0; }
+            const char* title = merge_stage == 1 ? "Cannot Merge" : (merge_stage == 2 ? "Layer Hidden" : "Merge Down");
+            if ( merge_open ) { ImGui::OpenPopup(title); merge_open = false; }
+            if ( merge_stage != 0 && ImGui::BeginPopupModal(title, NULL, ImGuiWindowFlags_AlwaysAutoResize) ) {
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ui_scale*360);
+                if ( merge_stage == 1 ) {
+                    ImGui::TextWrapped("Error: the layer below (\"%s\") is hidden. Show it before merging down.", wl->prev->name);
+                    if ( ImGui::Button("OK") ) { ImGui::CloseCurrentPopup(); merge_stage = 0; }
+                }
+                else if ( merge_stage == 2 ) {
+                    ImGui::TextWrapped("The selected layer (\"%s\") is hidden. Unhide it and continue merging?", wl->name);
+                    if ( ImGui::Button("Yes") ) {
+                        wl->flags |= LayerFlags_VISIBLE;
+                        input->flags |= (i32)MiltonInputFlags_FULL_REFRESH;
+                        ImGui::CloseCurrentPopup();
+                        merge_stage = 3;
+                        merge_open = true;
+                    }
+                    ImGui::SameLine();
+                    if ( ImGui::Button("No") ) { ImGui::CloseCurrentPopup(); merge_stage = 0; }
+                }
+                else {
+                    ImGui::TextWrapped("Merge \"%s\" down into \"%s\"?", wl->name, wl->prev->name);
+                    ImGui::Spacing();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.35f, 0.3f, 1.0f));
+                    ImGui::TextWrapped("This CANNOT be undone, and all undo/redo history will be permanently erased. Autosave will also be PAUSED: nothing is written to disk until you save yourself (Ctrl+S), so closing without saving loses the merge but keeps the old file.");
+                    ImGui::PopStyleColor();
+                                            static bool harden = false;
+                    ImGui::Checkbox("Treat soft erasers as hard (fully erase)", &harden);
+                    if ( ImGui::IsItemHovered() ) {
+                        ImGui::SetTooltip("Soft, low-opacity and pressure-sensitive erasers are applied at full strength\nso they can be baked into this layer. Strokes they only partly erased will be cut away entirely.\nApplies to round and square erasers.");
+                    }
+                    merge_harden = harden;
+                    i32 soft = layer_count_unbakeable_erasers(wl, harden);
+                                            if ( soft > 0 ) {
+                                                ImGui::Spacing();
+                                                ImGui::TextWrapped("Note: this layer has %d eraser stroke(s) that cannot be baked in. After merging they will also erase the lower layer's strokes they overlap. Hard round erasers are applied to this layer's strokes first, so they are not affected.", soft);
+                                            }
+                                            if ( wl->alpha < 0.999f || wl->effects ) {
+                                                ImGui::Spacing();
+                                                ImGui::TextWrapped("Note: this layer's opacity and effects (blur) are not carried over; the lower layer's settings apply.");
+                                            }
+                                            ImGui::Spacing();
+                                            if ( ImGui::Button("Merge") ) {
+                                                layer_merge_down(milton, merge_harden);
+                                                input->flags |= (i32)MiltonInputFlags_FULL_REFRESH;
+                                                ImGui::CloseCurrentPopup();
+                                                merge_stage = 0;
+                                            }
+                                            ImGui::SameLine();
+                                            if ( ImGui::Button("Cancel") ) { ImGui::CloseCurrentPopup(); merge_stage = 0; }
+                                        }
+                                        ImGui::PopTextWrapPos();
+                                        ImGui::EndPopup();
+                                    }
+                                }
+                            } ImGui::End();
+                        }
 
 static char
 hotkey_sanitize_char(char c)

@@ -22,8 +22,8 @@ main()
         r = float(u_radius) + max(e.x, e.y);
     }
 
-    float girth = u_fill ? 2.0 : 1.0;
-    const float ring_alpha = 0.4;
+    float girth = u_fill ? 2.0 : 1.5;
+    const float ring_alpha = 1.0;
 
     if ( r <= u_radius
          && r > u_radius - girth ) {

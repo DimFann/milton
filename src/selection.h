@@ -46,6 +46,8 @@ void        selection_finish(Milton* milton);
 
 void        selection_draw_overlay(Milton* milton);
 void        optimize_request(Milton* milton);
+void        layer_merge_down(Milton* milton, b32 harden_erasers);
+i32         layer_count_unbakeable_erasers(Layer* l, b32 harden);
 b32         optimize_active();
 void        optimize_draw(Milton* milton);
 

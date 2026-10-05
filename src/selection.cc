@@ -633,6 +633,99 @@ selection_auto_redo(Milton* milton, i64 hist_pos)
     milton->render_settings.do_full_redraw = true;
 }
 
+// ---- Merge down
+
+static void sel_cut_impl(Milton* milton, Layer* l, Stroke* cutter, i64 limit, b32 push_undo);
+
+static i64
+sel_find_stroke_by_id(Layer* l, i32 id)
+{
+    for ( i64 i = 0; i < l->strokes.count; ++i ) {
+        if ( get(&l->strokes, i)->id == id ) { return i; }
+    }
+    return -1;
+}
+
+// Erasers only affect their own layer, but after a merge they would also hit the lower layer.
+// Opaque round erasers are baked into the strokes beneath them by cutting those apart, then removed.
+// Erasers that touch nothing are dropped. Soft erasers cannot be baked and are kept.
+static void
+sel_bake_erasers(Milton* milton, Layer* l, b32 harden)
+{
+    i64 n = l->strokes.count;
+    i32* ids = (i32*)malloc(sizeof(i32) * (size_t)(n > 0 ? n : 1));
+    i64 m = 0;
+    for ( i64 i = 0; i < n; ++i ) {
+        Stroke* e = get(&l->strokes, i);
+        if ( (e->flags & StrokeFlag_ERASER) ) { ids[m++] = e->id; }
+    }
+    for ( i64 k = 0; k < m; ++k ) {
+        i64 idx = sel_find_stroke_by_id(l, ids[k]);
+        if ( idx < 0 ) { continue; }
+        Stroke e = *get(&l->strokes, idx);
+        if ( harden && (e.flags & StrokeFlag_ERASER) ) {
+            e.flags &= ~(StrokeFlag_PRESSURE_TO_OPACITY | StrokeFlag_DISTANCE_TO_OPACITY);
+            e.brush.alpha = 1.0f;
+        }
+        b32 drop = false;
+        if ( (e.flags & StrokeFlag_ERASER) && e.num_points > 0 && e.brush.alpha >= 0.999f
+             && !(e.flags & (StrokeFlag_PRESSURE_TO_OPACITY | StrokeFlag_DISTANCE_TO_OPACITY)) ) {
+            sel_cut_impl(milton, l, &e, idx, false);
+            drop = true;
+        } else {
+            Rect er = e.bounding_rect;
+            b32 touches = false;
+            for ( i64 i = 0; i < idx && !touches; ++i ) {
+                Stroke* s = get(&l->strokes, i);
+                if ( (s->flags & StrokeFlag_ERASER) ) { continue; }
+                Rect r = s->bounding_rect;
+                touches = !(r.right < er.left || r.left > er.right || r.bottom < er.top || r.top > er.bottom);
+            }
+            drop = !touches;
+        }
+        if ( drop ) {
+            idx = sel_find_stroke_by_id(l, ids[k]);
+            if ( idx >= 0 ) {
+                SelOpItem item = {};
+                item.index = (i32)idx;
+                list_remove(milton, l, &item, 1);
+            }
+        }
+    }
+    free(ids);
+}
+
+// Moves every stroke of the working layer onto the layer below it and removes the working layer.
+// Stroke history refers to strokes by position and layer, so it is cleared.
+void
+layer_merge_down(Milton* milton, b32 harden_erasers)
+{
+    Layer* up = milton->canvas->working_layer;
+    Layer* dn = up ? up->prev : NULL;
+    if ( !dn ) { return; }
+    selection_finish(milton);
+    sel_bake_erasers(milton, up, harden_erasers);
+    i64 n = up->strokes.count;
+    for ( i64 i = 0; i < n; ++i ) {
+        Stroke s = *get(&up->strokes, i);
+        s.layer_id = dn->id;
+        push(&dn->strokes, s);
+    }
+    reset(&up->strokes);
+    dn->next = up->next;
+    if ( up->next ) { up->next->prev = dn; }
+    milton_set_working_layer(milton, dn);
+
+    CanvasState* canvas = milton->canvas;
+    reset(&canvas->history);
+    reset(&canvas->redo_stack);
+    reset(&canvas->stroke_graveyard);
+    selection_reset(milton);
+    milton->selection->dirty = true;
+    milton->flags |= MiltonStateFlags_AUTOSAVE_BLOCKED;
+    milton->render_settings.do_full_redraw = true;
+}
+
 // ---- Optimize layer
 
 struct OptEntry { i32 j, k; };
@@ -895,6 +988,7 @@ opt_apply(Milton* milton, Layer* l)
     reset(&canvas->stroke_graveyard);
     selection_reset(milton);
     milton->selection->dirty = true;
+    milton->flags |= MiltonStateFlags_AUTOSAVE_BLOCKED;
     milton->render_settings.do_full_redraw = true;
 }
 
@@ -982,6 +1076,8 @@ optimize_draw(Milton* milton)
         ImGui::TextWrapped("WARNING: THIS CANNOT BE UNDONE.");
         ImGui::TextWrapped("ALL undo and redo history for the entire drawing will be permanently erased, "
                            "and you will not be able to get it back.");
+        ImGui::TextWrapped("Autosave will also be PAUSED afterwards: nothing is written to disk until you save yourself "
+                           "(Ctrl+S). Closing without saving discards the optimization and keeps the old file.");
         ImGui::PopStyleColor();
         ImGui::Spacing();
         ImGui::TextWrapped("Strokes on this layer that are completely hidden by erasing (including soft erasers) "
@@ -1036,13 +1132,92 @@ struct CutCap
     double ax, ay, bx, by, R;
     double ux, uy, L;
     double minx, miny, maxx, maxy;  // Of the centre line
+    // Rectangle brushes: convex hull (CCW) of the rectangle swept along the segment.
+    b32 is_rect;
+    i32 np;
+    double hx[8], hy[8];
 };
+
+static void
+sel_cap_build_rect_hull(CutCap* c, Stroke* cutter, i32 k, i32 k2)
+{
+    double axx = (double)cutter->brush.shape_axis_x, axy = (double)cutter->brush.shape_axis_y;
+    double al = sqrt(axx * axx + axy * axy);
+    if ( al < 1e-9 ) { axx = 1; axy = 0; al = 1; }
+    axx /= al; axy /= al;
+    double pxx = -axy, pxy = axx;
+    double aspect = (double)cutter->brush.shape_aspect;
+    double ends[2] = { sel_radius_at(cutter, k, false), sel_radius_at(cutter, k2, false) };
+    double r = max(ends[0], ends[1]);
+    double hl = r, hw = r * aspect;  // Half extents along the long axis and the short axis.
+    double pts[16][2];
+    i32 n = 0;
+    for ( int e = 0; e < 2; ++e ) {
+        double cx = e ? c->bx : c->ax, cy = e ? c->by : c->ay;
+        for ( int sx = -1; sx <= 1; sx += 2 ) {
+            for ( int sy = -1; sy <= 1; sy += 2 ) {
+                pts[n][0] = cx + axx * hl * sx + pxx * hw * sy;
+                pts[n][1] = cy + axy * hl * sx + pxy * hw * sy;
+                ++n;
+            }
+        }
+    }
+    // Monotone chain.
+    i32 idx[8];
+    for ( i32 i = 0; i < n; ++i ) { idx[i] = i; }
+    for ( i32 i = 1; i < n; ++i ) {
+        i32 v = idx[i]; i32 j = i - 1;
+        while ( j >= 0 && (pts[idx[j]][0] > pts[v][0] || (pts[idx[j]][0] == pts[v][0] && pts[idx[j]][1] > pts[v][1])) ) { idx[j + 1] = idx[j]; --j; }
+        idx[j + 1] = v;
+    }
+    auto cross = [&](i32 o, i32 a, i32 b) {
+        return (pts[a][0] - pts[o][0]) * (pts[b][1] - pts[o][1]) - (pts[a][1] - pts[o][1]) * (pts[b][0] - pts[o][0]);
+    };
+    i32 hull[16]; i32 h = 0;
+    for ( i32 i = 0; i < n; ++i ) {
+        while ( h >= 2 && cross(hull[h - 2], hull[h - 1], idx[i]) <= 1e-9 ) { --h; }
+        hull[h++] = idx[i];
+    }
+    i32 lower = h + 1;
+    for ( i32 i = n - 2; i >= 0; --i ) {
+        while ( h >= lower && cross(hull[h - 2], hull[h - 1], idx[i]) <= 1e-9 ) { --h; }
+        hull[h++] = idx[i];
+    }
+    h -= 1;
+    c->np = h > 8 ? 8 : h;
+    for ( i32 i = 0; i < c->np; ++i ) { c->hx[i] = pts[hull[i]][0]; c->hy[i] = pts[hull[i]][1]; }
+    c->is_rect = c->np >= 3;
+}
 
 // Parameter range [lo, hi] of segment A + tD (t in 0..1) that lies within `Rs` of the capsule.
 // The capsule is convex, so the range is a single interval.
 static b32
 sel_cap_interval(const CutCap* c, double Rs, double Ax, double Ay, double Dx, double Dy, double* out_lo, double* out_hi)
 {
+    if ( c->is_rect ) {
+        // Cyrus-Beck against the swept rectangle, with every edge pushed out by Rs.
+        double t0 = 0.0, t1 = 1.0;
+        for ( i32 i = 0; i < c->np; ++i ) {
+            i32 j = (i + 1) % c->np;
+            double ex = c->hx[j] - c->hx[i], ey = c->hy[j] - c->hy[i];
+            double el = sqrt(ex * ex + ey * ey);
+            if ( el < 1e-9 ) { continue; }
+            double nx = ey / el, ny = -ex / el;  // Outward for CCW.
+            double num = Rs - ((Ax - c->hx[i]) * nx + (Ay - c->hy[i]) * ny);  // Allowed: n.(P - v) <= Rs
+            double den = Dx * nx + Dy * ny;
+            if ( fabs(den) < 1e-12 ) {
+                if ( num < 0.0 ) { return false; }
+                continue;
+            }
+            double t = num / den;
+            if ( den > 0 ) { if ( t < t1 ) { t1 = t; } }
+            else { if ( t > t0 ) { t0 = t; } }
+            if ( t0 > t1 ) { return false; }
+        }
+        *out_lo = t0;
+        *out_hi = t1;
+        return t0 <= t1;
+    }
     double R = c->R + Rs;
     double lo = 2.0, hi = -1.0;
     auto add = [&](double a, double b) {
@@ -1114,11 +1289,10 @@ struct CutPiece
     i32  n;
 };
 
-void
-selection_cut(Milton* milton, Stroke* cutter)
+static void
+sel_cut_impl(Milton* milton, Layer* l, Stroke* cutter, i64 limit, b32 push_undo)
 {
-    Layer* l = milton->canvas->working_layer;
-    if ( !l || cutter->num_points <= 0 || !(l->flags & LayerFlags_VISIBLE) ) { return; }
+    if ( !l || cutter->num_points <= 0 ) { return; }
     Selection* s = milton->selection;
     sel_deselect(milton);
 
@@ -1130,6 +1304,7 @@ selection_cut(Milton* milton, Stroke* cutter)
         CutCap* c = &caps[k];
         c->ax = (double)cutter->points[k].x;  c->ay = (double)cutter->points[k].y;
         c->bx = (double)cutter->points[k2].x; c->by = (double)cutter->points[k2].y;
+        c->is_rect = false;
         c->R = max(sel_radius_at(cutter, k, false), sel_radius_at(cutter, k2, false));
         double dx = c->bx - c->ax, dy = c->by - c->ay;
         c->L = sqrt(dx * dx + dy * dy);
@@ -1137,8 +1312,13 @@ selection_cut(Milton* milton, Stroke* cutter)
         c->uy = c->L > 0 ? dy / c->L : 0.0;
         c->minx = min(c->ax, c->bx); c->maxx = max(c->ax, c->bx);
         c->miny = min(c->ay, c->by); c->maxy = max(c->ay, c->by);
+        if ( cutter->brush.shape == BrushShape_RECTANGLE ) {
+            c->R = max(sel_radius_at(cutter, k, true), sel_radius_at(cutter, k2, true));
+            sel_cap_build_rect_hull(c, cutter, k, k2);
+        }
     }
     Rect cb = bounding_box_for_stroke(cutter);
+    if ( cutter->brush.shape == BrushShape_RECTANGLE ) { cb = rect_enlarge(cb, (i64)ceil((double)cutter->brush.radius * 0.5)); }
 
     SelOpItem* old_items = NULL; i32 n_old = 0, cap_old = 0;
     SelOpItem* new_items = NULL; i32 n_new = 0, cap_new = 0;
@@ -1155,8 +1335,9 @@ selection_cut(Milton* milton, Stroke* cutter)
         cur.n = 0;
 
         Rect sb = st->bounding_rect;
+        if ( st->brush.shape == BrushShape_RECTANGLE ) { sb = rect_enlarge(sb, (i64)ceil((double)st->brush.radius * 0.5)); }
         b32 overlaps = !(sb.right < cb.left || sb.left > cb.right || sb.bottom < cb.top || sb.top > cb.bottom);
-        if ( overlaps && !(st->flags & StrokeFlag_ERASER) && st->num_points > 0 ) {
+        if ( si < limit && overlaps && !(st->flags & StrokeFlag_ERASER) && st->num_points > 0 ) {
             auto break_piece = [&]() {
                 if ( cur.n == 0 ) { return; }
                 if ( n_pieces == cap_pieces ) {
@@ -1334,8 +1515,34 @@ selection_cut(Milton* milton, Stroke* cutter)
     op.items2 = new_items;
     list_remove(milton, l, op.items, op.n);
     list_insert(l, op.items2, op.n2);
-    sel_push_op(milton, op);
+    if ( push_undo ) {
+        sel_push_op(milton, op);
+    } else {
+        sel_op_free(&op);
+    }
     milton->render_settings.do_full_redraw = true;
+}
+
+void
+selection_cut(Milton* milton, Stroke* cutter)
+{
+    Layer* l = milton->canvas->working_layer;
+    if ( !l || !(l->flags & LayerFlags_VISIBLE) ) { return; }
+    sel_cut_impl(milton, l, cutter, INT64_MAX, true);
+}
+
+// Eraser strokes of the layer that cannot be turned into cuts (soft, pressure-based or rectangular).
+i32
+layer_count_unbakeable_erasers(Layer* l, b32 harden)
+{
+    i32 n = 0;
+    for ( i64 i = 0; i < l->strokes.count; ++i ) {
+        Stroke* e = get(&l->strokes, i);
+        if ( !(e->flags & StrokeFlag_ERASER) ) { continue; }
+        if ( !harden && (e->brush.alpha < 0.999f
+             || (e->flags & (StrokeFlag_PRESSURE_TO_OPACITY | StrokeFlag_DISTANCE_TO_OPACITY))) ) { ++n; }
+    }
+    return n;
 }
 // ---- Undo / redo
 
@@ -1806,9 +2013,20 @@ selection_draw_overlay(Milton* milton)
             char msg[64];
             snprintf(msg, sizeof(msg), s->toast_n ? "Removed %d fully erased strokes" : "No fully erased strokes found", s->toast_n);
             ImVec2 ts = ImGui::CalcTextSize(msg);
-            dl->AddText(ImVec2((ImGui::GetIO().DisplaySize.x - ts.x) * 0.5f, ui * 8), light, msg);
+            dl->AddText(ImVec2((ImGui::GetIO().DisplaySize.x - ts.x) * 0.5f, ui * 8 + ((milton->flags & MiltonStateFlags_AUTOSAVE_BLOCKED) ? ui * 48 : 0.0f)), light, msg);
             if ( milton->platform ) { milton->platform->force_next_frame = true; }
         }
+    }
+
+    if ( milton->flags & MiltonStateFlags_AUTOSAVE_BLOCKED ) {
+        const char* msg = "Autosave paused - press Ctrl+S to save";
+        ImVec2 ts = ImGui::CalcTextSize(msg);
+        ImVec2 ds = ImGui::GetIO().DisplaySize;
+        f32 top = (milton->gui->menu_visible ? ImGui::GetFrameHeight() : 0.0f) + ui * 6;
+        ImVec2 p0 = ImVec2((ds.x - ts.x) * 0.5f - ui * 12, top);
+        ImVec2 p1 = ImVec2(p0.x + ts.x + ui * 24, top + ts.y + ui * 10);
+        dl->AddRectFilled(p0, p1, IM_COL32(220, 20, 20, 245), ui * 4);
+        dl->AddText(ImVec2(p0.x + ui * 12, p0.y + ui * 5), IM_COL32(255, 255, 255, 255), msg);
     }
 
     if ( s->armed && s->state == SelState_IDLE ) {
