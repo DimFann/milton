@@ -603,6 +603,13 @@ gui_tools_window(MiltonInput* input, Milton* milton)
         {
             const f32 box = w - s*8;
             const f32 label_h = ImGui::GetTextLineHeightWithSpacing();
+            ImGui::SetCursorPosY(ImGui::GetWindowHeight() - box - label_h - s*10 - s*34);
+            if ( ImGui::Button("Optimize", ImVec2(w, s*30)) ) {
+                optimize_request(milton);
+            }
+            if ( ImGui::IsItemHovered() ) {
+                ImGui::SetTooltip("Optimize current layer: remove hidden strokes (clears undo history)");
+            }
             ImGui::SetCursorPosY(ImGui::GetWindowHeight() - box - label_h - s*10);
             ImGui::Text("Bg Clr");
             v3f bg = milton->view->background_color;
@@ -861,8 +868,9 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
         }
         ImGui::PushItemWidth(s*110);
 
-        if ( milton->current_mode == MiltonMode::PEN || milton->current_mode == MiltonMode::ERASER
-             || mode_is_for_primitives(milton->current_mode) ) {
+        const bool cut_eraser = milton->current_mode == MiltonMode::ERASER && milton->settings->eraser_cut;
+        if ( !cut_eraser && (milton->current_mode == MiltonMode::PEN || milton->current_mode == MiltonMode::ERASER
+             || mode_is_for_primitives(milton->current_mode)) ) {
             const float pen_alpha = milton_get_brush_alpha(milton);
             mlt_assert(pen_alpha >= 0.0f && pen_alpha <= 1.0f);
             float mut_alpha = pen_alpha*100;
@@ -921,7 +929,7 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
             ImGui::SliderInt(loc(TXT_grid_rows), &milton->grid_rows, 1, MILTON_MAX_GRID_SIZE);
         }
 
-        {
+        if ( !cut_eraser ) {
             int brush_enum = milton_get_brush_enum(milton);
             f32* hardness = &milton->brushes[brush_enum].hardness;
             // Very soft edges show seams between nearby passes, so the slider starts at a minimum.
@@ -954,9 +962,18 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
         }
 
         if ( milton->working_stroke.flags & StrokeFlag_ERASER ) {
-            ImGui::Checkbox(loc(TXT_opacity_pressure), &milton->eraser_pressure_opacity);
-            if ( milton->eraser_pressure_opacity ) {
-                ImGui::SliderFloat(loc(TXT_minimum), &milton->brushes[BrushEnum_ERASER].pressure_opacity_min, 0.0f, milton->brushes[BrushEnum_ERASER].alpha);
+            bool cut = milton->settings->eraser_cut != 0;
+            if ( ImGui::Checkbox("Cut strokes", &cut) ) {
+                milton->settings->eraser_cut = cut ? 1 : 0;
+            }
+            if ( ImGui::IsItemHovered() ) {
+                ImGui::SetTooltip("Splits strokes along the eraser path instead of erasing pixels.");
+            }
+            if ( !cut ) {
+                ImGui::Checkbox(loc(TXT_opacity_pressure), &milton->eraser_pressure_opacity);
+                if ( milton->eraser_pressure_opacity ) {
+                    ImGui::SliderFloat(loc(TXT_minimum), &milton->brushes[BrushEnum_ERASER].pressure_opacity_min, 0.0f, milton->brushes[BrushEnum_ERASER].alpha);
+                }
             }
         }
 
@@ -1090,6 +1107,10 @@ gui_menu(MiltonInput* input, PlatformState* platform, Milton* milton, b32& show_
                 }
                 if ( ImGui::MenuItem(loc(TXT_redo)) ) {
                     input->flags |= MiltonInputFlags_REDO;
+                }
+                ImGui::Separator();
+                if ( ImGui::MenuItem("Optimize Layer...") ) {
+                    optimize_request(milton);
                 }
                 ImGui::EndMenu();
             }
@@ -1704,6 +1725,13 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
                     bool show_stats = milton->settings->show_perf_stats != 0;
                     if ( ImGui::Checkbox("Show performance stats", &show_stats) ) {
                         milton->settings->show_perf_stats = show_stats ? 1 : 0;
+                    }
+                    bool auto_clean = milton->settings->auto_cleanup_erased != 0;
+                    if ( ImGui::Checkbox("Auto-remove fully erased strokes", &auto_clean) ) {
+                        milton->settings->auto_cleanup_erased = auto_clean ? 1 : 0;
+                    }
+                    if ( ImGui::Button("Clean up erased strokes (current layer)") ) {
+                        selection_command(milton, SelCmd_CLEANUP);
                     }
                     ImGui::Separator();
                 }

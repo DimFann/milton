@@ -714,6 +714,8 @@ settings_init(MiltonSettings* s)
     s->brush_scrub_trigger = 2;
     pressure_curve_reset(s);
     s->show_perf_stats = 1;
+    s->eraser_cut = 0;
+    s->auto_cleanup_erased = 1;
 }
 
 void
@@ -1682,6 +1684,7 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
                 if ( l ) {
                     if ( l->strokes.count > 0 ) {
                         Stroke* stroke_ptr = peek(&l->strokes);
+                        selection_auto_undo(milton, milton->canvas->history.count + 1);
                         Stroke stroke = pop(&l->strokes);
                         push(&milton->canvas->stroke_graveyard, stroke);
                         push(&milton->canvas->redo_stack, h);
@@ -1708,6 +1711,7 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
                         if ( stroke.layer_id == h.layer_id ) {
                             push(&l->strokes, stroke);
                             push(&milton->canvas->history, h);
+                            selection_auto_redo(milton, milton->canvas->history.count);
 
                             milton->render_settings.do_full_redraw = true;
 
@@ -1773,6 +1777,11 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     }
 
     // Mode tick
+    if ( milton->current_mode == MiltonMode::ERASER && milton->settings->eraser_cut ) {
+        milton->working_stroke.flags |= StrokeFlag_CUT;
+    } else {
+        milton->working_stroke.flags &= ~StrokeFlag_CUT;
+    }
     if (milton->current_mode == MiltonMode::ERASER) {
         milton->working_stroke.flags |= StrokeFlag_ERASER;
         if ( !milton->flags_in_eraser_mode ) {
@@ -1889,7 +1898,12 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
             gui_deactivate(milton->gui);
             brush_outline_should_draw = false;
         } else {
-            if ( milton->working_stroke.num_points > 0 ) {
+            if ( milton->working_stroke.num_points > 0 && (milton->working_stroke.flags & StrokeFlag_CUT) ) {
+                selection_cut(milton, &milton->working_stroke);
+                reset_working_stroke(milton);
+                milton->render_settings.do_full_redraw = true;
+            }
+            else if ( milton->working_stroke.num_points > 0 ) {
                 // We used the selected color to draw something. Push.
                 if (  (milton->current_mode == MiltonMode::PEN ||
                        mode_is_for_primitives(milton->current_mode))
@@ -1924,6 +1938,7 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
                 reset_working_stroke(milton);
 
                 clear_stroke_redo(milton);
+                selection_auto_cleanup(milton, milton->canvas->working_layer);
 
                 // Make sure we show blurred layers when finishing a stroke.
                 milton->render_settings.do_full_redraw = true;

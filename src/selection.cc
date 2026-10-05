@@ -8,6 +8,7 @@ enum SelOpKind
 {
     SelOp_DELETE,
     SelOp_TRANSFORM,
+    SelOp_CUT,
 };
 
 struct SelItem
@@ -36,6 +37,15 @@ struct SelOp
     i32         layer_id;
     i32         n;
     SelOpItem*  items;      // Ascending by index
+    i32         n2;         // CUT only: the pieces that replace items
+    SelOpItem*  items2;     // Ascending by index in the cut layer
+};
+
+// An erased-stroke cleanup tied to the eraser stroke that caused it, so it undoes together with it.
+struct AutoOp
+{
+    SelOp   op;
+    i64     hist_pos;
 };
 
 enum SelState
@@ -84,6 +94,12 @@ struct Selection
 
     DArray<SelOp> undo;
     DArray<SelOp> redo;
+
+    DArray<AutoOp> auto_undo;
+    DArray<AutoOp> auto_redo;
+
+    i32         toast_n;
+    u32         toast_until;
 };
 
 Selection*
@@ -234,6 +250,7 @@ sel_op_free(SelOp* op)
         free(op->items[i].new_pts);
     }
     free(op->items);
+    free(op->items2);
     *op = {};
 }
 
@@ -420,6 +437,906 @@ sel_do_delete(Milton* milton)
     milton->render_settings.do_full_redraw = true;
 }
 
+// ---- Erased-stroke cleanup
+
+// Radius of a stroke at point i, in canvas units. `reach` grows it to cover a rectangle tip's corners.
+static double
+sel_radius_at(Stroke* st, i32 i, b32 reach)
+{
+    const Brush& b = st->brush;
+    double size = 1.0;
+    if ( b.pressure_size ) {
+        double smin = (double)b.pressure_size_min;
+        smin = smin < 0.0 ? 0.0 : (smin > 1.0 ? 1.0 : smin);
+        size = smin + (1.0 - smin) * (double)st->pressures[i];
+    }
+    double r = (double)b.radius * size;
+    if ( reach && b.shape == BrushShape_RECTANGLE ) {
+        r *= sqrt(1.0 + (double)b.shape_aspect * (double)b.shape_aspect);
+    }
+    return r;
+}
+
+static double
+sel_dist_to_seg(double px, double py, double ax, double ay, double bx, double by)
+{
+    double dx = bx - ax, dy = by - ay;
+    double l2 = dx * dx + dy * dy;
+    double t = l2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0.0;
+    t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
+    double qx = ax + t * dx - px, qy = ay + t * dy - py;
+    return sqrt(qx * qx + qy * qy);
+}
+
+// Only a fully opaque, hard, round eraser hides everything beneath it.
+static b32
+sel_eraser_is_opaque(Stroke* e)
+{
+    return (e->flags & StrokeFlag_ERASER)
+        && !(e->flags & (StrokeFlag_PRESSURE_TO_OPACITY | StrokeFlag_DISTANCE_TO_OPACITY))
+        && e->brush.alpha >= 0.999f
+        && e->brush.shape == BrushShape_ROUND
+        && e->num_points > 0;
+}
+
+// Conservative: true only if every segment of `s` (with its thickness) lies inside a single
+// capsule of the eraser path. Strokes that merely leave a small visible sliver return false.
+static b32
+sel_stroke_covered_by(Stroke* s, Stroke* e, double margin)
+{
+    Rect sb = s->bounding_rect, eb = e->bounding_rect;
+    if ( sb.left < eb.left || sb.right > eb.right || sb.top < eb.top || sb.bottom > eb.bottom ) {
+        return false;
+    }
+    i32 m = e->num_points;
+    i32 ns = s->num_points;
+    if ( ns <= 0 ) { return false; }
+    i32 segs = max(m - 1, 1);
+    i32 hint = 0;
+    i32 pairs = max(ns - 1, 1);
+    for ( i32 i = 0; i < pairs; ++i ) {
+        i32 j = min(i + 1, ns - 1);
+        double pix = (double)s->points[i].x, piy = (double)s->points[i].y;
+        double pjx = (double)s->points[j].x, pjy = (double)s->points[j].y;
+        double ri = sel_radius_at(s, i, true), rj = sel_radius_at(s, j, true);
+        b32 ok = false;
+        for ( i32 t = 0; t < segs && !ok; ++t ) {
+            i32 k = (hint + t) % segs;
+            i32 k2 = min(k + 1, m - 1);
+            double R = min(sel_radius_at(e, k, false), sel_radius_at(e, k2, false)) - margin;
+            if ( R <= 0 ) { continue; }
+            double ax = (double)e->points[k].x, ay = (double)e->points[k].y;
+            double bx = (double)e->points[k2].x, by = (double)e->points[k2].y;
+            if ( sel_dist_to_seg(pix, piy, ax, ay, bx, by) + ri <= R
+                 && sel_dist_to_seg(pjx, pjy, ax, ay, bx, by) + rj <= R ) {
+                ok = true;
+                hint = k;
+            }
+        }
+        if ( !ok ) { return false; }
+    }
+    return true;
+}
+
+static void
+sel_toast(Milton* milton, i32 n)
+{
+    milton->selection->toast_n = n;
+    milton->selection->toast_until = SDL_GetTicks() + 3000;
+}
+
+// Removes strokes hidden by a later opaque eraser. Recorded as a normal undo step.
+static void
+sel_cleanup_layer(Milton* milton, Layer* l)
+{
+    if ( !l || l->strokes.count < 2 ) { sel_toast(milton, 0); return; }
+    i64 count = l->strokes.count;
+    u8* covered = (u8*)calloc((size_t)count, 1);
+    double margin = (double)milton->view->scale * 2.0;
+    i32 n = 0;
+    for ( i64 j = 1; j < count; ++j ) {
+        Stroke* e = get(&l->strokes, j);
+        if ( !sel_eraser_is_opaque(e) ) { continue; }
+        for ( i64 i = 0; i < j; ++i ) {
+            if ( covered[i] ) { continue; }
+            if ( sel_stroke_covered_by(get(&l->strokes, i), e, margin) ) {
+                covered[i] = 1;
+                ++n;
+            }
+        }
+    }
+    if ( n > 0 ) {
+        SelOp op = {};
+        op.kind = SelOp_DELETE;
+        op.layer_id = l->id;
+        op.n = n;
+        op.items = (SelOpItem*)calloc((size_t)n, sizeof(SelOpItem));
+        i32 k = 0;
+        for ( i64 i = 0; i < count; ++i ) {
+            if ( covered[i] ) { op.items[k++].index = (i32)i; }
+        }
+        list_remove(milton, l, op.items, op.n);
+        sel_push_op(milton, op);
+        milton->render_settings.do_full_redraw = true;
+    }
+    free(covered);
+    sel_toast(milton, n);
+}
+
+void
+selection_auto_cleanup(Milton* milton, Layer* l)
+{
+    Selection* s = milton->selection;
+    if ( !milton->settings->auto_cleanup_erased || !l || l->strokes.count < 2 ) { return; }
+    // Selected strokes are tracked by index, which a removal would shift.
+    if ( s->active && s->layer_id == l->id ) { return; }
+    i64 ei = l->strokes.count - 1;
+    Stroke* e = get(&l->strokes, ei);
+    if ( !sel_eraser_is_opaque(e) ) { return; }
+
+    double margin = (double)milton->view->scale * 2.0;
+    i32 n = 0, cap = 0;
+    SelOpItem* items = NULL;
+    for ( i64 i = 0; i < ei; ++i ) {
+        if ( !sel_stroke_covered_by(get(&l->strokes, i), e, margin) ) { continue; }
+        if ( n == cap ) {
+            cap = cap ? cap * 2 : 32;
+            items = (SelOpItem*)realloc(items, sizeof(SelOpItem) * (size_t)cap);
+        }
+        items[n] = {};
+        items[n].index = (i32)i;
+        ++n;
+    }
+    if ( n == 0 ) { return; }
+
+    SelOp op = {};
+    op.kind = SelOp_DELETE;
+    op.layer_id = l->id;
+    op.n = n;
+    op.items = items;
+    list_remove(milton, l, op.items, op.n);
+
+    AutoOp ao = {};
+    ao.op = op;
+    ao.hist_pos = (i64)milton->canvas->history.count;
+    push(&s->auto_undo, ao);
+    s->dirty = true;
+    milton->render_settings.do_full_redraw = true;
+}
+
+void
+selection_auto_undo(Milton* milton, i64 hist_pos)
+{
+    Selection* s = milton->selection;
+    // Drop anything newer than the entry being undone.
+    while ( s->auto_undo.count > 0 && peek(&s->auto_undo)->hist_pos > hist_pos ) {
+        AutoOp stale = pop(&s->auto_undo);
+        sel_op_free(&stale.op);
+    }
+    if ( s->auto_undo.count == 0 || peek(&s->auto_undo)->hist_pos != hist_pos ) { return; }
+    AutoOp ao = pop(&s->auto_undo);
+    Layer* l = layer::get_by_id(milton->canvas->root_layer, ao.op.layer_id);
+    if ( l ) { list_insert(l, ao.op.items, ao.op.n); }
+    push(&s->auto_redo, ao);
+    milton->render_settings.do_full_redraw = true;
+}
+
+void
+selection_auto_redo(Milton* milton, i64 hist_pos)
+{
+    Selection* s = milton->selection;
+    if ( s->auto_redo.count == 0 || peek(&s->auto_redo)->hist_pos != hist_pos ) { return; }
+    AutoOp ao = pop(&s->auto_redo);
+    Layer* l = layer::get_by_id(milton->canvas->root_layer, ao.op.layer_id);
+    if ( l ) { list_remove(milton, l, ao.op.items, ao.op.n); }
+    push(&s->auto_undo, ao);
+    milton->render_settings.do_full_redraw = true;
+}
+
+// ---- Optimize layer
+
+struct OptEntry { i32 j, k; };
+
+struct OptState
+{
+    int   phase;    // 0 idle, 1 confirm, 2 running, 3 done
+    int   stage;    // 0 prepare, 1 test strokes, 2 prune erasers, 3 apply
+    i32   layer_id;
+    char  layer_name[64];
+    i64   n;
+    u8*   dead;
+    i64   cursor;
+    i32   gw, gh;
+    double gx0, gy0, cell;
+    i32*  cell_start;
+    OptEntry* entries;
+    b32   have_grid;
+    i64   removed_strokes, removed_erasers;
+};
+static OptState g_opt;
+
+static void
+opt_free(OptState* o)
+{
+    free(o->dead);
+    free(o->cell_start);
+    free(o->entries);
+    *o = {};
+}
+
+b32
+optimize_active()
+{
+    return g_opt.phase != 0;
+}
+
+void
+optimize_request(Milton* milton)
+{
+    if ( g_opt.phase != 0 || !milton->canvas->working_layer ) { return; }
+    selection_finish(milton);
+    g_opt.phase = 1;
+    g_opt.layer_id = milton->canvas->working_layer->id;
+    snprintf(g_opt.layer_name, sizeof(g_opt.layer_name), "%s", milton->canvas->working_layer->name);
+}
+
+static b32
+opt_eraser_usable(Stroke* e)
+{
+    return (e->flags & StrokeFlag_ERASER) && e->num_points > 0 && e->brush.shape == BrushShape_ROUND;
+}
+
+// Lower bound of the opacity with which eraser stroke `e` clears canvas point (px, py) through segment k.
+static double
+opt_eraser_alpha(Stroke* e, i32 k, double px, double py, double scale)
+{
+    i32 k2 = min(k + 1, e->num_points - 1);
+    double ax = (double)e->points[k].x, ay = (double)e->points[k].y;
+    double bx = (double)e->points[k2].x, by = (double)e->points[k2].y;
+    double dx = bx - ax, dy = by - ay;
+    double l2 = dx * dx + dy * dy;
+    double t = l2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0.0;
+    t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
+    double qx = ax + t * dx - px, qy = ay + t * dy - py;
+    double dist = sqrt(qx * qx + qy * qy);
+    double pr = (double)e->pressures[k] + ((double)e->pressures[k2] - (double)e->pressures[k]) * t;
+    const Brush& b = e->brush;
+    double size = 1.0;
+    if ( b.pressure_size ) {
+        double smin = (double)b.pressure_size_min;
+        smin = smin < 0.0 ? 0.0 : (smin > 1.0 ? 1.0 : smin);
+        size = smin + (1.0 - smin) * pr;
+    }
+    double rad = (double)b.radius * size;
+    double cov = (rad - dist) / (0.5 * scale);
+    if ( cov <= 0.0 ) { return 0.0; }
+    if ( cov > 1.0 ) { cov = 1.0; }
+    double a = 1.0;
+    if ( e->flags & StrokeFlag_PRESSURE_TO_OPACITY ) {
+        a = (1.0 - (double)b.pressure_opacity_min) * pr + (double)b.pressure_opacity_min;
+    }
+    a *= (double)(b.alpha < 0.0f ? 0.0f : (b.alpha > 1.0f ? 1.0f : b.alpha));
+    if ( e->flags & StrokeFlag_DISTANCE_TO_OPACITY ) {
+        double h = ((double)b.hardness - 1.0) / 9.0;
+        h = h < 0.0 ? 0.0 : (h > 1.0 ? 1.0 : h);
+        double core = h * h;
+        double x = dist / rad;
+        x = x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x);
+        double tt = (x - core) / max(1.0 - core, 0.0001);
+        tt = tt < 0.0 ? 0.0 : (tt > 1.0 ? 1.0 : tt);
+        double g1 = exp(-4.0);
+        a *= (exp(-4.0 * tt * tt) - g1) / (1.0 - g1);
+    }
+    return cov * a;
+}
+
+static void
+opt_build_grid(Milton* milton, Layer* l)
+{
+    OptState* o = &g_opt;
+    i64 n = l->strokes.count;
+    i64 minx = INT64_MAX, miny = INT64_MAX, maxx = INT64_MIN, maxy = INT64_MIN;
+    double cell = 0;
+    i64 nseg = 0;
+    for ( i64 i = 0; i < n; ++i ) {
+        Stroke* e = get(&l->strokes, i);
+        if ( !opt_eraser_usable(e) ) { continue; }
+        Rect r = e->bounding_rect;
+        minx = min(minx, r.left); maxx = max(maxx, r.right);
+        miny = min(miny, r.top); maxy = max(maxy, r.bottom);
+        cell = max(cell, (double)e->brush.radius * 2.0);
+        nseg += max(e->num_points - 1, 1);
+    }
+    if ( nseg == 0 ) { return; }
+    if ( cell < 1.0 ) { cell = 1.0; }
+    double w = (double)(maxx - minx) + 1, h = (double)(maxy - miny) + 1;
+    while ( (w / cell + 1) * (h / cell + 1) > 4.0e6 ) { cell *= 2.0; }
+    o->cell = cell;
+    o->gx0 = (double)minx;
+    o->gy0 = (double)miny;
+    o->gw = (i32)(w / cell) + 1;
+    o->gh = (i32)(h / cell) + 1;
+    i64 cells = (i64)o->gw * o->gh;
+    o->cell_start = (i32*)calloc((size_t)cells + 1, sizeof(i32));
+
+    // Two passes: count entries per cell, then fill them. Entries end up ordered by eraser index.
+    i32* fillpos = NULL;
+    for ( int pass = 0; pass < 2; ++pass ) {
+        if ( pass == 1 ) {
+            i64 acc = 0;
+            for ( i64 c = 0; c < cells; ++c ) { i64 cnt = o->cell_start[c]; o->cell_start[c] = (i32)acc; acc += cnt; }
+            o->cell_start[cells] = (i32)acc;
+            o->entries = (OptEntry*)malloc(sizeof(OptEntry) * (size_t)(acc > 0 ? acc : 1));
+            fillpos = (i32*)malloc(sizeof(i32) * (size_t)(cells + 1));
+            memcpy(fillpos, o->cell_start, sizeof(i32) * (size_t)(cells + 1));
+        }
+        for ( i64 i = 0; i < n; ++i ) {
+            Stroke* e = get(&l->strokes, i);
+            if ( !opt_eraser_usable(e) ) { continue; }
+            double R = (double)e->brush.radius;
+            i32 segs = max(e->num_points - 1, 1);
+            for ( i32 k = 0; k < segs; ++k ) {
+                i32 k2 = min(k + 1, e->num_points - 1);
+                double x0 = min((double)e->points[k].x, (double)e->points[k2].x) - R;
+                double x1 = max((double)e->points[k].x, (double)e->points[k2].x) + R;
+                double y0 = min((double)e->points[k].y, (double)e->points[k2].y) - R;
+                double y1 = max((double)e->points[k].y, (double)e->points[k2].y) + R;
+                i32 cx0 = max((i32)floor((x0 - o->gx0) / cell), 0), cx1 = min((i32)floor((x1 - o->gx0) / cell), o->gw - 1);
+                i32 cy0 = max((i32)floor((y0 - o->gy0) / cell), 0), cy1 = min((i32)floor((y1 - o->gy0) / cell), o->gh - 1);
+                for ( i32 cy = cy0; cy <= cy1; ++cy ) {
+                    for ( i32 cx = cx0; cx <= cx1; ++cx ) {
+                        i64 c = (i64)cy * o->gw + cx;
+                        if ( pass == 0 ) { o->cell_start[c]++; }
+                        else { o->entries[fillpos[c]++] = { (i32)i, k }; }
+                    }
+                }
+            }
+        }
+    }
+    free(fillpos);
+    o->have_grid = true;
+}
+
+// Is any part of the layer at canvas point (px, py) still visible after strokes later than `after` erase it?
+static b32
+opt_visible_at(Layer* l, double px, double py, i64 after, double scale)
+{
+    OptState* o = &g_opt;
+    if ( !o->have_grid ) { return true; }
+    i32 cx = (i32)floor((px - o->gx0) / o->cell), cy = (i32)floor((py - o->gy0) / o->cell);
+    if ( cx < 0 || cy < 0 || cx >= o->gw || cy >= o->gh ) { return true; }
+    i64 c = (i64)cy * o->gw + cx;
+    i32 lo = o->cell_start[c], hi = o->cell_start[c + 1];
+    // First entry with j > after.
+    i32 a = lo, b = hi;
+    while ( a < b ) {
+        i32 mid = (a + b) / 2;
+        if ( o->entries[mid].j > after ) { b = mid; } else { a = mid + 1; }
+    }
+    double remaining = 1.0;
+    while ( a < hi ) {
+        i32 j = o->entries[a].j;
+        Stroke* e = get(&l->strokes, j);
+        double best = 0.0;
+        while ( a < hi && o->entries[a].j == j ) {
+            double v = opt_eraser_alpha(e, o->entries[a].k, px, py, scale);
+            if ( v > best ) { best = v; }
+            ++a;
+        }
+        remaining *= (1.0 - best);
+        if ( remaining <= 0.01 ) { return false; }
+    }
+    return true;
+}
+
+// Samples the stroke's footprint (centre line, flanks, and a ring at every vertex). One surviving sample means it is visible.
+static b32
+opt_stroke_visible(Layer* l, i64 idx, double scale)
+{
+    Stroke* st = get(&l->strokes, idx);
+    i32 ns = st->num_points;
+    for ( i32 i = 0; i < ns; ++i ) {
+        double ax = (double)st->points[i].x, ay = (double)st->points[i].y;
+        double r = sel_radius_at(st, i, true);
+        double rr = r > scale ? r - scale : r * 0.5;
+        if ( opt_visible_at(l, ax, ay, idx, scale) ) { return true; }
+        i32 m = (i32)ceil(2.0 * 3.14159265 * rr / (6.0 * scale));
+        m = m < 8 ? 8 : (m > 24 ? 24 : m);
+        for ( i32 q = 0; q < m; ++q ) {
+            double ang = 6.28318530718 * q / m;
+            if ( opt_visible_at(l, ax + cos(ang) * rr, ay + sin(ang) * rr, idx, scale) ) { return true; }
+        }
+        if ( i + 1 >= ns ) { break; }
+        double bx = (double)st->points[i + 1].x, by = (double)st->points[i + 1].y;
+        double r2 = sel_radius_at(st, i + 1, true);
+        double rr2 = r2 > scale ? r2 - scale : r2 * 0.5;
+        double dx = bx - ax, dy = by - ay;
+        double len = sqrt(dx * dx + dy * dy);
+        if ( len < 1e-9 ) { continue; }
+        double nx = -dy / len, ny = dx / len;
+        double step = min(0.6 * min(r, r2), 6.0 * scale);
+        if ( step < 0.5 * scale ) { step = 0.5 * scale; }
+        i32 steps = (i32)ceil(len / step);
+        for ( i32 s = 1; s < steps; ++s ) {
+            double t = (double)s / steps;
+            double cx = ax + dx * t, cy = ay + dy * t;
+            double rt = r + (r2 - r) * t, rrt = rr + (rr2 - rr) * t;
+            if ( opt_visible_at(l, cx, cy, idx, scale) ) { return true; }
+            double offs[3] = { 0.5 * rt, rrt, 0.0 };
+            for ( int w = 0; w < 2; ++w ) {
+                if ( opt_visible_at(l, cx + nx * offs[w], cy + ny * offs[w], idx, scale) ) { return true; }
+                if ( opt_visible_at(l, cx - nx * offs[w], cy - ny * offs[w], idx, scale) ) { return true; }
+            }
+        }
+    }
+    return false;
+}
+
+static void
+opt_apply(Milton* milton, Layer* l)
+{
+    OptState* o = &g_opt;
+    i32 n = 0;
+    for ( i64 i = 0; i < o->n; ++i ) { if ( o->dead[i] ) { ++n; } }
+    if ( n > 0 ) {
+        SelOpItem* items = (SelOpItem*)calloc((size_t)n, sizeof(SelOpItem));
+        i32 k = 0;
+        for ( i64 i = 0; i < o->n; ++i ) {
+            if ( o->dead[i] ) { items[k++].index = (i32)i; }
+        }
+        list_remove(milton, l, items, n);
+        free(items);
+    }
+
+    // The undo history refers to strokes by position, so it cannot survive.
+    CanvasState* canvas = milton->canvas;
+    reset(&canvas->history);
+    reset(&canvas->redo_stack);
+    reset(&canvas->stroke_graveyard);
+    selection_reset(milton);
+    milton->selection->dirty = true;
+    milton->render_settings.do_full_redraw = true;
+}
+
+static void
+opt_step(Milton* milton)
+{
+    OptState* o = &g_opt;
+    Layer* l = layer::get_by_id(milton->canvas->root_layer, o->layer_id);
+    if ( !l ) { opt_free(o); return; }
+    double scale = (double)milton->view->scale;
+    u32 t0 = SDL_GetTicks();
+    auto over_budget = [&]() { return SDL_GetTicks() - t0 > 25; };
+
+    if ( o->stage == 0 ) {
+        o->n = l->strokes.count;
+        o->dead = (u8*)calloc((size_t)(o->n > 0 ? o->n : 1), 1);
+        opt_build_grid(milton, l);
+        o->cursor = 0;
+        o->stage = 1;
+        return;
+    }
+    if ( o->stage == 1 ) {
+        while ( o->cursor < o->n && !over_budget() ) {
+            Stroke* st = get(&l->strokes, o->cursor);
+            if ( !(st->flags & StrokeFlag_ERASER) && st->num_points > 0 ) {
+                if ( !opt_stroke_visible(l, o->cursor, scale) ) {
+                    o->dead[o->cursor] = 1;
+                    ++o->removed_strokes;
+                }
+            }
+            ++o->cursor;
+        }
+        if ( o->cursor >= o->n ) { o->cursor = 0; o->stage = 2; }
+        return;
+    }
+    if ( o->stage == 2 ) {
+        // An eraser that no surviving earlier stroke touches does nothing.
+        while ( o->cursor < o->n && !over_budget() ) {
+            i64 j = o->cursor;
+            Stroke* e = get(&l->strokes, j);
+            if ( (e->flags & StrokeFlag_ERASER) ) {
+                Rect er = e->bounding_rect;
+                b32 touches = false;
+                for ( i64 i = 0; i < j && !touches; ++i ) {
+                    if ( o->dead[i] ) { continue; }
+                    Stroke* s = get(&l->strokes, i);
+                    if ( (s->flags & StrokeFlag_ERASER) ) { continue; }
+                    Rect r = s->bounding_rect;
+                    touches = !(r.right < er.left || r.left > er.right || r.bottom < er.top || r.top > er.bottom);
+                }
+                if ( !touches ) {
+                    o->dead[j] = 1;
+                    ++o->removed_erasers;
+                }
+            }
+            ++o->cursor;
+        }
+        if ( o->cursor >= o->n ) { o->stage = 3; }
+        return;
+    }
+    opt_apply(milton, l);
+    free(o->cell_start); o->cell_start = NULL;
+    free(o->entries); o->entries = NULL;
+    o->phase = 3;
+}
+
+void
+optimize_draw(Milton* milton)
+{
+    OptState* o = &g_opt;
+    if ( o->phase == 0 ) { return; }
+    f32 ui = milton->gui->scale;
+    const char* title = "Optimize Layer";
+    if ( !ImGui::IsPopupOpen(title) ) { ImGui::OpenPopup(title); }
+    ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f, ImGui::GetIO().DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if ( !ImGui::BeginPopupModal(title, NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove) ) {
+        return;
+    }
+    const f32 wrap = ui * 420;
+    if ( o->phase == 1 ) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap);
+        ImGui::Text("Layer: %s", o->layer_name);
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.35f, 0.3f, 1.0f));
+        ImGui::TextWrapped("WARNING: THIS CANNOT BE UNDONE.");
+        ImGui::TextWrapped("ALL undo and redo history for the entire drawing will be permanently erased, "
+                           "and you will not be able to get it back.");
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+        ImGui::TextWrapped("Strokes on this layer that are completely hidden by erasing (including soft erasers) "
+                           "and erasers that no longer affect anything will be permanently deleted. "
+                           "This can take a while on large layers.");
+        ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+        if ( ImGui::Button("Optimize and erase undo history", ImVec2(ui * 240, 0)) ) {
+            o->phase = 2;
+            o->stage = 0;
+        }
+        ImGui::SameLine();
+        if ( ImGui::Button("Cancel", ImVec2(ui * 100, 0)) ) {
+            ImGui::CloseCurrentPopup();
+            opt_free(o);
+        }
+    } else if ( o->phase == 2 ) {
+        f32 frac = 0.0f;
+        const char* what = "Preparing...";
+        if ( o->n > 0 ) {
+            if ( o->stage == 1 ) { frac = 0.9f * (f32)((double)o->cursor / (double)o->n); what = "Checking which strokes are visible..."; }
+            else if ( o->stage == 2 ) { frac = 0.9f + 0.09f * (f32)((double)o->cursor / (double)o->n); what = "Removing unused erasers..."; }
+            else if ( o->stage == 3 ) { frac = 0.99f; what = "Applying..."; }
+        }
+        ImGui::Text("Optimizing layer: %s", o->layer_name);
+        ImGui::Text("%s", what);
+        ImGui::ProgressBar(frac, ImVec2(ui * 360, ui * 22));
+        if ( ImGui::Button("Cancel", ImVec2(ui * 100, 0)) ) {
+            // Nothing has been modified before the final apply step.
+            ImGui::CloseCurrentPopup();
+            opt_free(o);
+            ImGui::EndPopup();
+            return;
+        }
+        opt_step(milton);
+        if ( milton->platform ) { milton->platform->force_next_frame = true; }
+    } else {
+        ImGui::Text("Done. Removed %lld hidden strokes and %lld unused erasers.",
+                    (long long)o->removed_strokes, (long long)o->removed_erasers);
+        ImGui::Text("Undo history has been cleared.");
+        if ( ImGui::Button("OK", ImVec2(ui * 100, 0)) ) {
+            ImGui::CloseCurrentPopup();
+            opt_free(o);
+        }
+    }
+    ImGui::EndPopup();
+}
+// ---- Cutting eraser
+
+struct CutCap
+{
+    double ax, ay, bx, by, R;
+    double ux, uy, L;
+    double minx, miny, maxx, maxy;  // Of the centre line
+};
+
+// Parameter range [lo, hi] of segment A + tD (t in 0..1) that lies within `Rs` of the capsule.
+// The capsule is convex, so the range is a single interval.
+static b32
+sel_cap_interval(const CutCap* c, double Rs, double Ax, double Ay, double Dx, double Dy, double* out_lo, double* out_hi)
+{
+    double R = c->R + Rs;
+    double lo = 2.0, hi = -1.0;
+    auto add = [&](double a, double b) {
+        if ( a <= b ) { lo = a < lo ? a : lo; hi = b > hi ? b : hi; }
+    };
+    auto disc = [&](double cx, double cy) {
+        double fx = Ax - cx, fy = Ay - cy;
+        double a = Dx * Dx + Dy * Dy;
+        double b = 2.0 * (Dx * fx + Dy * fy);
+        double cc = fx * fx + fy * fy - R * R;
+        if ( a < 1e-12 ) {
+            if ( cc <= 0 ) { add(0.0, 1.0); }
+            return;
+        }
+        double dd = b * b - 4.0 * a * cc;
+        if ( dd < 0 ) { return; }
+        double sq = sqrt(dd);
+        double t0 = (-b - sq) / (2.0 * a), t1 = (-b + sq) / (2.0 * a);
+        add(t0 < 0.0 ? 0.0 : t0, t1 > 1.0 ? 1.0 : t1);
+    };
+    disc(c->ax, c->ay);
+    disc(c->bx, c->by);
+    if ( c->L > 0 ) {
+        double fx = Ax - c->ax, fy = Ay - c->ay;
+        double t0 = 0.0, t1 = 1.0;
+        auto clip = [&](double al, double be, double l, double h) {
+            if ( fabs(be) < 1e-12 ) {
+                if ( al < l || al > h ) { t1 = -1.0; }
+                return;
+            }
+            double ta = (l - al) / be, tb = (h - al) / be;
+            if ( ta > tb ) { double tmp = ta; ta = tb; tb = tmp; }
+            if ( ta > t0 ) { t0 = ta; }
+            if ( tb < t1 ) { t1 = tb; }
+        };
+        clip(fx * c->ux + fy * c->uy, Dx * c->ux + Dy * c->uy, 0.0, c->L);
+        clip(-fx * c->uy + fy * c->ux, -Dx * c->uy + Dy * c->ux, -R, R);
+        if ( t0 <= t1 ) { add(t0, t1); }
+    }
+    *out_lo = lo;
+    *out_hi = hi;
+    return lo <= hi;
+}
+
+struct CutPoints
+{
+    v2l* p;
+    f32* q;
+    i32  n, cap;
+};
+
+static void
+cut_points_push(CutPoints* b, v2l p, f32 q)
+{
+    if ( b->n == b->cap ) {
+        b->cap = b->cap ? b->cap * 2 : 64;
+        b->p = (v2l*)realloc(b->p, sizeof(v2l) * (size_t)b->cap);
+        b->q = (f32*)realloc(b->q, sizeof(f32) * (size_t)b->cap);
+    }
+    b->p[b->n] = p;
+    b->q[b->n] = q;
+    ++b->n;
+}
+
+struct CutPiece
+{
+    v2l* p;
+    f32* q;
+    i32  n;
+};
+
+void
+selection_cut(Milton* milton, Stroke* cutter)
+{
+    Layer* l = milton->canvas->working_layer;
+    if ( !l || cutter->num_points <= 0 || !(l->flags & LayerFlags_VISIBLE) ) { return; }
+    Selection* s = milton->selection;
+    sel_deselect(milton);
+
+    i32 m = cutter->num_points;
+    i32 ncaps = max(m - 1, 1);
+    CutCap* caps = (CutCap*)malloc(sizeof(CutCap) * (size_t)ncaps);
+    for ( i32 k = 0; k < ncaps; ++k ) {
+        i32 k2 = min(k + 1, m - 1);
+        CutCap* c = &caps[k];
+        c->ax = (double)cutter->points[k].x;  c->ay = (double)cutter->points[k].y;
+        c->bx = (double)cutter->points[k2].x; c->by = (double)cutter->points[k2].y;
+        c->R = max(sel_radius_at(cutter, k, false), sel_radius_at(cutter, k2, false));
+        double dx = c->bx - c->ax, dy = c->by - c->ay;
+        c->L = sqrt(dx * dx + dy * dy);
+        c->ux = c->L > 0 ? dx / c->L : 1.0;
+        c->uy = c->L > 0 ? dy / c->L : 0.0;
+        c->minx = min(c->ax, c->bx); c->maxx = max(c->ax, c->bx);
+        c->miny = min(c->ay, c->by); c->maxy = max(c->ay, c->by);
+    }
+    Rect cb = bounding_box_for_stroke(cutter);
+
+    SelOpItem* old_items = NULL; i32 n_old = 0, cap_old = 0;
+    SelOpItem* new_items = NULL; i32 n_new = 0, cap_new = 0;
+    double* iv = NULL; i32 iv_cap = 0;
+    CutPoints cur = {};
+    CutPiece* pieces = NULL; i32 n_pieces = 0, cap_pieces = 0;
+
+    i64 count = l->strokes.count;
+    i64 new_index = 0;
+    for ( i64 si = 0; si < count; ++si ) {
+        Stroke* st = get(&l->strokes, si);
+        b32 touched = false;
+        n_pieces = 0;
+        cur.n = 0;
+
+        Rect sb = st->bounding_rect;
+        b32 overlaps = !(sb.right < cb.left || sb.left > cb.right || sb.bottom < cb.top || sb.top > cb.bottom);
+        if ( overlaps && !(st->flags & StrokeFlag_ERASER) && st->num_points > 0 ) {
+            auto break_piece = [&]() {
+                if ( cur.n == 0 ) { return; }
+                if ( n_pieces == cap_pieces ) {
+                    cap_pieces = cap_pieces ? cap_pieces * 2 : 8;
+                    pieces = (CutPiece*)realloc(pieces, sizeof(CutPiece) * (size_t)cap_pieces);
+                }
+                CutPiece pc;
+                pc.n = cur.n;
+                pc.p = (v2l*)malloc(sizeof(v2l) * (size_t)cur.n);
+                pc.q = (f32*)malloc(sizeof(f32) * (size_t)cur.n);
+                memcpy(pc.p, cur.p, sizeof(v2l) * (size_t)cur.n);
+                memcpy(pc.q, cur.q, sizeof(f32) * (size_t)cur.n);
+                pieces[n_pieces++] = pc;
+                cur.n = 0;
+            };
+
+            i32 ns = st->num_points;
+            if ( ns == 1 ) {
+                double Ax = (double)st->points[0].x, Ay = (double)st->points[0].y;
+                double rs = sel_radius_at(st, 0, true);
+                for ( i32 k = 0; k < ncaps; ++k ) {
+                    double lo, hi;
+                    if ( sel_cap_interval(&caps[k], rs, Ax, Ay, 0.0, 0.0, &lo, &hi) ) { touched = true; break; }
+                }
+            } else {
+                for ( i32 i = 0; i < ns - 1; ++i ) {
+                    double Ax = (double)st->points[i].x, Ay = (double)st->points[i].y;
+                    double Bx = (double)st->points[i + 1].x, By = (double)st->points[i + 1].y;
+                    double Dx = Bx - Ax, Dy = By - Ay;
+                    double Rs = max(sel_radius_at(st, i, true), sel_radius_at(st, i + 1, true));
+                    double sminx = min(Ax, Bx) - Rs, smaxx = max(Ax, Bx) + Rs;
+                    double sminy = min(Ay, By) - Rs, smaxy = max(Ay, By) + Rs;
+                    f32 qa = st->pressures[i], qb = st->pressures[i + 1];
+
+                    i32 niv = 0;
+                    for ( i32 k = 0; k < ncaps; ++k ) {
+                        const CutCap* c = &caps[k];
+                        if ( sminx > c->maxx + c->R || smaxx < c->minx - c->R
+                             || sminy > c->maxy + c->R || smaxy < c->miny - c->R ) { continue; }
+                        double lo, hi;
+                        if ( sel_cap_interval(c, Rs, Ax, Ay, Dx, Dy, &lo, &hi) ) {
+                            if ( (niv + 1) * 2 > iv_cap ) {
+                                iv_cap = iv_cap ? iv_cap * 2 : 64;
+                                iv = (double*)realloc(iv, sizeof(double) * (size_t)iv_cap);
+                            }
+                            iv[niv * 2] = lo;
+                            iv[niv * 2 + 1] = hi;
+                            ++niv;
+                        }
+                    }
+
+                    auto point_at = [&](double t, v2l* p, f32* q) {
+                        p->x = (i64)llround(Ax + Dx * t);
+                        p->y = (i64)llround(Ay + Dy * t);
+                        *q = qa + (qb - qa) * (f32)t;
+                    };
+
+                    if ( niv == 0 ) {
+                        // Untouched segment: carry on the current piece.
+                        if ( cur.n == 0 ) { cut_points_push(&cur, st->points[i], qa); }
+                        cut_points_push(&cur, st->points[i + 1], qb);
+                        continue;
+                    }
+                    touched = true;
+
+                    // Sort the removal intervals by start and walk the gaps between them.
+                    for ( i32 a = 1; a < niv; ++a ) {
+                        double lo = iv[a * 2], hi = iv[a * 2 + 1];
+                        i32 b = a - 1;
+                        while ( b >= 0 && iv[b * 2] > lo ) {
+                            iv[(b + 1) * 2] = iv[b * 2];
+                            iv[(b + 1) * 2 + 1] = iv[b * 2 + 1];
+                            --b;
+                        }
+                        iv[(b + 1) * 2] = lo;
+                        iv[(b + 1) * 2 + 1] = hi;
+                    }
+                    double kept_from = 0.0;
+                    b32 first = true;
+                    for ( i32 a = 0; a <= niv; ++a ) {
+                        double rm_lo = a < niv ? iv[a * 2] : 2.0;
+                        double rm_hi = a < niv ? iv[a * 2 + 1] : 2.0;
+                        if ( a < niv && rm_lo <= kept_from ) {
+                            kept_from = max(kept_from, rm_hi);
+                            if ( first ) { break_piece(); }
+                            first = false;
+                            continue;
+                        }
+                        double k0 = kept_from;
+                        double k1 = a < niv ? rm_lo : 1.0;
+                        if ( k1 - k0 > 1e-9 ) {
+                            v2l p; f32 q;
+                            if ( k0 <= 0.0 ) {
+                                if ( cur.n == 0 ) { cut_points_push(&cur, st->points[i], qa); }
+                            } else {
+                                break_piece();
+                                point_at(k0, &p, &q);
+                                cut_points_push(&cur, p, q);
+                            }
+                            if ( k1 >= 1.0 ) {
+                                cut_points_push(&cur, st->points[i + 1], qb);
+                            } else {
+                                point_at(k1, &p, &q);
+                                cut_points_push(&cur, p, q);
+                                break_piece();
+                            }
+                        } else if ( first && k0 <= 0.0 ) {
+                            break_piece();
+                        }
+                        first = false;
+                        if ( a < niv ) { kept_from = max(kept_from, rm_hi); }
+                    }
+                    if ( kept_from >= 1.0 ) { break_piece(); }
+                }
+                break_piece();
+            }
+        }
+
+        if ( !touched ) {
+            ++new_index;
+            continue;
+        }
+
+        if ( n_old == cap_old ) {
+            cap_old = cap_old ? cap_old * 2 : 16;
+            old_items = (SelOpItem*)realloc(old_items, sizeof(SelOpItem) * (size_t)cap_old);
+        }
+        old_items[n_old] = {};
+        old_items[n_old].index = (i32)si;
+        ++n_old;
+
+        for ( i32 pi = 0; pi < n_pieces; ++pi ) {
+            Stroke ns_ = *st;
+            ns_.num_points = pieces[pi].n;
+            ns_.points = arena_alloc_array(&milton->canvas->arena, pieces[pi].n, v2l);
+            ns_.pressures = arena_alloc_array(&milton->canvas->arena, pieces[pi].n, f32);
+            memcpy(ns_.points, pieces[pi].p, sizeof(v2l) * (size_t)pieces[pi].n);
+            memcpy(ns_.pressures, pieces[pi].q, sizeof(f32) * (size_t)pieces[pi].n);
+            ns_.render_handle = 0;
+            ns_.id = milton->canvas->stroke_id_count++;
+            ns_.bounding_rect = bounding_box_for_stroke(&ns_);
+            free(pieces[pi].p);
+            free(pieces[pi].q);
+
+            if ( n_new == cap_new ) {
+                cap_new = cap_new ? cap_new * 2 : 16;
+                new_items = (SelOpItem*)realloc(new_items, sizeof(SelOpItem) * (size_t)cap_new);
+            }
+            new_items[n_new] = {};
+            new_items[n_new].index = (i32)new_index;
+            new_items[n_new].stroke = ns_;
+            ++n_new;
+            ++new_index;
+        }
+    }
+
+    free(caps);
+    free(iv);
+    free(cur.p);
+    free(cur.q);
+    free(pieces);
+
+    if ( n_old == 0 ) {
+        free(old_items);
+        free(new_items);
+        return;
+    }
+
+    SelOp op = {};
+    op.kind = SelOp_CUT;
+    op.layer_id = l->id;
+    op.n = n_old;
+    op.items = old_items;
+    op.n2 = n_new;
+    op.items2 = new_items;
+    list_remove(milton, l, op.items, op.n);
+    list_insert(l, op.items2, op.n2);
+    sel_push_op(milton, op);
+    milton->render_settings.do_full_redraw = true;
+}
 // ---- Undo / redo
 
 static void
@@ -452,6 +1369,9 @@ selection_undo_op(Milton* milton)
     if ( l ) {
         if ( op.kind == SelOp_DELETE ) {
             list_insert(l, op.items, op.n);
+        } else if ( op.kind == SelOp_CUT ) {
+            list_remove(milton, l, op.items2, op.n2);
+            list_insert(l, op.items, op.n);
         } else {
             sel_op_apply_transform(milton, &op, false);
         }
@@ -471,6 +1391,9 @@ selection_redo_op(Milton* milton)
     if ( l ) {
         if ( op.kind == SelOp_DELETE ) {
             list_remove(milton, l, op.items, op.n);
+        } else if ( op.kind == SelOp_CUT ) {
+            list_remove(milton, l, op.items, op.n);
+            list_insert(l, op.items2, op.n2);
         } else {
             sel_op_apply_transform(milton, &op, true);
         }
@@ -480,11 +1403,21 @@ selection_redo_op(Milton* milton)
     return true;
 }
 
+static void
+sel_clear_auto(DArray<AutoOp>* stack)
+{
+    while ( stack->count > 0 ) {
+        AutoOp a = pop(stack);
+        sel_op_free(&a.op);
+    }
+}
+
 void
 selection_clear_redo(Milton* milton)
 {
     if ( milton->selection ) {
         sel_clear_stack(&milton->selection->redo);
+        sel_clear_auto(&milton->selection->auto_redo);
     }
 }
 
@@ -496,6 +1429,8 @@ selection_reset(Milton* milton)
     sel_free_items(s);
     sel_clear_stack(&s->undo);
     sel_clear_stack(&s->redo);
+    sel_clear_auto(&s->auto_undo);
+    sel_clear_auto(&s->auto_redo);
     s->state = SelState_IDLE;
     s->armed = false;
     s->pending = SelCmd_NONE;
@@ -739,6 +1674,10 @@ selection_tick(Milton* milton, MiltonInput const* input)
         case SelCmd_COMMIT: {
             if ( s->xform_mode ) { sel_commit_xform(milton); s->xform_mode = false; }
         } break;
+        case SelCmd_CLEANUP: {
+            sel_deselect(milton);
+            sel_cleanup_layer(milton, milton->canvas->working_layer);
+        } break;
         case SelCmd_CANCEL: {
             if ( s->xform_mode ) { sel_cancel_xform(milton); s->xform_mode = false; }
             s->armed = false;
@@ -847,6 +1786,30 @@ selection_draw_overlay(Milton* milton)
         v2l r = canvas_d_to_raster(view, x, y);
         return ImVec2((f32)r.x, (f32)r.y);
     };
+
+    {
+        Stroke* ws = &milton->working_stroke;
+        if ( (ws->flags & StrokeFlag_CUT) && ws->num_points > 0 ) {
+            f32 w = (f32)(2.0 * ws->brush.radius / view->scale);
+            i32 step = ws->num_points > 1500 ? ws->num_points / 1500 : 1;
+            const ImU32 cc = IM_COL32(255, 80, 80, 110);
+            ImVec2 prev = to_im((double)ws->points[0].x, (double)ws->points[0].y);
+            if ( ws->num_points == 1 ) { dl->AddCircleFilled(prev, w * 0.5f, cc, 32); }
+            for ( i32 i = 1; i < ws->num_points; i += step ) {
+                ImVec2 cur = to_im((double)ws->points[i].x, (double)ws->points[i].y);
+                dl->AddLine(prev, cur, cc, w);
+                dl->AddCircleFilled(cur, w * 0.5f, cc, 16);
+                prev = cur;
+            }
+        }
+        if ( s->toast_until && (i32)(s->toast_until - SDL_GetTicks()) > 0 ) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), s->toast_n ? "Removed %d fully erased strokes" : "No fully erased strokes found", s->toast_n);
+            ImVec2 ts = ImGui::CalcTextSize(msg);
+            dl->AddText(ImVec2((ImGui::GetIO().DisplaySize.x - ts.x) * 0.5f, ui * 8), light, msg);
+            if ( milton->platform ) { milton->platform->force_next_frame = true; }
+        }
+    }
 
     if ( s->armed && s->state == SelState_IDLE ) {
         dl->AddText(ImVec2(ui * 12, ui * 8), light, "Lasso select: drag around strokes (Esc to cancel)");

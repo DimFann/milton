@@ -15,6 +15,7 @@ enum SelectionCommand
     SelCmd_TRANSFORM,       // Toggle the free-transform box
     SelCmd_COMMIT,          // Enter: apply the free transform
     SelCmd_CANCEL,          // Esc: revert the free transform
+    SelCmd_CLEANUP,         // Remove strokes on the current layer that opaque erasers fully cover
 };
 
 struct Selection;
@@ -44,3 +45,16 @@ void        selection_reset(Milton* milton);
 void        selection_finish(Milton* milton);
 
 void        selection_draw_overlay(Milton* milton);
+void        optimize_request(Milton* milton);
+b32         optimize_active();
+void        optimize_draw(Milton* milton);
+
+// Erased-stroke cleanup. Called after a stroke has been added to layer.
+void        selection_auto_cleanup(Milton* milton, Layer* layer);
+// Keep the automatic cleanup in step with stroke undo/redo. hist_pos is the history count that
+// includes the eraser stroke's entry.
+void        selection_auto_undo(Milton* milton, i64 hist_pos);
+void        selection_auto_redo(Milton* milton, i64 hist_pos);
+
+// Cutting eraser: split every stroke on the working layer along the path of cutter.
+void        selection_cut(Milton* milton, Stroke* cutter);

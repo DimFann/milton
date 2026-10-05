@@ -44,6 +44,7 @@ enum StrokeFlag
     StrokeFlag_DISTANCE_TO_OPACITY  = (1<<1),
     StrokeFlag_ERASER               = (1<<2),
     StrokeFlag_RELATIVE_TO_CANVAS   = (1<<3),
+    StrokeFlag_CUT                  = (1<<4),  // Working stroke only: a cutting eraser path. Never stored or rendered.
 };
 
 struct Stroke

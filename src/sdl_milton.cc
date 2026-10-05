@@ -1122,6 +1122,13 @@ milton_main(bool is_fullscreen, char* file_to_open)
         mlt_assert (platform.num_point_results <= platform.num_pressure_results);
 
         milton_input.input_count = platform.num_point_results;
+        if ( optimize_active() ) {
+            // The layer is being rewritten: ignore all canvas input until it finishes.
+            milton_input.input_count = 0;
+            milton_input.flags &= (int)MiltonInputFlags_FULL_REFRESH;
+            milton_input.scale = 0;
+            milton_input.mode_to_set = MiltonMode::MODE_COUNT;
+        }
 
         v2l pan_delta = platform.pan_point - platform.pan_start;
         if (    pan_delta.x != 0
@@ -1142,6 +1149,7 @@ milton_main(bool is_fullscreen, char* file_to_open)
         selection_draw_overlay(milton);
         gui_loading_indicator(milton);
         gui_perf_stats(milton);
+        optimize_draw(milton);
         {
             i64 pending, done;
             gpu_get_cook_progress(milton->renderer, &pending, &done);
