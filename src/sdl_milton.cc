@@ -205,7 +205,9 @@ panning_update(PlatformState* platform)
             }
         }
         else {
-            if ( (platform->is_space_down && platform->is_pointer_down)
+            // Ctrl+Space+drag is zoom, not pan.
+            b32 ctrl_down = (SDL_GetModState() & KMOD_CTRL) != 0;
+            if ( (platform->is_space_down && !ctrl_down && platform->is_pointer_down)
                  || platform->is_middle_button_down ) {
                 platform->is_panning = true;
                 reset_pan_start();
@@ -313,6 +315,9 @@ sdl_event_loop(Milton* milton, PlatformState* platform)
                 if ( event.button.windowID != platform->window_id ) {
                     break;
                 }
+                if ( event.button.button == SDL_BUTTON_RIGHT ) {
+                    platform->is_right_button_down = true;
+                }
 
                 if (   (event.button.button == SDL_BUTTON_LEFT && ( EasyTab == NULL || !EasyTab->PenInProximity))
                      || event.button.button == SDL_BUTTON_MIDDLE
@@ -349,6 +354,12 @@ sdl_event_loop(Milton* milton, PlatformState* platform)
             case SDL_MOUSEBUTTONUP: {
                 if ( event.button.windowID != platform->window_id ) {
                     break;
+                }
+                if ( event.button.button == SDL_BUTTON_RIGHT ) {
+                    platform->is_right_button_down = false;
+                    if ( milton->current_mode == MiltonMode::DRAG_BRUSH_SIZE ) {
+                        break;  // Releasing RMB ends the brush scrub, not a stroke.
+                    }
                 }
                 if ( event.button.button == SDL_BUTTON_LEFT
                      || event.button.button == SDL_BUTTON_MIDDLE
@@ -786,6 +797,35 @@ milton_main(bool is_fullscreen, char* file_to_open)
             }
             if ( changed ) {
                 previous_orientation = EasyTab->Orientation.Altitude;
+            }
+        }
+
+        // Alt+RMB hold + horizontal scrub resizes the brush. Takes priority over Alt's transform mode.
+        {
+            b32 want_scrub = (SDL_GetModState() & KMOD_ALT) && platform.is_right_button_down;
+            if ( want_scrub && milton->current_mode != MiltonMode::DRAG_BRUSH_SIZE ) {
+                if ( milton->current_mode == MiltonMode::TRANSFORM ) {
+                    transform_stop(milton);
+                }
+                drag_brush_size_start(milton, platform.pointer);
+            }
+            else if ( !want_scrub && milton->current_mode == MiltonMode::DRAG_BRUSH_SIZE
+                      && !(SDL_GetModState() & KMOD_SHIFT) ) {
+                drag_brush_size_stop(milton);
+                if ( SDL_GetModState() & KMOD_ALT ) {
+                    transform_start(milton, platform.pointer);
+                }
+            }
+        }
+
+        // Ctrl+Space enters drag-zoom; releasing either key leaves it.
+        {
+            b32 want_zoom = (SDL_GetModState() & KMOD_CTRL) && platform.is_space_down;
+            if ( want_zoom && milton->current_mode != MiltonMode::DRAG_ZOOM ) {
+                drag_zoom_start(milton, platform.pointer);
+            }
+            else if ( !want_zoom && milton->current_mode == MiltonMode::DRAG_ZOOM ) {
+                drag_zoom_stop(milton);
             }
         }
 

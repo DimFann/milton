@@ -45,9 +45,9 @@ Milton currently supports Visual Studio 2019.
 
 Other versions of Visual Studio might not work.
 
-To build:
+To build, install Visual Studio 2019 with the C++ desktop development tools and a Windows SDK. From VS Code, open the Milton folder and run **Terminal: Run Build Task** (Ctrl+Shift+B). The task runs `build.bat`, which locates and initializes the installed Visual Studio C++ tools if they are not already available in the environment.
 
-Run a x64 developer command prompt (for VS 2019 this corresponds to the "x64 Native Tools Command Prompt") and type the following:
+You can also run the build manually from an x64 Developer Command Prompt:
 
 ```
 build.bat
@@ -122,5 +122,4 @@ Thanks
 
 Milton is made with love by Sergio Gonzalez with the help of [awesome
 people](https://github.com/serge-rgb/milton/blob/master/CREDITS.md).
-
 

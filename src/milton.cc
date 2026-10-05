@@ -1319,17 +1319,27 @@ static void
 drag_zoom_tick(Milton* milton, MiltonInput const* input)
 {
     MiltonDragZoom* drag = milton->drag_zoom;
-    f32 drag_factor = 100.0f * ( static_cast<f32>(drag->start_size) / VIEW_SCALE_LIMIT );
-    i64 mouse_x = platform_cursor_get_position(milton->platform).x;
+    v2i cursor = platform_cursor_get_position(milton->platform);
 
-    i64 new_size = drag->start_size + drag_factor * -(mouse_x - drag->start_point.x );
+    // Zoom only while the pointer is held. Otherwise keep re-anchoring to the current state.
+    if ( !milton->platform->is_pointer_down ) {
+        drag->start_point = cursor;
+        drag->start_size = milton->view->scale;
+        drag->new_zoom_center = milton->platform->pointer;
+        return;
+    }
 
-    
+    // Exponential mapping: the same drag distance always changes the zoom by the same factor,
+    // regardless of the current zoom level. Dragging right zooms in.
+    const f32 zoom_per_pixel = 0.005f;
+    f32 factor = expf(-zoom_per_pixel * static_cast<f32>(cursor.x - drag->start_point.x));
+    i64 new_size = static_cast<i64>(static_cast<f32>(drag->start_size) * factor);
+
     if ( new_size < MINIMUM_SCALE )
         new_size = MINIMUM_SCALE;
     if ( new_size > VIEW_SCALE_LIMIT )
         new_size = VIEW_SCALE_LIMIT;
-    
+
     milton->view->scale = new_size;
     milton_set_zoom_at_point(milton, drag->new_zoom_center);
 }
@@ -1586,7 +1596,8 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
             else if ( milton->current_mode == MiltonMode::PRIMITIVE_GRID ) {
                 milton_primitive_grid_input(milton, input, end_stroke);
             }
-            else if ( milton->current_mode != MiltonMode::DRAG_BRUSH_SIZE )  {  // Input for eraser and pen
+            else if ( milton->current_mode != MiltonMode::DRAG_BRUSH_SIZE
+                      && milton->current_mode != MiltonMode::DRAG_ZOOM )  {  // Input for eraser and pen
                 Stroke* ws = &milton->working_stroke;
                 auto prev_num_points = ws->num_points;
                 milton_stroke_input(milton, input);

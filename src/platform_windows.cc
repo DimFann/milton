@@ -9,6 +9,8 @@
 extern "C" {
 
 static FILE* g_win32_logfile;
+static bool wintab_active = false;
+static void ink_init();
 
 struct PlatformSpecific
 {
@@ -76,6 +78,7 @@ platform_init(PlatformState* platform, SDL_SysWMinfo* sysinfo)
     if (easytab_res != EASYTAB_OK) {
         milton_log("EasyTab failed to load. Code %d\n", easytab_res);
     }
+    ink_init();
 
 }
 
@@ -224,15 +227,112 @@ platform_setup_cursor(Arena* arena, PlatformState* platform)
 #endif  // MILTON_HARDWARE_BRUSH_CURSOR
 }
 
+// Windows Ink (WM_POINTER) support. Drivers like OpenTabletDriver don't provide Wintab; they emit
+// Windows Ink pen input, which only arrives as WM_POINTER* messages. We translate those into the
+// same EasyTab state that Wintab fills in.
+typedef BOOL (WINAPI GetPointerTypeProc)(UINT32, POINTER_INPUT_TYPE*);
+typedef BOOL (WINAPI GetPointerPenInfoProc)(UINT32, POINTER_PEN_INFO*);
+
+static GetPointerTypeProc*    ink_GetPointerType    = NULL;
+static GetPointerPenInfoProc* ink_GetPointerPenInfo = NULL;
+static void
+ink_init()
+{
+    HMODULE user32 = GetModuleHandleA("user32.dll");
+    if ( user32 ) {
+        ink_GetPointerType    = (GetPointerTypeProc*)GetProcAddress(user32, "GetPointerType");
+        ink_GetPointerPenInfo = (GetPointerPenInfoProc*)GetProcAddress(user32, "GetPointerPenInfo");
+    }
+    // Wintab may have failed to load (no Wacom driver). Ink still needs the shared state.
+    if ( EasyTab == NULL && ink_GetPointerPenInfo ) {
+        EasyTab = (EasyTabInfo*)calloc(1, sizeof(EasyTabInfo));
+    }
+}
+
+static EasyTabResult
+ink_handle_event(HWND hwnd, UINT msg, WPARAM wparam)
+{
+    if ( !EasyTab || !ink_GetPointerType || !ink_GetPointerPenInfo ) {
+        return EASYTAB_EVENT_NOT_HANDLED;
+    }
+    switch ( msg ) {
+        case WM_POINTERENTER:
+        case WM_POINTERLEAVE:
+        case WM_POINTERDOWN:
+        case WM_POINTERUP:
+        case WM_POINTERUPDATE: break;
+        default: return EASYTAB_EVENT_NOT_HANDLED;
+    }
+
+    UINT32 id = GET_POINTERID_WPARAM(wparam);
+    POINTER_INPUT_TYPE type = PT_POINTER;
+    if ( !ink_GetPointerType(id, &type) || type != PT_PEN ) {
+        return EASYTAB_EVENT_NOT_HANDLED;
+    }
+    POINTER_PEN_INFO pen = {};
+    if ( !ink_GetPointerPenInfo(id, &pen) ) {
+        return EASYTAB_EVENT_NOT_HANDLED;
+    }
+
+    EasyTab->NumPackets = 0;
+
+    POINTER_FLAGS flags = pen.pointerInfo.pointerFlags;
+    b32 in_range = (flags & POINTER_FLAG_INRANGE) != 0 && msg != WM_POINTERLEAVE;
+    b32 touching = in_range && (flags & POINTER_FLAG_INCONTACT) != 0 && msg != WM_POINTERUP;
+
+    EasyTab->PenInProximity = in_range ? EASYTAB_TRUE : EASYTAB_FALSE;
+
+    EasyTab->Buttons = 0;
+    if ( touching ) { EasyTab->Buttons |= EasyTab_Buttons_Pen_Touch; }
+    if ( pen.penFlags & PEN_FLAG_BARREL ) { EasyTab->Buttons |= EasyTab_Buttons_Pen_Lower; }
+
+    // Eraser end of the pen maps to negative altitude (see the pen/eraser switch in the main loop).
+    EasyTab->Orientation.Altitude = (pen.penFlags & PEN_FLAG_INVERTED) ? -1 : 1;
+    if ( pen.penMask & PEN_MASK_ROTATION ) { EasyTab->Orientation.Twist = (int32_t)pen.rotation; }
+
+    if ( in_range && msg != WM_POINTERLEAVE ) {
+        POINT p = pen.pointerInfo.ptPixelLocation;
+        ScreenToClient(hwnd, &p);
+        EasyTab->PosX[0] = p.x;
+        EasyTab->PosY[0] = p.y;
+        if ( pen.penMask & PEN_MASK_PRESSURE ) {
+            EasyTab->Pressure[0] = (f32)pen.pressure / 1024.0f;
+        }
+        else {
+            EasyTab->Pressure[0] = 1.0f;
+        }
+        EasyTab->NumPackets = 1;
+    }
+    return EASYTAB_OK;
+}
+
 EasyTabResult
 platform_handle_sysevent(PlatformState* platform, SDL_SysWMEvent* sysevent)
 {
     EasyTabResult res = EASYTAB_EVENT_NOT_HANDLED;
     mlt_assert(sysevent->msg->subsystem == SDL_SYSWM_WINDOWS);
+    if ( !EasyTab ) {
+        return res;
+    }
+    if ( !wintab_active ) {
+        res = ink_handle_event(sysevent->msg->msg.win.hwnd,
+                               sysevent->msg->msg.win.msg,
+                               sysevent->msg->msg.win.wParam);
+        if ( res == EASYTAB_OK ) {
+            return res;
+        }
+    }
+    // Wintab handler dereferences its function table, so only call it with it loaded.
+    if ( EasyTab->Dll == NULL ) {
+        return EASYTAB_EVENT_NOT_HANDLED;
+    }
     res = EasyTab_HandleEvent(sysevent->msg->msg.win.hwnd,
                               sysevent->msg->msg.win.msg,
                               sysevent->msg->msg.win.lParam,
                               sysevent->msg->msg.win.wParam);
+    if ( res == EASYTAB_OK && sysevent->msg->msg.win.msg == WT_PACKET ) {
+        wintab_active = true;  // Real Wintab data is flowing; stop listening to Windows Ink.
+    }
     return res;
 }
 
