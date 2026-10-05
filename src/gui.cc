@@ -444,163 +444,171 @@ hotkey_resolve_rotate_conflicts(Milton* milton)
     Binding* rel = &st->bindings.bindings[ActionRelease_PEEK_OUT];
     rel->bound_key = st->bindings.bindings[Action_PEEK_OUT].bound_key;
 }
-// gui_brush_window returns the height of the rendered brush tool window. This can be used to position other windows below it.
-// If reset_gui is true, the default window position and size will be set.
+// Thin tool selector fixed to the left edge, under the menu bar.
+static void
+gui_tools_window(MiltonInput* input, Milton* milton)
+{
+    const f32 s = milton->gui->scale;
+    const f32 top = milton->gui->menu_visible ? ImGui::GetFrameHeight() : 0.0f;
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+
+    ImGui::SetNextWindowPos(ImVec2(0, top));
+    ImGui::SetNextWindowSize(ImVec2(s*68, display.y - top));
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
+                                   ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
+                                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(s*4, s*4));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
+    if ( ImGui::Begin("Tools", NULL, flags) ) {
+        struct Tool { Texts text; BindableAction action; MiltonMode mode; const char* label; };
+        const Tool tools[] = {
+            { TXT_switch_to_brush,               Action_MODE_PEN,                 MiltonMode::PEN,                 "Brush"  },
+            { TXT_switch_to_eraser,              Action_MODE_ERASER,              MiltonMode::ERASER,              "Eraser" },
+            { TXT_switch_to_primitive_line,      Action_MODE_PRIMITIVE_LINE,      MiltonMode::PRIMITIVE_LINE,      "Line"   },
+            { TXT_switch_to_primitive_rectangle, Action_MODE_PRIMITIVE_RECTANGLE, MiltonMode::PRIMITIVE_RECTANGLE, "Rect"   },
+            { TXT_switch_to_primitive_grid,      Action_MODE_PRIMITIVE_GRID,      MiltonMode::PRIMITIVE_GRID,      "Grid"   },
+        };
+        const f32 w = ImGui::GetContentRegionAvailWidth();
+        for ( const Tool& t : tools ) {
+            const bool active = milton->current_mode == t.mode;
+            if ( active ) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+            }
+            if ( ImGui::Button(t.label, ImVec2(w, s*30)) ) {
+                input->mode_to_set = t.mode;
+            }
+            if ( active ) { ImGui::PopStyleColor(); }
+            if ( ImGui::IsItemHovered() ) {
+                char name[64];
+                char key[64];
+                loc_base_name(t.text, name, sizeof(name));
+                hotkey_label(&milton->settings->bindings.bindings[t.action], key, sizeof(key));
+                ImGui::SetTooltip("%s [%s]", name, key);
+            }
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+}
+
+// Compact options for the selected tool, floating at the top left next to the tool panel.
+// Returns the height of the window.
 i32
 gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, PlatformSettings* prefs, b32 reset_gui)
 {
-    b32 show_brush_window = (current_mode_is_for_drawing(milton));
-    auto imgui_window_flags = ImGuiWindowFlags_NoCollapse;
+    if ( !current_mode_is_for_drawing(milton) ) {
+        return 0;
+    }
     MiltonGui* gui = milton->gui;
+    const f32 s = gui->scale;
+    i32 window_height = 0;
 
-    const Rect pbounds = get_bounds_for_picker_and_colors(&gui->picker);
+    gui_tools_window(input, milton);
 
-    // Use default size on first program start on this computer.
-    f32 left = milton->gui->scale * 10;
-    f32 top = milton->gui->scale * 30;
-    f32 width = milton->gui->scale * 300;
-    f32 height = milton->gui->scale * 230;
-    if ( reset_gui ) {
-        ImGui::SetNextWindowPos(ImVec2(left, top));
-        ImGui::SetNextWindowSize({width, height});
+    const f32 top = gui->menu_visible ? ImGui::GetFrameHeight() : 0.0f;
+    ImGui::SetNextWindowPos(ImVec2(s*68 + s*6, top + s*6));
+    ImGui::SetNextWindowSize(ImVec2(s*230, 0));
+
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                                   ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize |
+                                   ImGuiWindowFlags_NoSavedSettings;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(s*6, s*4));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(s*6, s*3));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(s*4, s*2));
+
+    const char* title = "Brush Options";
+    switch ( milton->current_mode ) {
+        case MiltonMode::PEN:                 title = "Brush Options";  break;
+        case MiltonMode::ERASER:              title = "Eraser Options"; break;
+        case MiltonMode::PRIMITIVE_LINE:      title = "Line Options";   break;
+        case MiltonMode::PRIMITIVE_RECTANGLE: title = "Rect Options";   break;
+        case MiltonMode::PRIMITIVE_GRID:      title = "Grid Options";   break;
+        default: break;
     }
-    else {
-        if ( prefs->brush_window_width != 0 && prefs->brush_window_height ) {
-            // If there are preferences already, use those for the layer window.
-            left =   prefs->brush_window_left;
-            top =    prefs->brush_window_top;
-            width =  prefs->brush_window_width;
-            height = prefs->brush_window_height;
-        }
+    char title_id[64];
+    snprintf(title_id, sizeof(title_id), "%s###brush_options", title);
 
-        ImGui::SetNextWindowPos(ImVec2(left, top), ImGuiSetCond_FirstUseEver);
-        ImGui::SetNextWindowSize({width, height}, ImGuiSetCond_FirstUseEver);
-    }
+    if ( ImGui::Begin(title_id, NULL, flags) ) {
+        ImGui::PushItemWidth(s*110);
 
-    // Brush Window
-    if ( show_brush_window ) {
-        if ( ImGui::Begin(loc(TXT_brushes), NULL, imgui_window_flags) ) {
-            if ( milton->current_mode == MiltonMode::PEN ||
-                 mode_is_for_primitives(milton->current_mode) ) {
-                const float pen_alpha = milton_get_brush_alpha(milton);
-                mlt_assert(pen_alpha >= 0.0f && pen_alpha <= 1.0f);
-                float mut_alpha = pen_alpha*100;
-                ImGui::SliderFloat(loc(TXT_opacity), &mut_alpha, 1, 100, "%.0f%%");
+        if ( milton->current_mode == MiltonMode::PEN || mode_is_for_primitives(milton->current_mode) ) {
+            const float pen_alpha = milton_get_brush_alpha(milton);
+            mlt_assert(pen_alpha >= 0.0f && pen_alpha <= 1.0f);
+            float mut_alpha = pen_alpha*100;
+            ImGui::SliderFloat(loc(TXT_opacity), &mut_alpha, 1, 100, "%.0f%%");
 
-                mut_alpha /= 100.0f;
-                if (mut_alpha > 1.0f ) mut_alpha = 1.0f;
-                if ( mut_alpha != pen_alpha ) {
-                    milton_set_brush_alpha(milton, mut_alpha);
-                    gui->flags |= (i32)MiltonGuiFlags_SHOWING_PREVIEW;
-                }
-            }
-            const auto size = milton_get_brush_radius(milton);
-            auto mut_size = size;
-
-
-            if (ImGui::CheckboxFlags(loc(TXT_size_relative_to_canvas),
-                                    reinterpret_cast<u32*>(&milton->working_stroke.flags),
-                                    StrokeFlag_RELATIVE_TO_CANVAS)) {
-                // Just set it to be relative...
-            }
-
-            ImGui::SliderInt(loc(TXT_brush_size), &mut_size, 1, MILTON_MAX_BRUSH_SIZE);
-
-            if ( mut_size != size ) {
-                milton_set_brush_size(milton, mut_size);
-                milton->gui->flags |= (i32)MiltonGuiFlags_SHOWING_PREVIEW;
-            }
-
-            if ( binding_button(milton, TXT_switch_to_primitive_line, Action_MODE_PRIMITIVE_LINE) ) {
-                input->mode_to_set = MiltonMode::PRIMITIVE_LINE;
-            }
-
-            ImGui::SameLine();
-
-            if ( binding_button(milton, TXT_switch_to_primitive_rectangle, Action_MODE_PRIMITIVE_RECTANGLE) ) {
-                input->mode_to_set = MiltonMode::PRIMITIVE_RECTANGLE;
-            }
-
-            ImGui::SameLine();
-
-            if ( binding_button(milton, TXT_switch_to_primitive_grid, Action_MODE_PRIMITIVE_GRID) ) {
-                input->mode_to_set = MiltonMode::PRIMITIVE_GRID;
-            }
-
-            if ( binding_button(milton, TXT_switch_to_brush, Action_MODE_PEN) ) {
-                input->mode_to_set = MiltonMode::PEN;
-            }
-
-            ImGui::SameLine();
-
-            if ( milton->current_mode != MiltonMode::ERASER ) {
-                if ( binding_button(milton, TXT_switch_to_eraser, Action_MODE_ERASER) ) {
-                    input->mode_to_set = MiltonMode::ERASER;
-                }
-            }
-
-            if (milton->current_mode == MiltonMode::PRIMITIVE_GRID ) {
-                ImGui::SliderInt(loc(TXT_grid_columns), &milton->grid_columns, 1, MILTON_MAX_GRID_SIZE);
-                ImGui::SliderInt(loc(TXT_grid_rows), &milton->grid_rows, 1, MILTON_MAX_GRID_SIZE);
+            mut_alpha /= 100.0f;
+            if (mut_alpha > 1.0f ) mut_alpha = 1.0f;
+            if ( mut_alpha != pen_alpha ) {
+                milton_set_brush_alpha(milton, mut_alpha);
+                gui->flags |= (i32)MiltonGuiFlags_SHOWING_PREVIEW;
             }
         }
 
-        {
-            if (!(milton->working_stroke.flags & StrokeFlag_ERASER)) {
-                ImGui::CheckboxFlags(loc(TXT_opacity_pressure), reinterpret_cast<u32*>(&milton->working_stroke.flags), StrokeFlag_PRESSURE_TO_OPACITY);
-                if (milton->working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY) {
-                    int brush_enum = milton_get_brush_enum(milton);
-                    f32* min_opacity = &milton->brushes[brush_enum].pressure_opacity_min;
+        const auto size = milton_get_brush_radius(milton);
+        auto mut_size = size;
+        ImGui::SliderInt(loc(TXT_brush_size), &mut_size, 1, MILTON_MAX_BRUSH_SIZE);
+        if ( mut_size != size ) {
+            milton_set_brush_size(milton, mut_size);
+            gui->flags |= (i32)MiltonGuiFlags_SHOWING_PREVIEW;
+        }
 
-                    ImGui::SliderFloat(loc(TXT_minimum), min_opacity, 0.0f, milton->brushes[brush_enum].alpha);
-                }
-                {
-                    int brush_enum = milton_get_brush_enum(milton);
-                    f32* hardness = &milton->brushes[brush_enum].hardness;
-                    // Very soft edges show seams between nearby passes, so the slider starts at a minimum.
-                    const f32 k_min_hardness_percent = clamp(milton->settings->hardness_min_percent, 0.0f, 95.0f);
-                    f32 percent = (*hardness - 1.0f) / (k_max_hardness - 1.0f) * 100.0f;
-                    if ( percent < k_min_hardness_percent ) {
-                        percent = k_min_hardness_percent;
-                        *hardness = 1.0f + percent / 100.0f * (k_max_hardness - 1.0f);
-                    }
-                    // The slider shows 0-100%, mapped onto the real range of 50-100%.
-                    f32 shown = (percent - k_min_hardness_percent) / (100.0f - k_min_hardness_percent) * 100.0f;
-                    if ( ImGui::SliderFloat(loc(TXT_hardness), &shown, 0.0f, 100.0f, "%.0f%%") ) {
-                        percent = k_min_hardness_percent + shown / 100.0f * (100.0f - k_min_hardness_percent);
-                        *hardness = 1.0f + percent / 100.0f * (k_max_hardness - 1.0f);
-                    }
-                    // A hard brush uses the fast path; anything softer needs the feathered path.
-                    if ( *hardness < k_max_hardness ) {
-                        milton->working_stroke.flags |= StrokeFlag_DISTANCE_TO_OPACITY;
-                    } else {
-                        milton->working_stroke.flags &= ~StrokeFlag_DISTANCE_TO_OPACITY;
-                    }
-                }
+        if ( milton->current_mode == MiltonMode::PRIMITIVE_GRID ) {
+            ImGui::SliderInt(loc(TXT_grid_columns), &milton->grid_columns, 1, MILTON_MAX_GRID_SIZE);
+            ImGui::SliderInt(loc(TXT_grid_rows), &milton->grid_rows, 1, MILTON_MAX_GRID_SIZE);
+        }
 
+        if ( !(milton->working_stroke.flags & StrokeFlag_ERASER) ) {
+            int brush_enum = milton_get_brush_enum(milton);
+            f32* hardness = &milton->brushes[brush_enum].hardness;
+            // Very soft edges show seams between nearby passes, so the slider starts at a minimum.
+            const f32 k_min_hardness_percent = clamp(milton->settings->hardness_min_percent, 0.0f, 95.0f);
+            f32 percent = (*hardness - 1.0f) / (k_max_hardness - 1.0f) * 100.0f;
+            if ( percent < k_min_hardness_percent ) {
+                percent = k_min_hardness_percent;
+                *hardness = 1.0f + percent / 100.0f * (k_max_hardness - 1.0f);
+            }
+            // The slider shows 0-100%, mapped onto the real range above the minimum.
+            f32 shown = (percent - k_min_hardness_percent) / (100.0f - k_min_hardness_percent) * 100.0f;
+            if ( ImGui::SliderFloat(loc(TXT_hardness), &shown, 0.0f, 100.0f, "%.0f%%") ) {
+                percent = k_min_hardness_percent + shown / 100.0f * (100.0f - k_min_hardness_percent);
+                *hardness = 1.0f + percent / 100.0f * (k_max_hardness - 1.0f);
+            }
+            // A hard brush uses the fast path; anything softer needs the feathered path.
+            if ( *hardness < k_max_hardness ) {
+                milton->working_stroke.flags |= StrokeFlag_DISTANCE_TO_OPACITY;
+            } else {
+                milton->working_stroke.flags &= ~StrokeFlag_DISTANCE_TO_OPACITY;
+            }
+
+            ImGui::CheckboxFlags(loc(TXT_opacity_pressure), reinterpret_cast<u32*>(&milton->working_stroke.flags), StrokeFlag_PRESSURE_TO_OPACITY);
+            if ( milton->working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY ) {
+                f32* min_opacity = &milton->brushes[brush_enum].pressure_opacity_min;
+                ImGui::SliderFloat(loc(TXT_minimum), min_opacity, 0.0f, milton->brushes[brush_enum].alpha);
             }
         }
 
-        // Important to place this before ImGui::End(), position and size will be invalid after it.
+        ImGui::CheckboxFlags(loc(TXT_size_relative_to_canvas),
+                             reinterpret_cast<u32*>(&milton->working_stroke.flags),
+                             StrokeFlag_RELATIVE_TO_CANVAS);
+
+        ImGui::PopItemWidth();
+
         ImVec2 pos  = ImGui::GetWindowPos();
-        ImVec2 size = ImGui::GetWindowSize();
-        // Remember the current window layout for the next time the program runs.
-        prefs->brush_window_left   = pos.x;
-        prefs->brush_window_top    = pos.y;
-        prefs->brush_window_width  = size.x;
-        prefs->brush_window_height = size.y;
-        ImGui::End();  // Brushes
-        if (( milton->gui->flags & MiltonGuiFlags_SHOWING_PREVIEW )) {
-            milton->gui->preview_pos = {
-                (i32)(pos.x + size.x + milton_get_brush_radius(milton)),
+        ImVec2 size_w = ImGui::GetWindowSize();
+        window_height = (i32)size_w.y;
+        if ( gui->flags & MiltonGuiFlags_SHOWING_PREVIEW ) {
+            gui->preview_pos = {
+                (i32)(pos.x + size_w.x + milton_get_brush_radius(milton)),
                 (i32)(pos.y),
             };
         }
     }
+    ImGui::End();
+    ImGui::PopStyleVar(3);
 
-    return height;
+    return window_height;
 }
-
 void
 gui_menu(MiltonInput* input, PlatformState* platform, Milton* milton, b32& show_settings, b32* reset_gui)
 {
@@ -980,7 +988,13 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
                                 && milton->current_mode != MiltonMode::HISTORY;
 
     if ( gui->visible && should_show_windows ) {
+        // While rotating (Alt held) keep showing the panels of the mode we came from.
+        MiltonMode real_mode = milton->current_mode;
+        if ( real_mode == MiltonMode::TRANSFORM && milton->n_mode_stack > 0 ) {
+            milton->current_mode = milton->mode_stack[milton->n_mode_stack - 1];
+        }
         i32 brush_window_height = gui_brush_window(input, platform, milton, prefs, reset_gui);
+        milton->current_mode = real_mode;
 
         gui_layer_window(input, platform, milton, brush_window_height, prefs, reset_gui);
 

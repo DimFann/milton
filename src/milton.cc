@@ -184,7 +184,8 @@ static size_t
 get_gui_visibility_index(Milton* milton)
 {
     size_t idx = Milton::GuiVisibleCategory_OTHER;
-    if (current_mode_is_for_drawing(milton)) {
+    // Rotating with Alt is a temporary mode; it keeps the drawing UI.
+    if (current_mode_is_for_drawing(milton) || milton->current_mode == MiltonMode::TRANSFORM) {
         idx = Milton::GuiVisibleCategory_DRAWING;
     }
     else if (milton->current_mode == MiltonMode::EXPORTING) {
