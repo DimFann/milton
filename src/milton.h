@@ -11,7 +11,8 @@
 #include "profiler.h"
 
 #define STROKE_MAX_POINTS           2048
-#define MILTON_DEFAULT_SCALE        (1 << 10)
+// Geometric middle of [MINIMUM_SCALE, VIEW_SCALE_LIMIT] = [4, 65536], so zoom in/out headroom is equal.
+#define MILTON_DEFAULT_SCALE        (1 << 9)
 #define NO_PRESSURE_INFO            -1.0f
 #define MAX_INPUT_BUFFER_ELEMS      32
 #define MILTON_MAX_BRUSH_SIZE       300

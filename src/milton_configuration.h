@@ -34,7 +34,9 @@
 
 
 // Zoom control
-#define MINIMUM_SCALE        (1 << 4)
+// Canvas units per pixel when fully zoomed in. The scale is an integer, so below ~4 each zoom step
+// is a visible jump (4->3 is 25%, 2->1 is 50%).
+#define MINIMUM_SCALE        4
 
 #define SCALE_FACTOR 1.3f
     #if MILTON_ZOOM_DEBUG

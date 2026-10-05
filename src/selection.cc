@@ -860,11 +860,14 @@ selection_draw_overlay(Milton* milton)
             cap = s->lasso.count * 2;
             pts = (ImVec2*)malloc(sizeof(ImVec2) * (size_t)cap);
         }
-        for ( i64 i = 0; i < s->lasso.count; ++i ) {
-            pts[i] = to_im((double)s->lasso.data[i].x, (double)s->lasso.data[i].y);
+        // Long lassos are thinned for display only; the selection test still uses every point.
+        i64 stride = max((i64)1, s->lasso.count / 2000);
+        i32 n = 0;
+        for ( i64 i = 0; i < s->lasso.count; i += stride ) {
+            pts[n++] = to_im((double)s->lasso.data[i].x, (double)s->lasso.data[i].y);
         }
-        dl->AddPolyline(pts, (int)s->lasso.count, dark, true, ui * 3);
-        dl->AddPolyline(pts, (int)s->lasso.count, accent, true, ui * 1.5f);
+        dl->AddPolyline(pts, n, dark, true, ui * 3);
+        dl->AddPolyline(pts, n, accent, true, ui * 1.5f);
     }
 
     if ( !s->active ) { return; }
@@ -872,12 +875,19 @@ selection_draw_overlay(Milton* milton)
     if ( !l ) { return; }
 
     // Highlight the selected strokes.
-    if ( s->n <= 4000 ) {
+    {
         static ImVec2* pts = NULL;
         static i32 cap = 0;
+        // Keep the total drawn vertex count bounded however large the selection is.
+        i64 total_points = 0;
+        for ( i32 i = 0; i < s->n; ++i ) {
+            total_points += get(&l->strokes, s->items[i].index)->num_points;
+        }
+        const i64 budget = 60000;
+        i32 min_stride = (i32)max((i64)1, total_points / budget);
         for ( i32 i = 0; i < s->n; ++i ) {
             Stroke* st = get(&l->strokes, s->items[i].index);
-            i32 stride = max(1, st->num_points / 1500);
+            i32 stride = max(min_stride, max(1, st->num_points / 1500));
             i32 cnt = 0;
             if ( cap < st->num_points + 1 ) {
                 free(pts);

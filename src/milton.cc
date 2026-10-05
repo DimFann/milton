@@ -1636,8 +1636,11 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
 
         i32 min_scale = MINIMUM_SCALE;
 
-        if ( input->scale > 0 && milton->view->scale >= min_scale ) {
-            milton->view->scale = (i32)(ceilf(milton->view->scale / scale_factor));
+        if ( input->scale > 0 && milton->view->scale > min_scale ) {
+            // At small scales the ratio alone can round back to the same value, so always step by at least 1.
+            i32 next = (i32)(ceilf(milton->view->scale / scale_factor));
+            if ( next >= milton->view->scale ) { next = (i32)milton->view->scale - 1; }
+            milton->view->scale = max(next, min_scale);
         }
         else if ( input->scale < 0 && milton->view->scale < view_scale_limit ) {
             milton->view->scale = (i32)(milton->view->scale * scale_factor) + 1;
