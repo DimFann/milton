@@ -490,12 +490,19 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
 
                     ImGui::SliderFloat(loc(TXT_minimum), min_opacity, 0.0f, milton->brushes[brush_enum].alpha);
                 }
-                ImGui::CheckboxFlags(loc(TXT_soft_brush), reinterpret_cast<u32*>(&milton->working_stroke.flags), StrokeFlag_DISTANCE_TO_OPACITY);
-                if (milton->working_stroke.flags & StrokeFlag_DISTANCE_TO_OPACITY) {
+                {
                     int brush_enum = milton_get_brush_enum(milton);
                     f32* hardness = &milton->brushes[brush_enum].hardness;
-
-                    ImGui::SliderFloat(loc(TXT_hardness), hardness, 1.0f, k_max_hardness);
+                    f32 percent = (*hardness - 1.0f) / (k_max_hardness - 1.0f) * 100.0f;
+                    if ( ImGui::SliderFloat(loc(TXT_hardness), &percent, 0.0f, 100.0f, "%.0f%%") ) {
+                        *hardness = 1.0f + percent / 100.0f * (k_max_hardness - 1.0f);
+                    }
+                    // A hard brush uses the fast path; anything softer needs the feathered path.
+                    if ( *hardness < k_max_hardness ) {
+                        milton->working_stroke.flags |= StrokeFlag_DISTANCE_TO_OPACITY;
+                    } else {
+                        milton->working_stroke.flags &= ~StrokeFlag_DISTANCE_TO_OPACITY;
+                    }
                 }
 
             }

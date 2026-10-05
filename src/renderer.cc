@@ -1578,7 +1578,11 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                     glEnable(GL_BLEND);
                     // RGB: min normalized distance. A: max pressure. The shader extrapolates
                     // pressure into the round caps so they don't stamp flat discs (banding).
-                    glBlendEquationSeparate(GL_MIN, GL_MAX);
+                    glBlendEquation(GL_MAX);
+                    gl::set_uniform_i(r->stroke_info_program, "u_use_pressure", (re->flags & RenderElementFlags_PRESSURE_TO_OPACITY) ? 1 : 0);
+                    gl::set_uniform_i(r->stroke_info_program, "u_use_distance", (re->flags & RenderElementFlags_DISTANCE_TO_OPACITY) ? 1 : 0);
+                    gl::set_uniform_f(r->stroke_info_program, "u_opacity_min", re->min_opacity);
+                    gl::set_uniform_f(r->stroke_info_program, "u_hardness", re->hardness);
                     stroke_pass(re, r->stroke_info_program);
 
                     glBlendEquation(GL_FUNC_ADD);
@@ -1589,25 +1593,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                                               texture_target, layer_texture, 0);
                     glBindTexture(texture_target, r->stroke_info_texture);
 
-                    if ( (re->flags & RenderElementFlags_PRESSURE_TO_OPACITY) &&
-                        !(re->flags & RenderElementFlags_DISTANCE_TO_OPACITY)) {
-                        gl::set_uniform_f(r->stroke_fill_program_pressure, "u_opacity_min", re->min_opacity);
-                        stroke_pass(re, r->stroke_fill_program_pressure);
-                    }
-                    else if ( !(re->flags & RenderElementFlags_PRESSURE_TO_OPACITY) &&
-                               (re->flags & RenderElementFlags_DISTANCE_TO_OPACITY)) {
-                        gl::set_uniform_f(r->stroke_fill_program_distance, "u_hardness", re->hardness);
-                        stroke_pass(re, r->stroke_fill_program_distance);
-                    }
-                    else if ( (re->flags & RenderElementFlags_PRESSURE_TO_OPACITY) &&
-                              (re->flags & RenderElementFlags_DISTANCE_TO_OPACITY)) {
-                        gl::set_uniform_f(r->stroke_fill_program_pressure_distance, "u_opacity_min", re->min_opacity);
-                        gl::set_uniform_f(r->stroke_fill_program_pressure_distance, "u_hardness", re->hardness);
-                        stroke_pass(re, r->stroke_fill_program_pressure_distance);
-                    }
-                    else {
-                        INVALID_CODE_PATH;
-                    }
+                    stroke_pass(re, r->stroke_fill_program_pressure);
                 }
                 else {
                     // Fast path. Two passes sharing one depth value per stroke: opaque core first,

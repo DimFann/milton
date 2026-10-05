@@ -17,18 +17,9 @@ void
 main()
 {
     vec2 coord = gl_FragCoord.xy / u_screen_size;
-    vec4 info = texture(u_info, coord);
-    vec2 stroke_info = info.ra;
-    float pressure = stroke_info.y;
-    float coverage = 1.0 - info.g;
-    if ( coverage > 0.0 ) {
-        out_color = u_brush_color * coverage;
-        #if PRESSURE_TO_OPACITY
-            out_color *= (1.0f - u_opacity_min) * pressure + u_opacity_min;
-        #endif
-        #if DISTANCE_TO_OPACITY
-            out_color *= pow(1 - (stroke_info.x), 1.0f / u_hardness);
-        #endif
+    float alpha = texture(u_info, coord).a;
+    if ( alpha > 0.0 ) {
+        out_color = u_brush_color * alpha;
     }
     else {
         discard;

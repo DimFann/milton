@@ -4,6 +4,11 @@
 in vec3 v_pointa;
 in vec3 v_pointb;
 
+uniform float u_opacity_min;
+uniform float u_hardness;
+uniform int u_use_pressure;
+uniform int u_use_distance;
+
 void
 main()
 {
@@ -40,8 +45,16 @@ main()
     } else if (t_raw > 1.0) {
         cap_pressure = clamp(mix(v_pointa.z, v_pointb.z, t_raw), 0.0, v_pointb.z);
     }
-    out_color.r = dist / rad;
-    // G holds 1 - edge coverage, so the MIN blend keeps the best coverage of overlapping segments.
-    out_color.g = 1.0 - clamp(0.5 + (rad - dist) / float(u_scale), 0.0, 1.0);
-    out_color.a = cap_pressure;
+    // Final opacity contributed by this segment. The MAX blend keeps the strongest contribution per
+    // pixel, so re-treading a stroke never darkens it and each pixel uses its own nearest segment.
+    float alpha = clamp(0.5 + (rad - dist) / float(u_scale), 0.0, 1.0);
+    if (u_use_pressure != 0) {
+        alpha *= (1.0 - u_opacity_min) * cap_pressure + u_opacity_min;
+    }
+    if (u_use_distance != 0) {
+        float h = clamp((u_hardness - 1.0) / 9.0, 0.0, 1.0);
+        float fall = clamp((1.0 - dist / rad) / max(1.0 - h, 0.0001), 0.0, 1.0);
+        alpha *= fall * fall * (3.0 - 2.0 * fall);
+    }
+    out_color = vec4(0.0, 0.0, 0.0, alpha);
 }
