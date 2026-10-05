@@ -1521,6 +1521,12 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
                     if ( ImGui::Checkbox("Rotate color triangle with hue", &rotates) ) {
                         milton->settings->picker_triangle_rotates = rotates ? 1 : 0;
                     }
+                    const char* scrub_items[] = { "Alt + RMB hover scrub", "Ctrl + Alt + pen tip drag", "Both" };
+                    int scrub = milton->settings->brush_scrub_trigger;
+                    if ( scrub < 0 || scrub > 2 ) { scrub = 2; }
+                    if ( ImGui::Combo("Brush size scrub", &scrub, scrub_items, 3) ) {
+                        milton->settings->brush_scrub_trigger = (u8)scrub;
+                    }
                     ImGui::Separator();
                 }
 

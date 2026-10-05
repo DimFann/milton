@@ -119,6 +119,7 @@ struct MiltonSettings
     float hardness_min_percent;    // Real hardness (0-100) shown as 0% on the brush hardness slider.
     u8    light_theme;             // 0 = dark UI theme (default), 1 = light.
     u8    picker_triangle_rotates; // 0 = colour triangle keeps a fixed orientation (default).
+    u8    brush_scrub_trigger;     // 0 = Alt+RMB hover scrub, 1 = Ctrl+Alt+pen tip drag, 2 = both (default).
 };
 #pragma pack(pop)
 

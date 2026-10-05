@@ -51,6 +51,20 @@ get_current_keyboard_layout()
     return layout;
 }
 
+// True when Ctrl+Alt is held and the settings allow the pen-drag brush scrub.
+static b32
+brush_scrub_pen_chord(Milton* milton)
+{
+    if ( milton->settings->brush_scrub_trigger == 0 ) { return false; }
+    b32 ctrl = (SDL_GetModState() & KMOD_CTRL) != 0;
+    b32 alt  = (SDL_GetModState() & KMOD_ALT) != 0;
+#if defined(_WIN32)
+    ctrl = ctrl || (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    alt  = alt  || (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+#endif
+    return ctrl && alt;
+}
+
 void
 shortcut_handle_key(Milton* milton, PlatformState* platform, SDL_Event* event, MiltonInput* input, b32 is_keyup)
 {
@@ -303,12 +317,14 @@ sdl_event_loop(Milton* milton, PlatformState* platform)
                     i32 bit_upper = (EasyTab->Buttons & EasyTab_Buttons_Pen_Upper);
 
                     // Pen in use but not drawing
+                    b32 scrub_chord = brush_scrub_pen_chord(milton);
                     b32 taking_pen_input = EasyTab->PenInProximity
                                            && bit_touch
-                                           && !( bit_upper || bit_lower );
+                                           && !( bit_upper || bit_lower )
+                                           && !scrub_chord;
 
                     b32 pen_alt_pick = false;
-                    if ( bit_touch && !bit_touch_old && (SDL_GetModState() & KMOD_ALT)
+                    if ( bit_touch && !bit_touch_old && (SDL_GetModState() & KMOD_ALT) && !scrub_chord
                          && current_mode_is_for_drawing(milton) ) {
                         pen_alt_pick = true;
                         milton_input.mode_to_set = MiltonMode::EYEDROPPER;
@@ -870,7 +886,7 @@ milton_main(bool is_fullscreen, char* file_to_open)
             if ( !touching ) {
                 pen_pick_latched = false;
             }
-            else if ( alt_down && !pen_pick_latched && current_mode_is_for_drawing(milton)
+            else if ( alt_down && !pen_pick_latched && !brush_scrub_pen_chord(milton) && current_mode_is_for_drawing(milton)
                       && milton->current_mode != MiltonMode::EYEDROPPER ) {
                 pen_pick_latched = true;
                 milton_input.mode_to_set = MiltonMode::EYEDROPPER;
@@ -879,7 +895,10 @@ milton_main(bool is_fullscreen, char* file_to_open)
 
         // Alt+RMB hold + horizontal scrub resizes the brush. Takes priority over Alt's transform mode.
         {
-            b32 want_scrub = (SDL_GetModState() & KMOD_ALT) && platform.is_right_button_down;
+            b32 trigger = milton->settings->brush_scrub_trigger;
+            b32 pen_touching = EasyTab != NULL && EasyTab->PenInProximity && (EasyTab->Buttons & EasyTab_Buttons_Pen_Touch);
+            b32 want_scrub = (trigger != 1 && (SDL_GetModState() & KMOD_ALT) && platform.is_right_button_down)
+                             || (brush_scrub_pen_chord(milton) && pen_touching);
             if ( want_scrub && milton->current_mode != MiltonMode::DRAG_BRUSH_SIZE ) {
                 drag_brush_size_start(milton, platform.pointer);
             }

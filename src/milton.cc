@@ -710,6 +710,7 @@ settings_init(MiltonSettings* s)
     s->hardness_min_percent = 75.0f;
     s->light_theme = 0;
     s->picker_triangle_rotates = 0;
+    s->brush_scrub_trigger = 2;
 }
 
 int milton_save_thread(void* state_);  // forward
