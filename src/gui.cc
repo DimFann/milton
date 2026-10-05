@@ -981,6 +981,34 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
 
     float ui_scale = milton->gui->scale;
 
+    // Rotation gizmo: a circle around the pivot with a red line pointing at true (canvas) up.
+    if ( milton->current_mode == MiltonMode::TRANSFORM ) {
+        CanvasView* view = milton->view;
+        const ImVec2 display = ImGui::GetIO().DisplaySize;
+        const ImVec2 c = ImVec2((f32)view->screen_size.w * 0.5f, (f32)view->screen_size.h * 0.5f);
+        const f32 r = ui_scale * 70;
+
+        v2l canvas_c = raster_to_canvas(view, v2l{ (i64)c.x, (i64)c.y });
+        v2l canvas_up = { canvas_c.x, canvas_c.y - 1000 * view->scale };
+        v2l up_raster = canvas_to_raster(view, canvas_up);
+        f32 dx = (f32)(up_raster.x - (i64)c.x);
+        f32 dy = (f32)(up_raster.y - (i64)c.y);
+        f32 len = sqrtf(dx*dx + dy*dy);
+        if ( len > 0.0f ) { dx /= len; dy /= len; }
+
+        ImDrawList* dl = ImGui::GetOverlayDrawList();
+        const ImU32 dark = IM_COL32(0, 0, 0, 200);
+        const ImU32 light = IM_COL32(255, 255, 255, 200);
+        const ImU32 red = IM_COL32(230, 30, 30, 255);
+        dl->AddCircle(c, r, light, 64, ui_scale * 4);
+        dl->AddCircle(c, r, dark, 64, ui_scale * 2);
+        dl->AddCircleFilled(c, ui_scale * 4, dark, 16);
+        ImVec2 tip = ImVec2(c.x + dx * r * 1.3f, c.y + dy * r * 1.3f);
+        dl->AddLine(c, tip, light, ui_scale * 5);
+        dl->AddLine(c, tip, red, ui_scale * 3);
+        (void)display;
+    }
+
     // GUI Windows ----
 
     b32 should_show_windows = milton->current_mode != MiltonMode::EYEDROPPER
