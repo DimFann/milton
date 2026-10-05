@@ -501,6 +501,30 @@ gui_tools_window(MiltonInput* input, Milton* milton)
                 ImGui::SetTooltip("Lasso select [%s]", key);
             }
         }
+
+        // Background colour swatch pinned to the bottom of the panel.
+        {
+            const f32 box = w - s*8;
+            const f32 label_h = ImGui::GetTextLineHeightWithSpacing();
+            ImGui::SetCursorPosY(ImGui::GetWindowHeight() - box - label_h - s*10);
+            ImGui::Text("Bg Clr");
+            v3f bg = milton->view->background_color;
+            ImVec4 col = ImVec4(bg.r, bg.g, bg.b, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1, 1, 1, 1));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, s*2);
+            if ( ImGui::ColorButton("##bg_swatch", col, ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoTooltip, ImVec2(box, box)) ) {
+                ImGui::OpenPopup("bg_picker");
+            }
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
+            if ( ImGui::BeginPopup("bg_picker") ) {
+                if ( ImGui::ColorPicker3("##bg_color", bg.d) ) {
+                    milton_set_background_color(milton, clamp_01(bg));
+                    input->flags |= (i32)MiltonInputFlags_FULL_REFRESH;
+                }
+                ImGui::EndPopup();
+            }
+        }
     }
     ImGui::End();
     ImGui::PopStyleVar(2);
