@@ -1939,6 +1939,10 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     }
 
     MiltonMode current_mode = milton->current_mode;
+    if ( input->mode_to_set == MiltonMode::PEN || input->mode_to_set == MiltonMode::ERASER
+         || mode_is_for_primitives(input->mode_to_set) ) {
+        selection_disarm_lasso(milton);
+    }
     if ( input->mode_to_set < MiltonMode::MODE_COUNT ) {
         if ( current_mode == input->mode_to_set ) {
             // Modes we can toggle

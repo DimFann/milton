@@ -125,6 +125,15 @@ sel_point_in_box(Milton* milton, v2l raster)
     return fabs(lx) <= s->h0x * s->sx && fabs(ly) <= s->h0y * s->sy;
 }
 
+void
+selection_disarm_lasso(Milton* milton)
+{
+    Selection* s = milton->selection;
+    if ( s->armed && s->state == SelState_IDLE ) {
+        s->armed = false;
+    }
+}
+
 i32
 selection_cursor(Milton* milton)
 {

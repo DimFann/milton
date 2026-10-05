@@ -28,6 +28,7 @@ b32         selection_transform_active(Milton* milton);  // Free transform or la
 // Returns true if the selection consumed this frame's pointer input.
 b32         selection_tick(Milton* milton, MiltonInput const* input);
 b32         selection_lasso_armed(Milton* milton);
+void        selection_disarm_lasso(Milton* milton);  // Called when another tool is activated
 // Cursor the selection wants at the pointer: 0 = none (normal tool cursor), 1 = lasso, 2 = regular arrow.
 i32         selection_cursor(Milton* milton);
 b32         selection_take_dirty(Milton* milton);  // True once after an edit that should trigger a save
