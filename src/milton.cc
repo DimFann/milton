@@ -1792,6 +1792,14 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
             milton->flags_in_eraser_mode = false;
         }
     }
+    if ( current_mode_is_for_drawing(milton) ) {
+        // Feathered edges are needed for any tool whose brush is softer than max hardness.
+        if ( milton->brushes[milton_get_brush_enum(milton)].hardness < k_max_hardness ) {
+            milton->working_stroke.flags |= StrokeFlag_DISTANCE_TO_OPACITY;
+        } else {
+            milton->working_stroke.flags &= ~StrokeFlag_DISTANCE_TO_OPACITY;
+        }
+    }
     if ( current_mode_is_for_drawing(milton) && !sel_consumed &&
         (input->input_count > 0 || end_stroke) ) {
         if ( !is_user_drawing(milton)

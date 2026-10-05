@@ -6,6 +6,7 @@ in vec3 v_pointb;
 
 uniform float u_opacity_min;
 uniform float u_hardness;
+uniform float u_master_alpha;
 uniform int u_use_pressure;
 uniform int u_use_distance;
 
@@ -75,6 +76,7 @@ main()
     if (u_use_pressure != 0) {
         pressure_opacity = (1.0 - u_opacity_min) * cap_pressure + u_opacity_min;
     }
+    pressure_opacity *= u_master_alpha;
     float h = clamp((u_hardness - 1.0) / 9.0, 0.0, 1.0);
     float shape = 1.0;
     float shape_mean = 1.0;

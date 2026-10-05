@@ -718,7 +718,7 @@ preset_apply(Milton* milton, const BrushPreset* p)
 {
     int kind = p->kind;
     Brush* b = &milton->brushes[kind];
-    if ( kind == BrushEnum_PEN ) { b->alpha = clamp(p->alpha, 0.0f, 1.0f); }
+    b->alpha = clamp(p->alpha, 0.0f, 1.0f);
     b->hardness = clamp(p->hardness, 1.0f, k_max_hardness);
     b->pressure_opacity_min = p->pressure_opacity_min;
     b->shape = p->shape;
@@ -861,7 +861,8 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
         }
         ImGui::PushItemWidth(s*110);
 
-        if ( milton->current_mode == MiltonMode::PEN || mode_is_for_primitives(milton->current_mode) ) {
+        if ( milton->current_mode == MiltonMode::PEN || milton->current_mode == MiltonMode::ERASER
+             || mode_is_for_primitives(milton->current_mode) ) {
             const float pen_alpha = milton_get_brush_alpha(milton);
             mlt_assert(pen_alpha >= 0.0f && pen_alpha <= 1.0f);
             float mut_alpha = pen_alpha*100;
@@ -920,7 +921,7 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
             ImGui::SliderInt(loc(TXT_grid_rows), &milton->grid_rows, 1, MILTON_MAX_GRID_SIZE);
         }
 
-        if ( !(milton->working_stroke.flags & StrokeFlag_ERASER) ) {
+        {
             int brush_enum = milton_get_brush_enum(milton);
             f32* hardness = &milton->brushes[brush_enum].hardness;
             // Very soft edges show seams between nearby passes, so the slider starts at a minimum.
@@ -943,17 +944,19 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
                 milton->working_stroke.flags &= ~StrokeFlag_DISTANCE_TO_OPACITY;
             }
 
+            if ( !(milton->working_stroke.flags & StrokeFlag_ERASER) ) {
             ImGui::CheckboxFlags(loc(TXT_opacity_pressure), reinterpret_cast<u32*>(&milton->working_stroke.flags), StrokeFlag_PRESSURE_TO_OPACITY);
             if ( milton->working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY ) {
                 f32* min_opacity = &milton->brushes[brush_enum].pressure_opacity_min;
                 ImGui::SliderFloat(loc(TXT_minimum), min_opacity, 0.0f, milton->brushes[brush_enum].alpha);
+            }
             }
         }
 
         if ( milton->working_stroke.flags & StrokeFlag_ERASER ) {
             ImGui::Checkbox(loc(TXT_opacity_pressure), &milton->eraser_pressure_opacity);
             if ( milton->eraser_pressure_opacity ) {
-                ImGui::SliderFloat(loc(TXT_minimum), &milton->brushes[BrushEnum_ERASER].pressure_opacity_min, 0.0f, 1.0f);
+                ImGui::SliderFloat(loc(TXT_minimum), &milton->brushes[BrushEnum_ERASER].pressure_opacity_min, 0.0f, milton->brushes[BrushEnum_ERASER].alpha);
             }
         }
 

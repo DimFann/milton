@@ -59,6 +59,7 @@ struct RenderElement
             f32     shape_aspect;
             f32     shape_axis_x;
             f32     shape_axis_y;
+            f32     master_alpha;  // Eraser strength; the pen bakes its alpha into color.
         };
         struct {  // For when element is layer.
             f32          layer_alpha;
@@ -1179,6 +1180,7 @@ gpu_cook_stroke(Arena* arena, RenderBackend* r, Stroke* stroke, CookStrokeOpt co
             re->shape_aspect = stroke->brush.shape_aspect;
             re->shape_axis_x = stroke->brush.shape_axis_x;
             re->shape_axis_y = stroke->brush.shape_axis_y;
+            re->master_alpha = clamp(stroke->brush.alpha, 0.0f, 1.0f);
 
             re->flags = 0;
             if (stroke->flags & StrokeFlag_ERASER) {
@@ -1599,7 +1601,8 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
 
             if ( re->count > 0 ) {
                 if (re->flags & RenderElementFlags_ERASER) {
-                    if ( re->flags & RenderElementFlags_PRESSURE_TO_OPACITY ) {
+                    if ( (re->flags & (RenderElementFlags_PRESSURE_TO_OPACITY | RenderElementFlags_DISTANCE_TO_OPACITY))
+                         || re->master_alpha < 0.999f ) {
                         glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                                   texture_target, r->stroke_info_texture, 0);
                         glDisable(GL_DEPTH_TEST);
@@ -1609,8 +1612,9 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                         glEnable(GL_BLEND);
                         glBlendEquationSeparate(GL_MAX, GL_FUNC_ADD);
                         glBlendFunc(GL_ONE, GL_ONE);
-                        gl::set_uniform_i(r->stroke_info_program, "u_use_pressure", 1);
-                        gl::set_uniform_i(r->stroke_info_program, "u_use_distance", 0);
+                        gl::set_uniform_i(r->stroke_info_program, "u_use_pressure", (re->flags & RenderElementFlags_PRESSURE_TO_OPACITY) ? 1 : 0);
+                        gl::set_uniform_i(r->stroke_info_program, "u_use_distance", (re->flags & RenderElementFlags_DISTANCE_TO_OPACITY) ? 1 : 0);
+                        gl::set_uniform_f(r->stroke_info_program, "u_master_alpha", re->master_alpha);
                         gl::set_uniform_f(r->stroke_info_program, "u_opacity_min", re->min_opacity);
                         gl::set_uniform_f(r->stroke_info_program, "u_hardness", re->hardness);
                         stroke_pass(re, r->stroke_info_program);
@@ -1648,6 +1652,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                     glBlendFunc(GL_ONE, GL_ONE);
                     gl::set_uniform_i(r->stroke_info_program, "u_use_pressure", (re->flags & RenderElementFlags_PRESSURE_TO_OPACITY) ? 1 : 0);
                     gl::set_uniform_i(r->stroke_info_program, "u_use_distance", (re->flags & RenderElementFlags_DISTANCE_TO_OPACITY) ? 1 : 0);
+                    gl::set_uniform_f(r->stroke_info_program, "u_master_alpha", 1.0f);
                     gl::set_uniform_f(r->stroke_info_program, "u_opacity_min", re->min_opacity);
                     gl::set_uniform_f(r->stroke_info_program, "u_hardness", re->hardness);
                     stroke_pass(re, r->stroke_info_program);
