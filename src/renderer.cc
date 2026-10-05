@@ -984,8 +984,10 @@ gpu_cook_stroke(Arena* arena, RenderBackend* r, Stroke* stroke, CookStrokeOpt co
                 v2i point_j = relative_to_render_center(r, stroke->points[i+1]);
 
                 Brush brush = stroke->brush;
-                float radius_i = stroke->pressures[i]*brush.radius;
-                float radius_j = stroke->pressures[i+1]*brush.radius;
+                // Pad by one pixel so the anti-aliased rim is inside the geometry.
+                float pad = (float)r->scale;
+                float radius_i = stroke->pressures[i]*brush.radius + pad;
+                float radius_j = stroke->pressures[i+1]*brush.radius + pad;
 
                 u16 idx = (u16)bounds_i;
                 if ( point_i == point_j ) {
@@ -1608,7 +1610,11 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                     }
                 }
                 else {
-                    // Fast path
+                    // Fast path. Two passes sharing one depth value per stroke: opaque core first,
+                    // then the anti-aliased rim (a pixel already drawn by the core is skipped).
+                    gl::set_uniform_i(r->stroke_program, "u_aa_rim", 0);
+                    stroke_pass(re, r->stroke_program);
+                    gl::set_uniform_i(r->stroke_program, "u_aa_rim", 1);
                     stroke_pass(re, r->stroke_program);
                 }
             } else {

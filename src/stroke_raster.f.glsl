@@ -4,6 +4,9 @@
 in vec3 v_pointa;
 in vec3 v_pointb;
 
+// 0: opaque core only. 1: anti-aliased rim only.
+uniform int u_aa_rim;
+
 void
 main()
 {
@@ -25,9 +28,16 @@ main()
     // Distance between fragment and stroke
     float dist = distance(stroke_point, canvas_point) - u_radius*pressure;
 
-    if ( dist < 0 ) {
+    float coverage = clamp(0.5 - dist / float(u_scale), 0.0, 1.0);
+    if ( u_aa_rim == 0 ) {
+        if ( coverage < 1.0 ) {
+            discard;
+        }
         out_color = u_brush_color;
     } else {
-        discard;
+        if ( coverage <= 0.0 || coverage >= 1.0 ) {
+            discard;
+        }
+        out_color = u_brush_color * coverage;
     }
 }

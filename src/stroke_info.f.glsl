@@ -27,7 +27,7 @@ main()
     float dist = distance(stroke_point, canvas_point);
 
     float rad = u_radius * pressure;
-    if (dist >= rad) {
+    if (dist >= rad + 0.5 * float(u_scale)) {
         discard;
     }
     // In the round caps, continue the pressure gradient instead of holding it flat. A flat cap
@@ -41,5 +41,7 @@ main()
         cap_pressure = clamp(mix(v_pointa.z, v_pointb.z, t_raw), 0.0, v_pointb.z);
     }
     out_color.r = dist / rad;
+    // G holds 1 - edge coverage, so the MIN blend keeps the best coverage of overlapping segments.
+    out_color.g = 1.0 - clamp(0.5 + (rad - dist) / float(u_scale), 0.0, 1.0);
     out_color.a = cap_pressure;
 }
