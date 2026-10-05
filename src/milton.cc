@@ -39,6 +39,7 @@ init_view(CanvasView* view, v3f background_color, i32 width, i32 height)
     view->zoom_center       = size / 2;
     view->scale             = MILTON_DEFAULT_SCALE;
     view->angle             = 0.0f;
+    view->flipped           = 0;
     view->screen_size       = { width, height };
 }
 
@@ -75,6 +76,20 @@ milton_update_brushes(Milton* milton)
 {
     for ( int i = 0; i < BrushEnum_COUNT; ++i ) {
         Brush* brush = &milton->brushes[i];
+        if ( milton->working_stroke.flags & StrokeFlag_RELATIVE_TO_CANVAS ) {
+            // Keep the brush's size on the canvas constant: its pixel size follows the zoom.
+            if ( milton->brush_sizes[i] != milton->brush_ref_size[i] ) {
+                milton->brush_ref_radius[i] = (double)milton->brush_sizes[i] * (double)milton->view->scale;
+            }
+            else {
+                i32 px = (i32)(milton->brush_ref_radius[i] / (double)milton->view->scale + 0.5);
+                milton->brush_sizes[i] = clamp(px, 1, MILTON_MAX_BRUSH_SIZE);
+            }
+            milton->brush_ref_size[i] = milton->brush_sizes[i];
+        }
+        else {
+            milton->brush_ref_size[i] = 0;
+        }
         i32 size = milton->brush_sizes[i];
 
         brush->radius = size * milton->view->scale;
@@ -357,7 +372,7 @@ stroke_append_point(Stroke* stroke, v2l canvas_point, f32 pressure)
 }
 
 static v2l
-smooth_filter(SmoothFilter* filter, v2l input)
+smooth_filter(SmoothFilter* filter, v2l input, f32 alpha)
 {
     v2f point = v2l_to_v2f(input - filter->center);
 
@@ -368,8 +383,6 @@ smooth_filter(SmoothFilter* filter, v2l input)
     }
     else
     {
-        f32 alpha = 0.5;
-
         filter->prediction = alpha * point + (1 - alpha) * filter->prediction;
     }
     v2l result = v2f_to_v2l(filter->prediction) + filter->center;
@@ -452,7 +465,7 @@ milton_stroke_input(Milton* milton, MiltonInput const* input)
 
         v2l in_point = input->points[input_i];
         if (milton->flags & MiltonStateFlags_BRUSH_SMOOTHING) {
-            in_point = smooth_filter(milton->smooth_filter, in_point);
+            in_point = smooth_filter(milton->smooth_filter, in_point, milton->settings->position_smoothing);
         }
 
         v2l canvas_point = raster_to_canvas(milton->view, in_point);
@@ -460,12 +473,12 @@ milton_stroke_input(Milton* milton, MiltonInput const* input)
         f32 pressure = NO_PRESSURE_INFO;
 
         if ( input->pressures[input_i] != NO_PRESSURE_INFO ) {
-            f32 pressure_min = 0.01f;
+            f32 pressure_min = milton->settings->pressure_min;
             pressure = pressure_min + input->pressures[input_i] * (1.0f - pressure_min);
 
             // Low-pass the raw tablet pressure against the previous point of this stroke.
             if ( ws->num_points > 0 ) {
-                const f32 pressure_smoothing = 0.35f;  // 1.0 = raw, lower = smoother
+                const f32 pressure_smoothing = milton->settings->pressure_smoothing;  // 1.0 = raw
                 f32 prev = ws->pressures[ws->num_points - 1];
                 pressure = prev + pressure_smoothing * (pressure - prev);
             }
@@ -621,6 +634,12 @@ settings_init(MiltonSettings* s)
 {
     s->background_color = v3f{1,1,1};
     s->peek_out_increment = DEFAULT_PEEK_OUT_INCREMENT_LOG;
+    s->pressure_smoothing = 0.35f;
+    s->pressure_min = 0.01f;
+    s->position_smoothing = 0.5f;
+    s->brush_scrub_speed = 0.5f;
+    s->zoom_drag_speed = 0.005f;
+    s->rotate_key = 'w';
 }
 
 int milton_save_thread(void* state_);  // forward
@@ -681,10 +700,18 @@ milton_init(Milton* milton, i32 width, i32 height, f32 ui_scale, PATH_CHAR* file
     if (!loaded_settings) {
         set_default_bindings(&milton->settings->bindings);
     }
+    if (!milton->settings->unbound_prims_migrated) {
+        Binding* rect = &milton->settings->bindings.bindings[Action_MODE_PRIMITIVE_RECTANGLE];
+        Binding* grid = &milton->settings->bindings.bindings[Action_MODE_PRIMITIVE_GRID];
+        if ( rect->bound_key == 'r' && rect->modifiers == Modifier_NONE ) { rect->bound_key = Binding::UNBOUND; }
+        if ( grid->bound_key == 'g' && grid->modifiers == Modifier_NONE ) { grid->bound_key = Binding::UNBOUND; }
+        milton->settings->unbound_prims_migrated = 1;
+    }
 
     milton->view = arena_alloc_elem(&milton->root_arena, CanvasView);
 
     init_view(milton->view, milton->settings->background_color, width, height);
+    gui_anchor_picker_top_right(milton->gui, width);
     if (init_graphics) { gpu_init(milton->renderer, milton->view, &milton->gui->picker); }
 
     if (init_graphics) { gpu_update_background(milton->renderer, milton->view->background_color); }
@@ -793,8 +820,9 @@ milton_resize_and_pan(Milton* milton, v2l pan_delta, v2i new_screen_size)
 
     if ( new_screen_size.w < milton->max_width && new_screen_size.h < milton->max_height ) {
         milton->view->screen_size = new_screen_size;
+        gui_anchor_picker_top_right(milton->gui, new_screen_size.w);
 
-        f32 x = pan_delta.x;
+        f32 x = milton->view->flipped ? -(f32)pan_delta.x : (f32)pan_delta.x;
         f32 y = pan_delta.y;
 
         f32 cos_angle = cosf(milton->view->angle);
@@ -1287,7 +1315,7 @@ static void
 drag_brush_size_tick(Milton* milton, MiltonInput const* input)
 {
     MiltonDragBrush* drag = milton->drag_brush;
-    f32 drag_factor = 0.5f;
+    f32 drag_factor = milton->settings->brush_scrub_speed;
     i64 mouse_x = platform_cursor_get_position(milton->platform).x;
 
     f32 new_size = drag->start_size + drag_factor * (mouse_x - drag->start_point.x);
@@ -1338,7 +1366,7 @@ drag_zoom_tick(Milton* milton, MiltonInput const* input)
 
     // Exponential mapping: the same drag distance always changes the zoom by the same factor,
     // regardless of the current zoom level. Dragging right zooms in.
-    const f32 zoom_per_pixel = 0.005f;
+    const f32 zoom_per_pixel = milton->settings->zoom_drag_speed;
     f32 factor = expf(-zoom_per_pixel * static_cast<f32>(cursor.x - drag->start_point.x));
     i64 new_size = static_cast<i64>(static_cast<f32>(drag->start_size) * factor);
 
@@ -1351,6 +1379,20 @@ drag_zoom_tick(Milton* milton, MiltonInput const* input)
     milton_set_zoom_at_point(milton, drag->new_zoom_center);
 }
 
+
+void
+milton_flip_canvas_horizontal(Milton* milton)
+{
+    milton->view->flipped = !milton->view->flipped;
+    milton_set_zoom_at_screen_center(milton);  // Also uploads the new transform.
+}
+
+void
+milton_reset_rotation(Milton* milton)
+{
+    milton->view->angle = 0.0f;
+    milton_set_zoom_at_screen_center(milton);
+}
 
 void
 transform_start(Milton* milton, v2i pointer)
@@ -1390,7 +1432,7 @@ transform_tick(Milton* milton, MiltonInput const* input)
             if (lena > 0.0f && lenb > 0.0f) {
                 const f32 cos_angle = clamp(DOT(b, a) / (lena * lenb), 0.0f, 1.0f);
                 const f32 sign = orientation(center, t->last_point, point) > 0 ? -1.0f : 1.0f;
-                milton->view->angle += sign * acosf(cos_angle);
+                milton->view->angle += (milton->view->flipped ? -sign : sign) * acosf(cos_angle);
                 t->last_point = point;
                 gpu_update_canvas(milton->renderer, milton->canvas, milton->view);
             }
@@ -1447,6 +1489,8 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
         milton->render_settings.do_full_redraw = true;
     }
 
+    milton_update_brushes(milton);  // Latch canvas-relative reference sizes before any zoom this frame.
+
     if ( input->scale ) {
         milton->render_settings.do_full_redraw = true;
 
@@ -1454,19 +1498,6 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
         i32 view_scale_limit = VIEW_SCALE_LIMIT;
 
         i32 min_scale = MINIMUM_SCALE;
-
-        // Update the current brush if it's canvas-relative
-        if (milton->working_stroke.flags & StrokeFlag_RELATIVE_TO_CANVAS) {
-
-            i32* psize = pointer_to_brush_size(milton);
-
-            if ( input->scale > 0 && milton->view->scale >= min_scale ) {
-                (*psize) = (i32)((*psize) * scale_factor) + 1;
-            }
-            else if ( input->scale < 0 && (*psize) < view_scale_limit ) {
-                (*psize) = (i32)(ceilf((*psize) / scale_factor));
-            }
-        }
 
         if ( input->scale > 0 && milton->view->scale >= min_scale ) {
             milton->view->scale = (i32)(ceilf(milton->view->scale / scale_factor));
@@ -1658,6 +1689,7 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     }
     else if (milton->current_mode == MiltonMode::DRAG_ZOOM) {
         drag_zoom_tick(milton, input);
+        milton_update_brushes(milton);
     }
     else if (milton->current_mode == MiltonMode::TRANSFORM) {
         transform_tick(milton, input);

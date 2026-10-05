@@ -12,6 +12,8 @@
 #include "platform.h"
 
 
+void settings_init(MiltonSettings* s);  // milton.cc
+
 #define NUM_BUTTONS 5
 #define BOUNDS_RADIUS_PX 80
 
@@ -27,10 +29,10 @@ gui_layer_window(MiltonInput* input, PlatformState* platform, Milton* milton, f3
     // Layer window
 
     // Use default size on first program start on this computer.
-    f32 left   = ui_scale*10;
-    f32 top    = ui_scale*20 + (float)pbounds.bottom + brush_window_height;
     f32 width  = ui_scale*300;
     f32 height = ui_scale*230;
+    f32 left   = (float)milton->view->screen_size.w - width - ui_scale*10;
+    f32 top    = ui_scale*10 + (float)pbounds.bottom;
     if ( reset_gui ) {
         ImGui::SetNextWindowPos(ImVec2(left, top));
         ImGui::SetNextWindowSize(ImVec2(width, height));
@@ -284,6 +286,100 @@ gui_layer_window(MiltonInput* input, PlatformState* platform, Milton* milton, f3
 }
 
 
+static char
+hotkey_sanitize_char(char c)
+{
+    if ( c >= 'A' && c <= 'Z' ) { c = c - 'A' + 'a'; }
+    return (c >= 33 && c <= 126) ? c : (char)0;
+}
+
+// Human readable binding, e.g. "Ctrl+Shift+Z". "Unb" when unbound.
+static void
+hotkey_label(const Binding* b, char* out, size_t size)
+{
+    out[0] = 0;
+    if ( b->bound_key == Binding::UNBOUND ) {
+        snprintf(out, size, "Unb");
+        return;
+    }
+    char key[8] = {};
+    if ( b->bound_key == Binding::TAB ) { snprintf(key, sizeof(key), "Tab"); }
+    else if ( b->bound_key == Binding::ESC ) { snprintf(key, sizeof(key), "Esc"); }
+    else if ( b->bound_key <= Binding::F1 && b->bound_key >= Binding::F12 ) { snprintf(key, sizeof(key), "F%d", -b->bound_key - 1); }
+    else if ( b->bound_key > 32 ) {
+        key[0] = (b->bound_key >= 'a' && b->bound_key <= 'z') ? (char)(b->bound_key - 'a' + 'A') : (char)b->bound_key;
+    }
+    else { snprintf(key, sizeof(key), "?"); }
+    snprintf(out, size, "%s%s%s%s",
+             (b->modifiers & Modifier_CTRL) ? "Ctrl+" : "",
+             (b->modifiers & Modifier_ALT) ? "Alt+" : "",
+             (b->modifiers & Modifier_SHIFT) ? "Shift+" : "",
+             key);
+}
+
+// Copies a loc() string without its baked " - [key]" suffix.
+static void
+loc_base_name(Texts id, char* out, size_t size)
+{
+    snprintf(out, size, "%s", loc(id));
+    char* cut = strstr(out, " - [");
+    if ( cut ) { *cut = 0; }
+}
+
+// Button whose label shows the current binding of `action`.
+static bool
+binding_button(Milton* milton, Texts id, BindableAction action)
+{
+    char name[64];
+    char key[64];
+    char label[160];
+    loc_base_name(id, name, sizeof(name));
+    hotkey_label(&milton->settings->bindings.bindings[action], key, sizeof(key));
+    snprintf(label, sizeof(label), "%s [%s]###binding_btn_%d", name, key, (int)action);
+    return ImGui::Button(label);
+}
+
+// The newest assignment wins: any other action using the same key+modifiers gets unbound.
+static void
+hotkey_resolve_conflicts(Milton* milton, BindableAction action)
+{
+    MiltonSettings* st = milton->settings;
+    Binding* nb = &st->bindings.bindings[action];
+    nb->action = action;
+
+    if ( nb->bound_key != Binding::UNBOUND ) {
+        for ( int i = Action_FIRST; i < Action_COUNT; ++i ) {
+            Binding* o = &st->bindings.bindings[i];
+            if ( i != action && o->bound_key == nb->bound_key && o->modifiers == nb->modifiers ) {
+                o->bound_key = Binding::UNBOUND;
+                o->modifiers = Modifier_NONE;
+            }
+        }
+        if ( nb->modifiers == Modifier_NONE && st->rotate_key == nb->bound_key ) {
+            st->rotate_key = 0;
+        }
+    }
+    // Press/release pair shares one key.
+    Binding* rel = &st->bindings.bindings[ActionRelease_PEEK_OUT];
+    Binding* press = &st->bindings.bindings[Action_PEEK_OUT];
+    rel->bound_key = press->bound_key;
+    rel->modifiers = press->modifiers;
+}
+
+static void
+hotkey_resolve_rotate_conflicts(Milton* milton)
+{
+    MiltonSettings* st = milton->settings;
+    if ( st->rotate_key == 0 ) { return; }
+    for ( int i = Action_FIRST; i < Action_COUNT; ++i ) {
+        Binding* o = &st->bindings.bindings[i];
+        if ( o->bound_key == st->rotate_key && o->modifiers == Modifier_NONE ) {
+            o->bound_key = Binding::UNBOUND;
+        }
+    }
+    Binding* rel = &st->bindings.bindings[ActionRelease_PEEK_OUT];
+    rel->bound_key = st->bindings.bindings[Action_PEEK_OUT].bound_key;
+}
 // gui_brush_window returns the height of the rendered brush tool window. This can be used to position other windows below it.
 // If reset_gui is true, the default window position and size will be set.
 i32
@@ -297,7 +393,7 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
 
     // Use default size on first program start on this computer.
     f32 left = milton->gui->scale * 10;
-    f32 top = milton->gui->scale * 10 + (float)pbounds.bottom;
+    f32 top = milton->gui->scale * 30;
     f32 width = milton->gui->scale * 300;
     f32 height = milton->gui->scale * 230;
     if ( reset_gui ) {
@@ -351,30 +447,30 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
                 milton->gui->flags |= (i32)MiltonGuiFlags_SHOWING_PREVIEW;
             }
 
-            if ( ImGui::Button(loc(TXT_switch_to_primitive_line)) ) {
+            if ( binding_button(milton, TXT_switch_to_primitive_line, Action_MODE_PRIMITIVE_LINE) ) {
                 input->mode_to_set = MiltonMode::PRIMITIVE_LINE;
             }
 
             ImGui::SameLine();
 
-            if ( ImGui::Button(loc(TXT_switch_to_primitive_rectangle)) ) {
+            if ( binding_button(milton, TXT_switch_to_primitive_rectangle, Action_MODE_PRIMITIVE_RECTANGLE) ) {
                 input->mode_to_set = MiltonMode::PRIMITIVE_RECTANGLE;
             }
 
             ImGui::SameLine();
 
-            if ( ImGui::Button(loc(TXT_switch_to_primitive_grid)) ) {
+            if ( binding_button(milton, TXT_switch_to_primitive_grid, Action_MODE_PRIMITIVE_GRID) ) {
                 input->mode_to_set = MiltonMode::PRIMITIVE_GRID;
             }
 
-            if ( ImGui::Button(loc(TXT_switch_to_brush)) ) {
+            if ( binding_button(milton, TXT_switch_to_brush, Action_MODE_PEN) ) {
                 input->mode_to_set = MiltonMode::PEN;
             }
 
             ImGui::SameLine();
 
             if ( milton->current_mode != MiltonMode::ERASER ) {
-                if ( ImGui::Button(loc(TXT_switch_to_eraser)) ) {
+                if ( binding_button(milton, TXT_switch_to_eraser, Action_MODE_ERASER) ) {
                     input->mode_to_set = MiltonMode::ERASER;
                 }
             }
@@ -557,6 +653,14 @@ gui_menu(MiltonInput* input, PlatformState* platform, Milton* milton, b32& show_
                 ImGui::EndMenu();
             }
             if ( ImGui::BeginMenu(loc(TXT_tools)) ) {
+                if ( ImGui::MenuItem("Hotkeys...") ) {
+                    gui->show_hotkeys = true;
+                    milton_set_gui_visibility(milton, true);
+                }
+                if ( ImGui::MenuItem("Pen & Input Settings...") ) {
+                    gui->show_pen_settings = true;
+                    milton_set_gui_visibility(milton, true);
+                }
                 // Brush
                 if ( ImGui::MenuItem(loc(TXT_brush)) ) {
                     input->mode_to_set = MiltonMode::PEN;
@@ -778,6 +882,118 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
         i32 brush_window_height = gui_brush_window(input, platform, milton, prefs, reset_gui);
 
         gui_layer_window(input, platform, milton, brush_window_height, prefs, reset_gui);
+
+        if ( gui->show_hotkeys ) {
+            ImGui::SetNextWindowSize(ImVec2(ui_scale*420, ui_scale*400), ImGuiSetCond_FirstUseEver);
+            bool open = true;
+            if ( ImGui::Begin("Hotkeys", &open) ) {
+                MiltonSettings* st = milton->settings;
+                ImGui::TextWrapped("Type a key to assign it. Clear the field to unbind. Assigning a key that is already in use unbinds the old action.");
+                ImGui::Separator();
+                ImGui::BeginChild("HotkeyList");
+
+                // Rotate (hold + drag)
+                {
+                    char buf[2] = { st->rotate_key, 0 };
+                    ImGui::PushID("rotate_key");
+                    ImGui::PushItemWidth(ui_scale*30);
+                    if ( ImGui::InputText("##key", buf, sizeof(buf), ImGuiInputTextFlags_AutoSelectAll) ) {
+                        st->rotate_key = hotkey_sanitize_char(buf[0]);
+                        hotkey_resolve_rotate_conflicts(milton);
+                    }
+                    ImGui::PopItemWidth();
+                    ImGui::SameLine();
+                    ImGui::Text("Rotate canvas (hold + drag)");
+                    ImGui::PopID();
+                }
+
+                MiltonBindings* bs = &st->bindings;
+                for ( int i = Action_FIRST; i < Action_COUNT; ++i ) {
+                    if ( i == Action_DRAG_BRUSH_SIZE || i == Action_DRAG_ZOOM || i == Action_TRANSFORM ) {
+                        continue;  // Fixed modifier gestures.
+                    }
+                    Binding* b = &bs->bindings[i];
+                    bool changed = false;
+                    ImGui::PushID(i);
+
+                    char buf[2] = {};
+                    if ( b->bound_key >= 33 && b->bound_key <= 126 ) { buf[0] = b->bound_key; }
+
+                    ImGui::PushItemWidth(ui_scale*30);
+                    if ( ImGui::InputText("##key", buf, sizeof(buf), ImGuiInputTextFlags_AutoSelectAll) ) {
+                        char c = hotkey_sanitize_char(buf[0]);
+                        b->bound_key = c;
+                        if ( c == 0 ) { b->modifiers = Modifier_NONE; }
+                        changed = true;
+                    }
+                    ImGui::PopItemWidth();
+                    ImGui::SameLine();
+                    changed |= ImGui::CheckboxFlags("Ctrl", (unsigned int*)&b->modifiers, Modifier_CTRL);
+                    ImGui::SameLine();
+                    changed |= ImGui::CheckboxFlags("Alt", (unsigned int*)&b->modifiers, Modifier_ALT);
+                    ImGui::SameLine();
+                    changed |= ImGui::CheckboxFlags("Shift", (unsigned int*)&b->modifiers, Modifier_SHIFT);
+                    ImGui::SameLine();
+                    char label[64];
+                    hotkey_label(b, label, sizeof(label));
+                    ImGui::Text("%s [%s]", loc((Texts)(TXT_Action_FIRST + i - Action_FIRST)), label);
+                    ImGui::PopID();
+
+                    if ( changed ) {
+                        if ( b->bound_key == Binding::UNBOUND ) { b->modifiers = Modifier_NONE; }
+                        hotkey_resolve_conflicts(milton, (BindableAction)i);
+                    }
+                }
+                ImGui::EndChild();
+            } ImGui::End();
+            if ( !open ) {
+                gui->show_hotkeys = false;
+                milton_settings_save(milton->settings);
+            }
+        }
+        // Pen & input settings window. Changes apply live; Save persists them.
+        if ( gui->show_pen_settings ) {
+            MiltonSettings* s = milton->settings;
+            ImGui::SetNextWindowSize(ImVec2(ui_scale*380, ui_scale*300), ImGuiSetCond_FirstUseEver);
+            bool open = true;
+            if ( ImGui::Begin("Pen & Input Settings", &open) ) {
+                ImGui::Text("Pressure");
+                ImGui::SliderFloat("Pressure smoothing", &s->pressure_smoothing, 0.05f, 1.0f, "%.2f");
+                ImGui::TextWrapped("Lower = smoother, more lag. 1.0 = raw tablet pressure.");
+                ImGui::SliderFloat("Minimum pressure", &s->pressure_min, 0.0f, 0.5f, "%.3f");
+                ImGui::Separator();
+                ImGui::Text("Stroke");
+                ImGui::SliderFloat("Position smoothing", &s->position_smoothing, 0.05f, 1.0f, "%.2f");
+                ImGui::TextWrapped("Applied when brush smoothing is enabled. 1.0 = no smoothing.");
+                ImGui::Separator();
+                ImGui::Text("Shortcuts");
+                ImGui::InputFloat("Brush resize speed (Alt+RMB)", &s->brush_scrub_speed, 0.05f, 0.25f, 2);
+                ImGui::InputFloat("Zoom drag speed (Ctrl+Space+LMB)", &s->zoom_drag_speed, 0.001f, 0.005f, 4);
+                s->pressure_smoothing = clamp(s->pressure_smoothing, 0.05f, 1.0f);
+                s->pressure_min = clamp(s->pressure_min, 0.0f, 0.5f);
+                s->position_smoothing = clamp(s->position_smoothing, 0.05f, 1.0f);
+                s->brush_scrub_speed = clamp(s->brush_scrub_speed, 0.05f, 5.0f);
+                s->zoom_drag_speed = clamp(s->zoom_drag_speed, 0.0005f, 0.05f);
+                ImGui::Separator();
+                if ( ImGui::Button("Save") ) {
+                    milton_settings_save(s);
+                }
+                ImGui::SameLine();
+                if ( ImGui::Button("Reset to defaults") ) {
+                    MiltonSettings defaults = {};
+                    settings_init(&defaults);
+                    s->pressure_smoothing = defaults.pressure_smoothing;
+                    s->pressure_min = defaults.pressure_min;
+                    s->position_smoothing = defaults.position_smoothing;
+                    s->brush_scrub_speed = defaults.brush_scrub_speed;
+                    s->zoom_drag_speed = defaults.zoom_drag_speed;
+                }
+            } ImGui::End();
+            if ( !open ) {
+                gui->show_pen_settings = false;
+                milton_settings_save(s);
+            }
+        }
 
         // Settings window
         if ( show_settings ) {
@@ -1210,7 +1426,7 @@ update_button_bounds(ColorPicker* picker, f32 ui_scale)
     i32 num_buttons = NUM_BUTTONS;
 
     i32 button_size = (2*bounds_radius_px - (num_buttons - 1) * spacing) / num_buttons;
-    i32 current_x = ui_scale*40 - button_size / 2;
+    i32 current_x = picker->center.x - bounds_radius_px;
 
     for ( ColorButton* cur_button = picker->color_buttons;
           cur_button != NULL;
@@ -1541,6 +1757,27 @@ gui_init(Arena* root_arena, MiltonGui* gui, f32 ui_scale)
     exporter_init(&gui->exporter);
 }
 
+// Anchors the picker (and its color buttons) to the top right corner.
+void
+gui_anchor_picker_top_right(MiltonGui* gui, i32 screen_width)
+{
+    ColorPicker* picker = &gui->picker;
+    f32 ui_scale = gui->scale;
+    i32 r = picker->bounds_radius_px;
+    v2i new_center = { screen_width - r - (i32)(ui_scale*20), r + (i32)(ui_scale*30) };
+    if ( new_center.x < r ) { new_center.x = r; }
+    v2f delta = v2f{ (f32)(new_center.x - picker->center.x), (f32)(new_center.y - picker->center.y) };
+
+    picker->data.a = picker->data.a + delta;
+    picker->data.b = picker->data.b + delta;
+    picker->data.c = picker->data.c + delta;
+    picker->center = new_center;
+    picker->bounds.left   = new_center.x - r;
+    picker->bounds.right  = new_center.x + r;
+    picker->bounds.top    = new_center.y - r;
+    picker->bounds.bottom = new_center.y + r;
+    update_button_bounds(picker, ui_scale);
+}
 // When a selected color is used in a stroke, call this to update the color
 // button list.
 b32

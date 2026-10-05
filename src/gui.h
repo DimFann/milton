@@ -102,6 +102,8 @@ struct MiltonGui
     b32 menu_visible;
     b32 visible;
     b32 show_help_widget;
+    b32 show_pen_settings;
+    b32 show_hotkeys;
 
     b32 owns_user_input;
     b32 did_hit_button;  // Avoid multiple clicks.
@@ -135,6 +137,7 @@ void milton_imgui_tick(MiltonInput* input, PlatformState* platform_state,  Milto
 
 //
 void                gui_init(Arena* root_arena, MiltonGui* gui, f32 scale);
+void                gui_anchor_picker_top_right(MiltonGui* gui, i32 screen_width);
 void                gui_toggle_menu_visibility(MiltonGui* gui);
 void                gui_toggle_help(MiltonGui* gui);
 v3f                 gui_get_picker_rgb(MiltonGui* gui);

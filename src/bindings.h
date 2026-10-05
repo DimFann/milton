@@ -44,6 +44,8 @@ enum BindableAction
     Action_DRAG_BRUSH_SIZE,
     Action_DRAG_ZOOM,
     Action_TRANSFORM,
+    Action_FLIP_CANVAS_H,
+    Action_RESET_ROTATION,
 
     #if MILTON_ENABLE_PROFILING
         // Debug bindings

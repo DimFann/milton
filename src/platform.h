@@ -167,6 +167,9 @@ struct PlatformSettings
     i32 layer_window_top;
     i32 layer_window_width;
     i32 layer_window_height;
+
+    // Window layout revision. Older layouts had the picker at the left.
+    i32 layout_version;
 };
 
 // Defined in platform_windows.cc

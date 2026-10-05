@@ -105,6 +105,15 @@ struct MiltonSettings
     float peek_out_increment;
 
     MiltonBindings bindings;
+
+    // Appended fields: older settings files are loaded partially, defaults remain.
+    float pressure_smoothing;   // 0..1, 1 = raw pressure
+    float pressure_min;         // Minimum pressure mapped from 0 input
+    float position_smoothing;   // 0..1 alpha of the position filter, 1 = raw
+    float brush_scrub_speed;    // Brush size change per pixel of Alt+RMB scrub
+    float zoom_drag_speed;      // Exponential zoom per pixel of Ctrl+Space drag
+    char  rotate_key;           // Hold + LMB drag rotates the canvas. Lowercase ASCII.
+    u8    unbound_prims_migrated;  // Rectangle/grid hotkeys were unbound by default in a later version.
 };
 #pragma pack(pop)
 
@@ -193,6 +202,10 @@ struct Milton
 
     Brush       brushes[BrushEnum_COUNT];
     i32         brush_sizes[BrushEnum_COUNT];  // In screen pixels
+    // Canvas-relative brushes: the canvas-space radius to preserve across zooms, and the pixel size
+    // it last produced (a different brush_sizes value means the user changed it).
+    double      brush_ref_radius[BrushEnum_COUNT];
+    i32         brush_ref_size[BrushEnum_COUNT];
 
     Stroke      working_stroke;
     // ----  // gui->picker.info also stored
@@ -370,5 +383,7 @@ void transform_stop(Milton* milton);
 void drag_brush_size_start(Milton* milton, v2i pointer);
 void drag_brush_size_stop(Milton* milton);
 
+void milton_flip_canvas_horizontal(Milton* milton);
+void milton_reset_rotation(Milton* milton);
 void drag_zoom_start(Milton* milton, v2i pointer);
 void drag_zoom_stop(Milton* milton);

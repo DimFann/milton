@@ -247,7 +247,7 @@ gpu_update_picker(RenderBackend* r, ColorPicker* picker)
     int h = bounds.bottom-bounds.top;
     // The center of the picker has an offset of (25,35)
     // and the bounds radius is 100 px
-    auto transform = [&](v2f p) { return v2f{2*p.x/w-1 - .25f, 2*p.y/h-1 -0.35f}; };
+    auto transform = [&](v2f p) { return v2f{2*(p.x - bounds.left)/w-1, 2*(p.y - bounds.top)/h-1}; };
     a = transform(a);
     b = transform(b);
     c = transform(c);
@@ -884,9 +884,11 @@ gpu_update_canvas(RenderBackend* r, CanvasState* canvas, CanvasView* view)
     f32 sin_angle = sinf(view->angle);
 
     // GLSL is column-major
-    f32 matrix[] = { cos_angle, sin_angle, -sin_angle, cos_angle };
+    // Rotation composed with an optional horizontal mirror: M = R*F, inverse = F*R^T.
+    f32 flip = view->flipped ? -1.0f : 1.0f;
+    f32 matrix[] = { cos_angle * flip, sin_angle * flip, -sin_angle, cos_angle };
 
-    f32 matrix_inverse[] = { cos_angle, -sin_angle, sin_angle, cos_angle };
+    f32 matrix_inverse[] = { flip * cos_angle, -sin_angle, flip * sin_angle, cos_angle };
 
     for (sz i = 0; i < array_count(ps); ++i) {
         gl::set_uniform_mat2(ps[i], "u_rotation", matrix);
@@ -1783,7 +1785,8 @@ gpu_render_to_buffer(Milton* milton, u8* buffer, i32 scale, i32 x, i32 y, i32 w,
     f32 cos_angle = cosf(milton->view->angle);
     f32 sin_angle = sinf(milton->view->angle);
 
-    v2f pan_delta_rotated = v2f{pan_delta.x * cos_angle - pan_delta.y * sin_angle, pan_delta.y * cos_angle + pan_delta.x * sin_angle };
+    f32 pdx = milton->view->flipped ? -(f32)pan_delta.x : (f32)pan_delta.x;
+    v2f pan_delta_rotated = v2f{pdx * cos_angle - pan_delta.y * sin_angle, pan_delta.y * cos_angle + pdx * sin_angle };
 
     milton->view->pan_center =
         milton->view->pan_center + v2f_to_v2l(pan_delta_rotated)*milton->view->scale;

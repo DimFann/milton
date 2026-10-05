@@ -153,6 +153,8 @@ init_localization()
         EN(TXT_Action_DRAG_BRUSH_SIZE, "Drag to change brush size");
         EN(TXT_Action_DRAG_ZOOM, "Drag to zoom in/out");
         EN(TXT_Action_TRANSFORM, "Rotate");
+        EN(TXT_Action_FLIP_CANVAS_H, "Flip canvas horizontally");
+        EN(TXT_Action_RESET_ROTATION, "Reset canvas rotation");
     #if MILTON_ENABLE_PROFILING
         EN(TXT_Action_TOGGLE_DEBUG_WINDOW, "Toggle debug window");
     #endif

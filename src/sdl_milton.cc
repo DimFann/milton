@@ -140,6 +140,10 @@ shortcut_handle_key(Milton* milton, PlatformState* platform, SDL_Event* event, M
 
             for (sz i = Action_COUNT + 1; i < Action_COUNT_WITH_RELEASE; ++i) {
                 Binding* b = &bindings->bindings[i];
+                if ( b->bound_key == Binding::UNBOUND && b->action != Action_DRAG_BRUSH_SIZE && b->action != Action_TRANSFORM &&
+                     b->action != ActionRelease_DRAG_BRUSH_SIZE && b->action != ActionRelease_TRANSFORM ) {
+                    continue;  // Unbound; only the modifier-only gestures may have no key.
+                }
                 if ( (!event->key.repeat || b->accepts_repeats) &&
                      active_modifiers == b->modifiers &&
                      active_key == b->bound_key &&
@@ -154,7 +158,15 @@ shortcut_handle_key(Milton* milton, PlatformState* platform, SDL_Event* event, M
         else  {
             for (sz i = 0; i < Action_COUNT; ++i) {
                 Binding* b = &bindings->bindings[i];
+                if ( b->bound_key == Binding::UNBOUND && b->action != Action_DRAG_BRUSH_SIZE && b->action != Action_TRANSFORM &&
+                     b->action != ActionRelease_DRAG_BRUSH_SIZE && b->action != ActionRelease_TRANSFORM ) {
+                    continue;  // Unbound; only the modifier-only gestures may have no key.
+                }
 
+                if ( active_modifiers == Modifier_NONE && milton->settings->rotate_key != 0 &&
+                     active_key == milton->settings->rotate_key ) {
+                    continue;  // Reserved for rotation
+                }
                 if ( (!event->key.repeat || b->accepts_repeats) &&
                      active_modifiers == b->modifiers &&
                      active_key == b->bound_key &&
@@ -815,6 +827,26 @@ milton_main(bool is_fullscreen, char* file_to_open)
                 if ( SDL_GetModState() & KMOD_ALT ) {
                     transform_start(milton, platform.pointer);
                 }
+            }
+        }
+
+        // Holding the rotate key (W by default) + LMB drag rotates the canvas around the screen center.
+        {
+            static b32 rotating_by_key = false;
+            b32 want_rotate = false;
+            char rk = milton->settings->rotate_key;
+            if ( rk != 0 && !ImGui::GetIO().WantCaptureKeyboard &&
+                 !(SDL_GetModState() & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT | KMOD_GUI)) ) {
+                const Uint8* keys = SDL_GetKeyboardState(NULL);
+                want_rotate = keys[SDL_GetScancodeFromKey((SDL_Keycode)rk)] != 0;
+            }
+            if ( want_rotate && !rotating_by_key && current_mode_is_for_drawing(milton) ) {
+                transform_start(milton, platform.pointer);
+                rotating_by_key = (milton->current_mode == MiltonMode::TRANSFORM);
+            }
+            else if ( !want_rotate && rotating_by_key ) {
+                transform_stop(milton);
+                rotating_by_key = false;
             }
         }
 

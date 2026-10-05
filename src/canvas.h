@@ -71,6 +71,7 @@ struct CanvasView
     v3f background_color;
     i32 working_layer_id;
     f32 angle;                  // Rotation
+    i32 flipped;                // Non-zero: canvas mirrored horizontally (applied before rotation)
 };
 
 // Used to load older MLT files.

@@ -70,8 +70,10 @@ set_default_bindings(MiltonBindings* bs)
     binding(bs, Modifier_NONE, 'b', Action_MODE_PEN);
     binding(bs, Modifier_NONE, 'i', Action_MODE_EYEDROPPER);
     binding(bs, Modifier_NONE, 'l', Action_MODE_PRIMITIVE_LINE);
-    binding(bs, Modifier_NONE, 'r', Action_MODE_PRIMITIVE_RECTANGLE);
-    binding(bs, Modifier_NONE, 'g', Action_MODE_PRIMITIVE_GRID);
+    binding(bs, Modifier_NONE, Binding::UNBOUND, Action_MODE_PRIMITIVE_RECTANGLE);
+    binding(bs, Modifier_NONE, Binding::UNBOUND, Action_MODE_PRIMITIVE_GRID);
+    binding(bs, Modifier_NONE, 'v', Action_FLIP_CANVAS_H);
+    binding(bs, Modifier_NONE, Binding::ESC, Action_RESET_ROTATION);
     binding(bs, Modifier_NONE, Binding::F1, Action_HELP);
     binding(bs, Modifier_NONE, Binding::TAB, Action_TOGGLE_GUI);
 
@@ -274,6 +276,14 @@ binding_dispatch_action(BindableAction a, MiltonInput* input, Milton* milton, v2
         } break;
         case ActionRelease_DRAG_ZOOM: {
             drag_zoom_stop(milton);
+        } break;
+        case Action_FLIP_CANVAS_H: {
+            milton_flip_canvas_horizontal(milton);
+            input->flags |= MiltonInputFlags_FULL_REFRESH;
+        } break;
+        case Action_RESET_ROTATION: {
+            milton_reset_rotation(milton);
+            input->flags |= MiltonInputFlags_FULL_REFRESH;
         } break;
         case Action_TRANSFORM: {
             transform_start(milton, pointer);
