@@ -26,6 +26,7 @@ struct Brush
     f32 shape_angle;    // Degrees, relative to the screen. Set in the UI.
     f32 shape_axis_x;   // Canvas-space direction of the long axis. Set when a stroke starts.
     f32 shape_axis_y;
+    i32 tilt_angle;     // Non-zero: pen tilt direction rotates the rectangle tip (sampled at stroke start).
 };
 
 enum BrushShape

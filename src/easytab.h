@@ -632,6 +632,8 @@ typedef struct EasyTab_s
     int32_t MaxPressure;
 
     EasyTab_Orientation Orientation;
+    float   TiltAngleDeg;  // Screen-space direction the pen leans (0 = right, clockwise). Holds the last tilted value.
+    int32_t TiltValid;
 
 #ifdef __linux__
     XDevice* Device;
@@ -1155,6 +1157,13 @@ EasyTabResult EasyTab_HandleEvent(HWND Window, UINT Message, LPARAM LParam, WPAR
             EasyTab->Orientation.Azimuth = PacketBuffer[NumPackets - 1].pkOrientation.orAzimuth;
             EasyTab->Orientation.Altitude = PacketBuffer[NumPackets - 1].pkOrientation.orAltitude;
             EasyTab->Orientation.Twist = PacketBuffer[NumPackets - 1].pkOrientation.orTwist;
+
+            // Altitude is in tenths of a degree; 900 is vertical. Ignore near-vertical pens.
+            int alt = EasyTab->Orientation.Altitude < 0 ? -EasyTab->Orientation.Altitude : EasyTab->Orientation.Altitude;
+            if ( alt > 0 && alt < 850 ) {
+                EasyTab->TiltAngleDeg = (float)EasyTab->Orientation.Azimuth / 10.0f - 90.0f;
+                EasyTab->TiltValid = 1;
+            }
         }
 
         EasyTab->NumPackets = NumPackets;

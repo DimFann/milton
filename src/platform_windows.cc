@@ -288,6 +288,13 @@ ink_handle_event(HWND hwnd, UINT msg, WPARAM wparam)
 
     // Eraser end of the pen maps to negative altitude (see the pen/eraser switch in the main loop).
     EasyTab->Orientation.Altitude = (pen.penFlags & PEN_FLAG_INVERTED) ? -1 : 1;
+    if ( (pen.penMask & PEN_MASK_TILT_X) && (pen.penMask & PEN_MASK_TILT_Y) ) {
+        f32 tx = (f32)pen.tiltX, ty = (f32)pen.tiltY;
+        if ( tx*tx + ty*ty > 25.0f ) {
+            EasyTab->TiltAngleDeg = atan2f(ty, tx) * 180.0f / 3.14159265f;
+            EasyTab->TiltValid = 1;
+        }
+    }
     if ( pen.penMask & PEN_MASK_ROTATION ) { EasyTab->Orientation.Twist = (int32_t)pen.rotation; }
 
     if ( in_range && msg != WM_POINTERLEAVE ) {

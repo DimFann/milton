@@ -144,6 +144,17 @@ eyedropper_deinit(Eyedropper* e)
     }
 }
 
+// Screen-space tip angle in degrees. With tilt enabled the long axis is perpendicular to the pen's lean.
+static f32
+brush_effective_angle(Brush const& b)
+{
+    f32 angle = b.shape_angle;
+    if ( b.tilt_angle && EasyTab != NULL && EasyTab->PenInProximity && EasyTab->TiltValid ) {
+        angle += EasyTab->TiltAngleDeg + 90.0f;
+    }
+    return angle;
+}
+
 static Brush
 milton_get_brush(Milton const* milton)
 {
@@ -154,7 +165,7 @@ milton_get_brush(Milton const* milton)
     brush.pressure_size_min = clamp(brush.pressure_size_min, 0.0f, 1.0f);
 
     // The angle is relative to the screen; strokes store the axis in canvas space.
-    const float rad = brush.shape_angle * 3.14159265f / 180.0f;
+    const float rad = brush_effective_angle(brush) * 3.14159265f / 180.0f;
     v2f dir = { cosf(rad), sinf(rad) };
     v2l c0 = raster_to_canvas(milton->view, { 0, 0 });
     v2l c1 = raster_to_canvas(milton->view, { (i32)(dir.x * 1024.0f), (i32)(dir.y * 1024.0f) });
@@ -173,7 +184,7 @@ get_outline_shape(Milton const* milton, i32* shape, f32* aspect, f32* angle)
         Brush const& b = milton->brushes[milton_get_brush_enum(milton)];
         *shape = b.shape;
         *aspect = clamp(b.shape_aspect, 0.05f, 1.0f);
-        *angle = b.shape_angle;
+        *angle = brush_effective_angle(b);
     }
 }
 
@@ -503,7 +514,16 @@ milton_stroke_input(Milton* milton, MiltonInput const* input)
     }
 
     //milton_log("Stroke input with %d packets\n", input->input_count);
-    ws->brush    = milton_get_brush(milton);
+    {
+        // The tip angle is fixed when the stroke starts; later tilt must not change the stroke.
+        f32 ax = ws->brush.shape_axis_x, ay = ws->brush.shape_axis_y;
+        b32 in_progress = ws->num_points > 0;
+        ws->brush = milton_get_brush(milton);
+        if ( in_progress ) {
+            ws->brush.shape_axis_x = ax;
+            ws->brush.shape_axis_y = ay;
+        }
+    }
     ws->layer_id = milton->view->working_layer_id;
 
     for ( int input_i = 0; input_i < input->input_count; ++input_i ) {

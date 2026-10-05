@@ -549,6 +549,7 @@ struct BrushPreset
     f32  shape_angle;
     i32  pressure_opacity;
     i32  relative_to_canvas;
+    i32  tilt_angle;
 };
 
 #define MAX_BRUSH_PRESETS 64
@@ -611,6 +612,7 @@ preset_capture(Milton* milton, BrushPreset* p, int kind)
     p->pressure_size_min = b.pressure_size_min;
     p->shape_aspect = b.shape_aspect;
     p->shape_angle = b.shape_angle;
+    p->tilt_angle = b.tilt_angle;
     p->pressure_opacity = (kind == BrushEnum_ERASER) ? (milton->eraser_pressure_opacity ? 1 : 0)
                                                       : ((milton->working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY) ? 1 : 0);
     p->relative_to_canvas = (milton->working_stroke.flags & StrokeFlag_RELATIVE_TO_CANVAS) ? 1 : 0;
@@ -629,6 +631,7 @@ preset_apply(Milton* milton, const BrushPreset* p)
     b->pressure_size_min = clamp(p->pressure_size_min, 0.0f, 1.0f);
     b->shape_aspect = clamp(p->shape_aspect, 0.05f, 1.0f);
     b->shape_angle = p->shape_angle;
+    b->tilt_angle = p->tilt_angle;
 
     if ( kind == BrushEnum_ERASER ) { milton->eraser_pressure_opacity = p->pressure_opacity != 0; }
     else if ( p->pressure_opacity ) { milton->working_stroke.flags |= StrokeFlag_PRESSURE_TO_OPACITY; }
@@ -808,7 +811,11 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
                     shape_brush->shape_aspect = clamp(aspect_percent, 5.0f, 100.0f) / 100.0f;
                 }
                 shape_brush->shape_aspect = clamp(shape_brush->shape_aspect, 0.05f, 1.0f);
-                ImGui::SliderFloat("Angle", &shape_brush->shape_angle, 0.0f, 180.0f, "%.0f deg");
+                bool tilt = shape_brush->tilt_angle != 0;
+                if ( ImGui::Checkbox("Tilt rotates tip", &tilt) ) {
+                    shape_brush->tilt_angle = tilt ? 1 : 0;
+                }
+                ImGui::SliderFloat(tilt ? "Angle offset" : "Angle", &shape_brush->shape_angle, 0.0f, 180.0f, "%.0f deg");
                 shape_brush->shape_angle = clamp(shape_brush->shape_angle, 0.0f, 180.0f);
             }
         }
