@@ -1916,7 +1916,8 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     if ( selection_cursor(milton) != 0 ) {
         brush_outline_should_draw = false;
     }
-    if ( (SDL_GetModState() & KMOD_ALT) && current_mode_is_for_drawing(milton) ) {
+    if ( (SDL_GetModState() & KMOD_ALT) && current_mode_is_for_drawing(milton)
+         && milton->current_mode != MiltonMode::DRAG_BRUSH_SIZE && !milton->platform->is_right_button_down ) {
         brush_outline_should_draw = false;  // Alt primes the eyedropper
     }
 
