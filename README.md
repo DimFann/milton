@@ -1,3 +1,46 @@
+# Fork Info
+
+This fork add some quality of life features I've been wanting for years, as well as some rendering & functionality improvements.
+
+### Notable additions
+* Rebindable hotkeys
+* Reorganized UI, with dark mode
+* Pressure response tuning, and pressure smoothing
+* From 8 to 16 bit values for smoother stroke appearances
+* Better precision for stroke placement
+* Allow for deeper zoom, start canvas zoom further out for more in/out by default.
+* Variable harness for brush and eraser + other options & tilt support
+* Rectangular brushes
+* Lasso Functions
+    * Arm with S
+    * D to delete selected strokes
+    * Ctrl+T to transform selected strokes
+* Common art program shortcuts
+    * Hold W and drag to rotate, can be rebound
+    * Hold Ctrl+Space and drag to zoom
+    * Hold Alt+RMB + scrub to resize brush, alternatively Ctrl+Alt+Drag (PaintToolSai)
+    * Hold Alt for eyedropper
+* Improved loading times, and responsiveness during loading for stroke-heavy files
+
+### Current Issues
+* Layer optimizer function doesn't catch all stray/orphaned strokes
+* Cut eraser doesn't always cut strokes out
+* Merge down function
+    * Eraser strokes get applied to the layer below, or don't get cut out precisely if using stroke conversion feature.
+* Untested with Wacom/Huion/XP-Pen manufacturer-provided drivers
+* Wintab may not work yet, untested
+* Only tested with OpenTabletDriver, using WindowsInk plugin by Kuuuube (Absolute).
+
+### Notes, caution, from DimFann
+* I'm not committed to actively maintaining this fork.
+* I'm not committed ensuring that every commit I push maintains compatibility with files either by source repo Milton, or previous commits of this fork.
+* The vast majority of changes I'll be making and be pushing will by implemented by Copilot (AI). At this point I don't think there's a clean path for a merge back into Milton. While that repo seems inactive, I wouldn't want to burden anyone with a huge pile of vibe code if they're by any chance still watching pull requests.
+* I take no credit for the hard work done by Sergio and all other original contributors, or by Copilot for that matter. I'm just someone who draws and really, really, really, misses Mischief.
+
+Preserving the readme below for posterity.
+
+----
+
 ![MiltonLogo](http://i.imgur.com/ADgRZUB.png)
 
 [Milton](https://github.com/serge-rgb/milton) is an open source application that lets you Just Paint.
