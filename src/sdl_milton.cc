@@ -816,17 +816,11 @@ milton_main(bool is_fullscreen, char* file_to_open)
         {
             b32 want_scrub = (SDL_GetModState() & KMOD_ALT) && platform.is_right_button_down;
             if ( want_scrub && milton->current_mode != MiltonMode::DRAG_BRUSH_SIZE ) {
-                if ( milton->current_mode == MiltonMode::TRANSFORM ) {
-                    transform_stop(milton);
-                }
                 drag_brush_size_start(milton, platform.pointer);
             }
             else if ( !want_scrub && milton->current_mode == MiltonMode::DRAG_BRUSH_SIZE
                       && !(SDL_GetModState() & KMOD_SHIFT) ) {
                 drag_brush_size_stop(milton);
-                if ( SDL_GetModState() & KMOD_ALT ) {
-                    transform_start(milton, platform.pointer);
-                }
             }
         }
 
