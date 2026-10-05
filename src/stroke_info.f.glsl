@@ -98,5 +98,10 @@ main()
     // The ceiling is feathered too (with a wider profile than a single segment, so it can fill the
     // gaps between passes). A flat ceiling would show as a hard-edged plateau.
     float ceiling_opacity = coverage * pressure_opacity * sqrt(shape);
+    if ( u_shape == 1 ) {
+        // The sum channel counts overlapping segments, which changes in steps along a rectangle's
+        // slanted edge and shows as a sawtooth. Rectangles use the smooth per-segment max only.
+        weight = 0.0;
+    }
     out_color = vec4(ceiling_opacity, alpha, 0.0, alpha * weight);
 }
