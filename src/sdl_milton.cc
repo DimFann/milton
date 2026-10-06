@@ -1175,7 +1175,9 @@ milton_main(bool is_fullscreen, char* file_to_open)
         // Sleep if the frame took less time than the refresh rate.
         u64 frame_time_us = perf_counter() - frame_start_us;
 
-        f32 expected_us = (f32)1000000 / display_hz;
+        i32 cap_hz = display_hz;
+        if ( milton->settings->max_fps > 0 && milton->settings->max_fps < cap_hz ) { cap_hz = milton->settings->max_fps; }
+        f32 expected_us = (f32)1000000 / cap_hz;
         if ( frame_time_us < expected_us ) {
             f32 to_sleep_us = expected_us - frame_time_us;
             //  milton_log("Sleeping at least %d ms\n", (u32)(to_sleep_us/1000));

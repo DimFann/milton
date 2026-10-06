@@ -124,9 +124,10 @@ struct MiltonSettings
     u8    pressure_curve_count;    // Control points of the pressure response curve (2..PRESSURE_CURVE_MAX).
     float pressure_curve_x[8];     // Input pressure of each point, ascending, first = 0, last = 1.
     float pressure_curve_y[8];     // Output pressure of each point.
-    u8    show_perf_stats;         // Faint resource readout in the corner (default on).
+    u8    show_perf_stats;         // Faint resource readout in the corner (default off).
     u8    eraser_cut;              // Eraser cuts strokes apart instead of erasing pixels.
-    u8    auto_cleanup_erased;     // Drop strokes that an opaque eraser stroke fully covers (default on).
+    u8    max_fps;                 // Frame rate cap; 0 = monitor refresh rate.
+    u8    auto_cleanup_erased;     // Drop strokes that an opaque eraser stroke fully covers (default off).
 };
 #pragma pack(pop)
 

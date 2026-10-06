@@ -1811,6 +1811,13 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
                     if ( ImGui::Checkbox("Show performance stats", &show_stats) ) {
                         milton->settings->show_perf_stats = show_stats ? 1 : 0;
                     }
+                    {
+                        int fps = milton->settings->max_fps;
+                        if ( ImGui::SliderInt("Max FPS (0 = refresh rate)", &fps, 0, 240) ) {
+                            if ( fps > 0 && fps < 20 ) { fps = 20; }
+                            milton->settings->max_fps = (u8)fps;
+                        }
+                    }
                     bool auto_clean = milton->settings->auto_cleanup_erased != 0;
                     if ( ImGui::Checkbox("Auto-remove fully erased strokes", &auto_clean) ) {
                         milton->settings->auto_cleanup_erased = auto_clean ? 1 : 0;

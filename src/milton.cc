@@ -715,7 +715,8 @@ settings_init(MiltonSettings* s)
     pressure_curve_reset(s);
     s->show_perf_stats = 1;
     s->eraser_cut = 0;
-    s->auto_cleanup_erased = 1;
+    s->auto_cleanup_erased = 0;
+    s->max_fps = 0;
 }
 
 void
