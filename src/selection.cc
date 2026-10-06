@@ -745,8 +745,23 @@ struct OptState
     OptEntry* entries;
     b32   have_grid;
     i64   removed_strokes, removed_erasers;
+
+    // View mode: only the visible part of the screen is optimised, using the layer opacity measured there.
+    b32   view_mode;
+    f32   min_pct;          // Layer opacity (percent) below which strokes are cut away.
+    i32   vw, vh, vf;       // Opacity grid size and the number of screen pixels per cell.
+    float* layer_a;
+    float* scratch;
+    i32*  dirty;
+    i64   dirty_n, dirty_cap;
+    struct OptNew { i32 old_index; Stroke stroke; };
+    OptNew* news;
+    i64   n_new, cap_new;
+    i64   cut_strokes;
 };
 static OptState g_opt;
+static b32 g_opt_view_mode = false;
+static f32 g_opt_min_pct = 5.0f;
 
 static void
 opt_free(OptState* o)
@@ -754,6 +769,10 @@ opt_free(OptState* o)
     free(o->dead);
     free(o->cell_start);
     free(o->entries);
+    free(o->layer_a);
+    free(o->scratch);
+    free(o->dirty);
+    free(o->news);
     *o = {};
 }
 
@@ -769,6 +788,8 @@ optimize_request(Milton* milton)
     if ( g_opt.phase != 0 || !milton->canvas->working_layer ) { return; }
     selection_finish(milton);
     g_opt.phase = 1;
+    g_opt.view_mode = g_opt_view_mode;
+    g_opt.min_pct = g_opt_min_pct;
     g_opt.layer_id = milton->canvas->working_layer->id;
     snprintf(g_opt.layer_name, sizeof(g_opt.layer_name), "%s", milton->canvas->working_layer->name);
 }
@@ -781,7 +802,7 @@ opt_eraser_usable(Stroke* e)
 
 // Lower bound of the opacity with which eraser stroke `e` clears canvas point (px, py) through segment k.
 static double
-opt_eraser_alpha(Stroke* e, i32 k, double px, double py, double scale)
+opt_eraser_alpha(Stroke* e, i32 k, double px, double py, double scale, double rmul = 1.0, double pad = 0.0)
 {
     i32 k2 = min(k + 1, e->num_points - 1);
     double ax = (double)e->points[k].x, ay = (double)e->points[k].y;
@@ -800,7 +821,7 @@ opt_eraser_alpha(Stroke* e, i32 k, double px, double py, double scale)
         smin = smin < 0.0 ? 0.0 : (smin > 1.0 ? 1.0 : smin);
         size = smin + (1.0 - smin) * pr;
     }
-    double rad = (double)b.radius * size;
+    double rad = (double)b.radius * size * rmul + pad;
     double cov = (rad - dist) / (0.5 * scale);
     if ( cov <= 0.0 ) { return 0.0; }
     if ( cov > 1.0 ) { cov = 1.0; }
@@ -965,6 +986,237 @@ opt_stroke_visible(Layer* l, i64 idx, double scale)
     return false;
 }
 
+struct CutPoints
+{
+    v2l* p;
+    f32* q;
+    i32  n, cap;
+};
+
+static void
+cut_points_push(CutPoints* b, v2l p, f32 q)
+{
+    if ( b->n == b->cap ) {
+        b->cap = b->cap ? b->cap * 2 : 64;
+        b->p = (v2l*)realloc(b->p, sizeof(v2l) * (size_t)b->cap);
+        b->q = (f32*)realloc(b->q, sizeof(f32) * (size_t)b->cap);
+    }
+    b->p[b->n] = p;
+    b->q[b->n] = q;
+    ++b->n;
+}
+
+// ---- View mode: measure the layer opacity on screen, then cut away what is fainter than the minimum.
+
+// Layer opacity at a canvas point, or -1 when the point is off screen (those parts are left alone).
+static double
+opt_view_alpha_at(Milton* milton, double cx, double cy)
+{
+    OptState* o = &g_opt;
+    v2l r = canvas_to_raster(milton->view, v2l{ (i64)llround(cx), (i64)llround(cy) });
+    if ( r.x < 0 || r.y < 0 ) { return -1.0; }
+    i64 gx = r.x / o->vf, gy = r.y / o->vf;
+    if ( gx >= o->vw || gy >= o->vh ) { return -1.0; }
+    return (double)o->layer_a[gy * o->vw + gx];
+}
+
+// Coverage of canvas point (px, py) by a rectangle eraser swept along segment k, or 0. Soft rectangle erasers are
+// treated as not erasing, and pressure takes the smaller end of the segment, so this never overestimates.
+static double
+opt_rect_eraser_alpha(Stroke* e, i32 k, double px, double py, double scale)
+{
+    const Brush& b = e->brush;
+    if ( e->flags & StrokeFlag_DISTANCE_TO_OPACITY ) { return 0.0; }
+    i32 k2 = min(k + 1, e->num_points - 1);
+    double pr = min((double)e->pressures[k], (double)e->pressures[k2]);
+    double size = 1.0;
+    if ( b.pressure_size ) {
+        double smin = (double)b.pressure_size_min;
+        smin = smin < 0.0 ? 0.0 : (smin > 1.0 ? 1.0 : smin);
+        size = smin + (1.0 - smin) * pr;
+    }
+    double R = (double)b.radius * size;
+    double asp = (double)b.shape_aspect;
+    if ( R <= 0.0 || asp <= 0.0 ) { return 0.0; }
+    double ax = (double)b.shape_axis_x, ay = (double)b.shape_axis_y;
+    double al = sqrt(ax * ax + ay * ay);
+    if ( al < 1e-9 ) { return 0.0; }
+    ax /= al; ay /= al;
+    double x0 = (double)e->points[k].x, y0 = (double)e->points[k].y;
+    double dx = (double)e->points[k2].x - x0, dy = (double)e->points[k2].y - y0;
+    double vx = px - x0, vy = py - y0;
+    // Box-normalised coordinates of the point relative to the segment start, and of the segment itself.
+    double u0 = (vx * ax + vy * ay) / R, w0 = (-vx * ay + vy * ax) / (R * asp);
+    double du = (dx * ax + dy * ay) / R, dw = (-dx * ay + dy * ax) / (R * asp);
+    double lo = 0.0, hi = 1.0;
+    auto cheb = [&](double t) { return max(fabs(u0 - t * du), fabs(w0 - t * dw)); };
+    for ( int it = 0; it < 28; ++it ) {
+        double m1 = lo + (hi - lo) / 3.0, m2 = hi - (hi - lo) / 3.0;
+        if ( cheb(m1) < cheb(m2) ) { hi = m2; } else { lo = m1; }
+    }
+    double c = cheb(0.5 * (lo + hi));
+    double cov = (1.0 - c) * R * asp / (0.5 * scale);
+    if ( cov <= 0.0 ) { return 0.0; }
+    if ( cov > 1.0 ) { cov = 1.0; }
+    double a = 1.0;
+    if ( e->flags & StrokeFlag_PRESSURE_TO_OPACITY ) {
+        a = (1.0 - (double)b.pressure_opacity_min) * pr + (double)b.pressure_opacity_min;
+    }
+    a *= (double)(b.alpha < 0.0f ? 0.0f : (b.alpha > 1.0f ? 1.0f : b.alpha));
+    return cov * a;
+}
+
+static void
+opt_paint_stroke(Milton* milton, Stroke* st, double scale)
+{
+    OptState* o = &g_opt;
+    CanvasView* view = milton->view;
+    const b32 eraser = (st->flags & StrokeFlag_ERASER) != 0;
+    const b32 rect_eraser = eraser && st->brush.shape == BrushShape_RECTANGLE;
+    if ( eraser && !rect_eraser && st->brush.shape != BrushShape_ROUND ) { return; }
+    double rmul = 1.0;
+    if ( st->brush.shape == BrushShape_RECTANGLE ) {
+        rmul = sqrt(1.0 + (double)st->brush.shape_aspect * (double)st->brush.shape_aspect);
+    }
+    // Strokes thinner than a cell would fall between cell centres, so grow them (never for erasers).
+    double pad = eraser ? 0.0 : 0.75 * (double)o->vf * scale;
+    i32 segs = max(st->num_points - 1, 1);
+    o->dirty_n = 0;
+    for ( i32 k = 0; k < segs; ++k ) {
+        i32 k2 = min(k + 1, st->num_points - 1);
+        double ax = (double)st->points[k].x, ay = (double)st->points[k].y;
+        double bx = (double)st->points[k2].x, by = (double)st->points[k2].y;
+        double R = max(sel_radius_at(st, k, false), sel_radius_at(st, k2, false)) * rmul + pad + scale;
+        double x0 = min(ax, bx) - R, x1 = max(ax, bx) + R, y0 = min(ay, by) - R, y1 = max(ay, by) + R;
+        v2l c[4] = {
+            canvas_to_raster(view, v2l{ (i64)x0, (i64)y0 }), canvas_to_raster(view, v2l{ (i64)x1, (i64)y0 }),
+            canvas_to_raster(view, v2l{ (i64)x0, (i64)y1 }), canvas_to_raster(view, v2l{ (i64)x1, (i64)y1 }),
+        };
+        i64 rx0 = min(min(c[0].x, c[1].x), min(c[2].x, c[3].x)), rx1 = max(max(c[0].x, c[1].x), max(c[2].x, c[3].x));
+        i64 ry0 = min(min(c[0].y, c[1].y), min(c[2].y, c[3].y)), ry1 = max(max(c[0].y, c[1].y), max(c[2].y, c[3].y));
+        if ( rx1 < 0 || ry1 < 0 ) { continue; }
+        i64 gx0 = max(rx0 / o->vf - 1, (i64)0), gx1 = min(rx1 / o->vf + 1, (i64)o->vw - 1);
+        i64 gy0 = max(ry0 / o->vf - 1, (i64)0), gy1 = min(ry1 / o->vf + 1, (i64)o->vh - 1);
+        for ( i64 gy = gy0; gy <= gy1; ++gy ) {
+            for ( i64 gx = gx0; gx <= gx1; ++gx ) {
+                v2l p = raster_to_canvas(view, v2l{ gx * o->vf + o->vf / 2, gy * o->vf + o->vf / 2 });
+                double a = rect_eraser ? opt_rect_eraser_alpha(st, k, (double)p.x, (double)p.y, scale)
+                                       : opt_eraser_alpha(st, k, (double)p.x, (double)p.y, scale, rmul, pad);
+                if ( a <= 0.0 ) { continue; }
+                i64 ci = gy * o->vw + gx;
+                if ( o->scratch[ci] == 0.0f ) {
+                    if ( o->dirty_n == o->dirty_cap ) {
+                        o->dirty_cap = o->dirty_cap ? o->dirty_cap * 2 : 1024;
+                        o->dirty = (i32*)realloc(o->dirty, sizeof(i32) * (size_t)o->dirty_cap);
+                    }
+                    o->dirty[o->dirty_n++] = (i32)ci;
+                }
+                if ( (float)a > o->scratch[ci] ) { o->scratch[ci] = (float)a; }
+            }
+        }
+    }
+    for ( i64 d = 0; d < o->dirty_n; ++d ) {
+        i32 ci = o->dirty[d];
+        float sa = o->scratch[ci];
+        o->scratch[ci] = 0.0f;
+        if ( eraser ) { o->layer_a[ci] *= (1.0f - sa); }
+        else { o->layer_a[ci] += (1.0f - o->layer_a[ci]) * sa; }
+    }
+}
+
+struct OptSample { v2l p; f32 q; double r, dx, dy; b32 vertex, keep; };
+
+// Samples the stroke along its path, drops the samples whose surroundings are fainter than the minimum, and
+// rebuilds the stroke from the runs that remain.
+static void
+opt_eval_stroke(Milton* milton, Layer* l, i64 idx, double scale)
+{
+    OptState* o = &g_opt;
+    Stroke* st = get(&l->strokes, idx);
+    i32 ns = st->num_points;
+    const double thr = (double)o->min_pct / 100.0;
+    double step = 2.0 * (double)o->vf * scale;
+    static OptSample* smp = NULL;
+    static i64 smp_cap = 0;
+    i64 n = 0;
+    auto add = [&](v2l p, f32 q, double r, double dx, double dy, b32 vertex) {
+        if ( n == smp_cap ) {
+            smp_cap = smp_cap ? smp_cap * 2 : 256;
+            smp = (OptSample*)realloc(smp, sizeof(OptSample) * (size_t)smp_cap);
+        }
+        smp[n].p = p; smp[n].q = q; smp[n].r = r; smp[n].dx = dx; smp[n].dy = dy;
+        smp[n].vertex = vertex; smp[n].keep = false;
+        ++n;
+    };
+    for ( i32 i = 0; i < ns; ++i ) {
+        double ax = (double)st->points[i].x, ay = (double)st->points[i].y;
+        double r = sel_radius_at(st, i, true);
+        double dx = 0, dy = 0;
+        if ( i + 1 < ns ) { dx = (double)st->points[i + 1].x - ax; dy = (double)st->points[i + 1].y - ay; }
+        else if ( i > 0 ) { dx = ax - (double)st->points[i - 1].x; dy = ay - (double)st->points[i - 1].y; }
+        add(st->points[i], st->pressures[i], r, dx, dy, true);
+        if ( i + 1 >= ns ) { break; }
+        double len = sqrt(dx * dx + dy * dy);
+        i32 m = (i32)ceil(len / step);
+        double r2 = sel_radius_at(st, i + 1, true);
+        for ( i32 s = 1; s < m; ++s ) {
+            double t = (double)s / m;
+            v2l p = { (i64)llround(ax + dx * t), (i64)llround(ay + dy * t) };
+            f32 q = st->pressures[i] + (st->pressures[i + 1] - st->pressures[i]) * (f32)t;
+            add(p, q, r + (r2 - r) * t, dx, dy, false);
+        }
+    }
+
+    i64 kept = 0;
+    for ( i64 j = 0; j < n; ++j ) {
+        OptSample* sp = &smp[j];
+        double len = sqrt(sp->dx * sp->dx + sp->dy * sp->dy);
+        double nx = len > 1e-9 ? -sp->dy / len : 1.0, ny = len > 1e-9 ? sp->dx / len : 0.0;
+        const double offs[3] = { 0.0, 0.4, -0.4 };
+        for ( int w = 0; w < 3 && !sp->keep; ++w ) {
+            double a = opt_view_alpha_at(milton, (double)sp->p.x + nx * offs[w] * sp->r, (double)sp->p.y + ny * offs[w] * sp->r);
+            if ( a < 0.0 || a >= thr ) { sp->keep = true; }
+        }
+        if ( sp->keep ) { ++kept; }
+    }
+    if ( kept == n ) { return; }
+    if ( kept == 0 ) {
+        o->dead[idx] = 1;
+        ++o->removed_strokes;
+        return;
+    }
+
+    CutPoints cur = {};
+    for ( i64 j = 0; j < n; ++j ) {
+        if ( !smp[j].keep ) { continue; }
+        b32 prev_keep = j > 0 && smp[j - 1].keep;
+        b32 next_keep = j + 1 < n && smp[j + 1].keep;
+        if ( !prev_keep || !next_keep || smp[j].vertex ) { cut_points_push(&cur, smp[j].p, smp[j].q); }
+        if ( next_keep ) { continue; }
+        Stroke piece = *st;
+        piece.num_points = cur.n;
+        piece.points = arena_alloc_array(&milton->canvas->arena, cur.n, v2l);
+        piece.pressures = arena_alloc_array(&milton->canvas->arena, cur.n, f32);
+        memcpy(piece.points, cur.p, sizeof(v2l) * (size_t)cur.n);
+        memcpy(piece.pressures, cur.q, sizeof(f32) * (size_t)cur.n);
+        piece.render_handle = 0;
+        piece.id = milton->canvas->stroke_id_count++;
+        piece.bounding_rect = bounding_box_for_stroke(&piece);
+        if ( o->n_new == o->cap_new ) {
+            o->cap_new = o->cap_new ? o->cap_new * 2 : 64;
+            o->news = (OptState::OptNew*)realloc(o->news, sizeof(OptState::OptNew) * (size_t)o->cap_new);
+        }
+        o->news[o->n_new].old_index = (i32)idx;
+        o->news[o->n_new].stroke = piece;
+        ++o->n_new;
+        cur.n = 0;
+    }
+    free(cur.p);
+    free(cur.q);
+    o->dead[idx] = 2;
+    ++o->cut_strokes;
+}
+
 static void
 opt_apply(Milton* milton, Layer* l)
 {
@@ -978,6 +1230,23 @@ opt_apply(Milton* milton, Layer* l)
             if ( o->dead[i] ) { items[k++].index = (i32)i; }
         }
         list_remove(milton, l, items, n);
+        free(items);
+    }
+    if ( o->n_new > 0 ) {
+        // A cut stroke is replaced in place by its pieces.
+        SelOpItem* items = (SelOpItem*)calloc((size_t)o->n_new, sizeof(SelOpItem));
+        i64 new_index = 0, ni = 0;
+        for ( i64 si = 0; si < o->n; ++si ) {
+            if ( o->dead[si] == 0 ) { ++new_index; }
+            else if ( o->dead[si] == 2 ) {
+                while ( ni < o->n_new && o->news[ni].old_index == si ) {
+                    items[ni].index = (i32)new_index++;
+                    items[ni].stroke = o->news[ni].stroke;
+                    ++ni;
+                }
+            }
+        }
+        list_insert(l, items, (i32)o->n_new);
         free(items);
     }
 
@@ -1005,9 +1274,38 @@ opt_step(Milton* milton)
     if ( o->stage == 0 ) {
         o->n = l->strokes.count;
         o->dead = (u8*)calloc((size_t)(o->n > 0 ? o->n : 1), 1);
-        opt_build_grid(milton, l);
         o->cursor = 0;
+        if ( o->view_mode ) {
+            i32 w = milton->view->screen_size.w, h = milton->view->screen_size.h;
+            o->vf = 1;
+            while ( (i64)(w / o->vf + 1) * (h / o->vf + 1) > 4000000 ) { ++o->vf; }
+            o->vw = w / o->vf + 1;
+            o->vh = h / o->vf + 1;
+            o->layer_a = (float*)calloc((size_t)o->vw * o->vh, sizeof(float));
+            o->scratch = (float*)calloc((size_t)o->vw * o->vh, sizeof(float));
+            o->stage = 10;
+            return;
+        }
+        opt_build_grid(milton, l);
         o->stage = 1;
+        return;
+    }
+    if ( o->stage == 10 ) {
+        while ( o->cursor < o->n && !over_budget() ) {
+            Stroke* st = get(&l->strokes, o->cursor);
+            if ( st->num_points > 0 ) { opt_paint_stroke(milton, st, scale); }
+            ++o->cursor;
+        }
+        if ( o->cursor >= o->n ) { o->cursor = 0; o->stage = 11; }
+        return;
+    }
+    if ( o->stage == 11 ) {
+        while ( o->cursor < o->n && !over_budget() ) {
+            Stroke* st = get(&l->strokes, o->cursor);
+            if ( !(st->flags & StrokeFlag_ERASER) && st->num_points > 0 ) { opt_eval_stroke(milton, l, o->cursor, scale); }
+            ++o->cursor;
+        }
+        if ( o->cursor >= o->n ) { o->cursor = 0; o->stage = 2; }
         return;
     }
     if ( o->stage == 1 ) {
@@ -1033,7 +1331,7 @@ opt_step(Milton* milton)
                 Rect er = e->bounding_rect;
                 b32 touches = false;
                 for ( i64 i = 0; i < j && !touches; ++i ) {
-                    if ( o->dead[i] ) { continue; }
+                    if ( o->dead[i] == 1 ) { continue; }
                     Stroke* s = get(&l->strokes, i);
                     if ( (s->flags & StrokeFlag_ERASER) ) { continue; }
                     Rect r = s->bounding_rect;
@@ -1080,10 +1378,23 @@ optimize_draw(Milton* milton)
                            "(Ctrl+S). Closing without saving discards the optimization and keeps the old file.");
         ImGui::PopStyleColor();
         ImGui::Spacing();
-        ImGui::TextWrapped("Strokes on this layer that are completely hidden by erasing (including soft erasers) "
-                           "and erasers that no longer affect anything will be permanently deleted. "
-                           "This can take a while on large layers.");
+        if ( o->view_mode ) {
+            ImGui::TextWrapped("Only what is visible in the current view is changed. The layer opacity on screen is measured, "
+                               "and every stroke part sitting where the layer is fainter than the minimum below is cut away and "
+                               "permanently deleted. Parts off screen are left alone.");
+        } else {
+            ImGui::TextWrapped("Strokes on this layer that are completely hidden by erasing (including soft erasers) "
+                               "and erasers that no longer affect anything will be permanently deleted. "
+                               "This can take a while on large layers.");
+        }
         ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+        if ( ImGui::Checkbox("Current view only, remove faint areas", (bool*)&o->view_mode) ) { g_opt_view_mode = o->view_mode; }
+        if ( o->view_mode ) {
+            ImGui::PushItemWidth(ui * 200);
+            if ( ImGui::SliderFloat("Minimum opacity to keep", &o->min_pct, 1.0f, 50.0f, "%.0f%%") ) { g_opt_min_pct = o->min_pct; }
+            ImGui::PopItemWidth();
+        }
         ImGui::Spacing();
         if ( ImGui::Button("Optimize and erase undo history", ImVec2(ui * 240, 0)) ) {
             o->phase = 2;
@@ -1098,7 +1409,9 @@ optimize_draw(Milton* milton)
         f32 frac = 0.0f;
         const char* what = "Preparing...";
         if ( o->n > 0 ) {
-            if ( o->stage == 1 ) { frac = 0.9f * (f32)((double)o->cursor / (double)o->n); what = "Checking which strokes are visible..."; }
+            if ( o->stage == 10 ) { frac = 0.45f * (f32)((double)o->cursor / (double)o->n); what = "Measuring layer opacity in view..."; }
+            else if ( o->stage == 11 ) { frac = 0.45f + 0.45f * (f32)((double)o->cursor / (double)o->n); what = "Cutting away faint areas..."; }
+            else if ( o->stage == 1 ) { frac = 0.9f * (f32)((double)o->cursor / (double)o->n); what = "Checking which strokes are visible..."; }
             else if ( o->stage == 2 ) { frac = 0.9f + 0.09f * (f32)((double)o->cursor / (double)o->n); what = "Removing unused erasers..."; }
             else if ( o->stage == 3 ) { frac = 0.99f; what = "Applying..."; }
         }
@@ -1117,6 +1430,7 @@ optimize_draw(Milton* milton)
     } else {
         ImGui::Text("Done. Removed %lld hidden strokes and %lld unused erasers.",
                     (long long)o->removed_strokes, (long long)o->removed_erasers);
+        if ( o->view_mode ) { ImGui::Text("Trimmed %lld strokes at the faint areas.", (long long)o->cut_strokes); }
         ImGui::Text("Undo history has been cleared.");
         if ( ImGui::Button("OK", ImVec2(ui * 100, 0)) ) {
             ImGui::CloseCurrentPopup();
@@ -1260,26 +1574,6 @@ sel_cap_interval(const CutCap* c, double Rs, double Ax, double Ay, double Dx, do
     *out_lo = lo;
     *out_hi = hi;
     return lo <= hi;
-}
-
-struct CutPoints
-{
-    v2l* p;
-    f32* q;
-    i32  n, cap;
-};
-
-static void
-cut_points_push(CutPoints* b, v2l p, f32 q)
-{
-    if ( b->n == b->cap ) {
-        b->cap = b->cap ? b->cap * 2 : 64;
-        b->p = (v2l*)realloc(b->p, sizeof(v2l) * (size_t)b->cap);
-        b->q = (f32*)realloc(b->q, sizeof(f32) * (size_t)b->cap);
-    }
-    b->p[b->n] = p;
-    b->q[b->n] = q;
-    ++b->n;
 }
 
 struct CutPiece
