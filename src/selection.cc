@@ -635,7 +635,7 @@ selection_auto_redo(Milton* milton, i64 hist_pos)
 
 // ---- Merge down
 
-static void sel_cut_impl(Milton* milton, Layer* l, Stroke* cutter, i64 limit, b32 push_undo);
+static void sel_cut_impl(Milton* milton, Layer* l, Stroke* cutter, i64 limit, b32 push_undo, b32 cut_erasers = false);
 
 static i64
 sel_find_stroke_by_id(Layer* l, i32 id)
@@ -1634,7 +1634,7 @@ struct CutPiece
 };
 
 static void
-sel_cut_impl(Milton* milton, Layer* l, Stroke* cutter, i64 limit, b32 push_undo)
+sel_cut_impl(Milton* milton, Layer* l, Stroke* cutter, i64 limit, b32 push_undo, b32 cut_erasers)
 {
     if ( !l || cutter->num_points <= 0 ) { return; }
     Selection* s = milton->selection;
@@ -1681,7 +1681,7 @@ sel_cut_impl(Milton* milton, Layer* l, Stroke* cutter, i64 limit, b32 push_undo)
         Rect sb = st->bounding_rect;
         if ( st->brush.shape == BrushShape_RECTANGLE ) { sb = rect_enlarge(sb, (i64)ceil((double)st->brush.radius * 0.5)); }
         b32 overlaps = !(sb.right < cb.left || sb.left > cb.right || sb.bottom < cb.top || sb.top > cb.bottom);
-        if ( si < limit && overlaps && !(st->flags & StrokeFlag_ERASER) && st->num_points > 0 ) {
+        if ( si < limit && overlaps && (cut_erasers || !(st->flags & StrokeFlag_ERASER)) && st->num_points > 0 ) {
             auto break_piece = [&]() {
                 if ( cur.n == 0 ) { return; }
                 if ( n_pieces == cap_pieces ) {
@@ -1872,7 +1872,7 @@ selection_cut(Milton* milton, Stroke* cutter)
 {
     Layer* l = milton->canvas->working_layer;
     if ( !l || !(l->flags & LayerFlags_VISIBLE) ) { return; }
-    sel_cut_impl(milton, l, cutter, INT64_MAX, true);
+    sel_cut_impl(milton, l, cutter, INT64_MAX, true, true);
 }
 
 // Eraser strokes of the layer that cannot be turned into cuts (soft, pressure-based or rectangular).
