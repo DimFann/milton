@@ -1020,13 +1020,12 @@ opt_view_alpha_at(Milton* milton, double cx, double cy)
     return (double)o->layer_a[gy * o->vw + gx];
 }
 
-// Coverage of canvas point (px, py) by a rectangle eraser swept along segment k, or 0. Soft rectangle erasers are
-// treated as not erasing, and pressure takes the smaller end of the segment, so this never overestimates.
+// Coverage of canvas point (px, py) by a rectangle eraser swept along segment k, or 0. Pressure takes the smaller
+// end of the segment, so this never overestimates.
 static double
 opt_rect_eraser_alpha(Stroke* e, i32 k, double px, double py, double scale)
 {
     const Brush& b = e->brush;
-    if ( e->flags & StrokeFlag_DISTANCE_TO_OPACITY ) { return 0.0; }
     i32 k2 = min(k + 1, e->num_points - 1);
     double pr = min((double)e->pressures[k], (double)e->pressures[k2]);
     double size = 1.0;
@@ -1063,6 +1062,16 @@ opt_rect_eraser_alpha(Stroke* e, i32 k, double px, double py, double scale)
         a = (1.0 - (double)b.pressure_opacity_min) * pr + (double)b.pressure_opacity_min;
     }
     a *= (double)(b.alpha < 0.0f ? 0.0f : (b.alpha > 1.0f ? 1.0f : b.alpha));
+    if ( e->flags & StrokeFlag_DISTANCE_TO_OPACITY ) {
+        double h = ((double)b.hardness - 1.0) / 9.0;
+        h = h < 0.0 ? 0.0 : (h > 1.0 ? 1.0 : h);
+        double core = h * h;
+        double x = c < 0.0 ? 0.0 : (c > 1.0 ? 1.0 : c);
+        double tt = (x - core) / max(1.0 - core, 0.0001);
+        tt = tt < 0.0 ? 0.0 : (tt > 1.0 ? 1.0 : tt);
+        double g1 = exp(-4.0);
+        a *= (exp(-4.0 * tt * tt) - g1) / (1.0 - g1);
+    }
     return cov * a;
 }
 
@@ -1217,6 +1226,39 @@ opt_eval_stroke(Milton* milton, Layer* l, i64 idx, double scale)
     ++o->cut_strokes;
 }
 
+// True when some part of stroke `s` lies within reach of eraser `e`. Coarse by design: it only ever errs toward "yes".
+static b32
+opt_near_eraser(Stroke* s, Stroke* e, double scale)
+{
+    Rect eb = e->bounding_rect;
+    double er = 0;
+    for ( i32 j = 0; j < e->num_points; ++j ) { er = max(er, sel_radius_at(e, j, true)); }
+    double lim = er + scale;
+    for ( i32 i = 0; i < s->num_points; ++i ) {
+        double sr = sel_radius_at(s, i, true);
+        double ax = (double)s->points[i].x, ay = (double)s->points[i].y;
+        i32 i2 = min(i + 1, s->num_points - 1);
+        double dx = (double)s->points[i2].x - ax, dy = (double)s->points[i2].y - ay;
+        double len = sqrt(dx * dx + dy * dy);
+        double step = max(sr * 0.5, scale);
+        i32 m = max((i32)ceil(len / step), 1);
+        for ( i32 q = 0; q < m; ++q ) {
+            double t = (double)q / m;
+            double px = ax + dx * t, py = ay + dy * t;
+            double reach = lim + sr;
+            if ( px < (double)eb.left - reach || px > (double)eb.right + reach ||
+                 py < (double)eb.top - reach || py > (double)eb.bottom + reach ) { continue; }
+            for ( i32 j = 0; j < e->num_points; ++j ) {
+                i32 j2 = min(j + 1, e->num_points - 1);
+                double d = sel_dist_to_seg(px, py, (double)e->points[j].x, (double)e->points[j].y,
+                                           (double)e->points[j2].x, (double)e->points[j2].y);
+                if ( d <= reach ) { return true; }
+            }
+        }
+    }
+    return false;
+}
+
 static void
 opt_apply(Milton* milton, Layer* l)
 {
@@ -1335,7 +1377,15 @@ opt_step(Milton* milton)
                     Stroke* s = get(&l->strokes, i);
                     if ( (s->flags & StrokeFlag_ERASER) ) { continue; }
                     Rect r = s->bounding_rect;
-                    touches = !(r.right < er.left || r.left > er.right || r.bottom < er.top || r.top > er.bottom);
+                    if ( r.right < er.left || r.left > er.right || r.bottom < er.top || r.top > er.bottom ) { continue; }
+                    if ( o->dead[i] == 2 ) {
+                        // Judge by the pieces that survive, not by the stroke they were cut from.
+                        for ( i64 q = 0; q < o->n_new && !touches; ++q ) {
+                            if ( o->news[q].old_index == i ) { touches = opt_near_eraser(&o->news[q].stroke, e, scale); }
+                        }
+                    } else {
+                        touches = opt_near_eraser(s, e, scale);
+                    }
                 }
                 if ( !touches ) {
                     o->dead[j] = 1;
