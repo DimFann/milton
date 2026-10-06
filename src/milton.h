@@ -116,6 +116,7 @@ struct MiltonSettings
     float brush_scrub_speed;    // Brush size change per pixel of Alt+RMB scrub
     float zoom_drag_speed;      // Exponential zoom per pixel of Ctrl+Space drag
     char  rotate_key;           // Hold + LMB drag rotates the canvas. Lowercase ASCII.
+    u8    shift_drag_unbound_migrated;  // Shift+drag brush resize was unbound by default in a later version.
     u8    unbound_prims_migrated;  // Rectangle/grid hotkeys were unbound by default in a later version.
     float hardness_min_percent;    // Real hardness (0-100) shown as 0% on the brush hardness slider.
     u8    light_theme;             // 0 = dark UI theme (default), 1 = light.
@@ -126,6 +127,7 @@ struct MiltonSettings
     float pressure_curve_y[8];     // Output pressure of each point.
     u8    show_perf_stats;         // Faint resource readout in the corner (default off).
     u8    eraser_cut;              // Eraser cuts strokes apart instead of erasing pixels.
+    u8    vsync_off;               // 1 = swap interval 0 (relies on the Max FPS cap).
     u8    max_fps;                 // Frame rate cap; 0 = monitor refresh rate.
     u8    auto_cleanup_erased;     // Drop strokes that an opaque eraser stroke fully covers (default off).
 };

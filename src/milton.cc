@@ -717,6 +717,7 @@ settings_init(MiltonSettings* s)
     s->eraser_cut = 0;
     s->auto_cleanup_erased = 0;
     s->max_fps = 0;
+    s->vsync_off = 0;
 }
 
 void
@@ -829,6 +830,14 @@ milton_init(Milton* milton, i32 width, i32 height, f32 ui_scale, PATH_CHAR* file
 
     if (!loaded_settings) {
         set_default_bindings(&milton->settings->bindings);
+    }
+    if (!milton->settings->shift_drag_unbound_migrated) {
+        Binding* bs = &milton->settings->bindings.bindings[Action_DRAG_BRUSH_SIZE];
+        Binding* br = &milton->settings->bindings.bindings[ActionRelease_DRAG_BRUSH_SIZE];
+        const ModifierFlags unreachable = (ModifierFlags)(Modifier_CTRL | Modifier_ALT | Modifier_SHIFT | Modifier_WIN);
+        if ( bs->modifiers == Modifier_SHIFT ) { bs->modifiers = unreachable; }
+        if ( br->modifiers == Modifier_SHIFT ) { br->modifiers = unreachable; }
+        milton->settings->shift_drag_unbound_migrated = 1;
     }
     if (!milton->settings->unbound_prims_migrated) {
         Binding* rect = &milton->settings->bindings.bindings[Action_MODE_PRIMITIVE_RECTANGLE];

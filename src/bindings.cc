@@ -95,7 +95,8 @@ set_default_bindings(MiltonBindings* bs)
     binding(bs, Modifier_NONE, '0', Action_SET_BRUSH_ALPHA_100);
 
     binding_with_release(bs, Modifier_NONE, '`', Action_PEEK_OUT, ActionRelease_PEEK_OUT);
-    binding_with_release(bs, Modifier_SHIFT, Binding::UNBOUND, Action_DRAG_BRUSH_SIZE, ActionRelease_DRAG_BRUSH_SIZE);
+    // Modifier-only gesture, unbound by default via an unreachable modifier chord (remap it in Hotkeys).
+    binding_with_release(bs, (ModifierFlags)(Modifier_CTRL | Modifier_ALT | Modifier_SHIFT | Modifier_WIN), Binding::UNBOUND, Action_DRAG_BRUSH_SIZE, ActionRelease_DRAG_BRUSH_SIZE);
     // Rotation is the hold-to-rotate key in settings (W by default), not a modifier gesture.
     binding_with_release(bs, (ModifierFlags)(Modifier_CTRL | Modifier_SPACE), ' ', Action_DRAG_ZOOM, ActionRelease_DRAG_ZOOM);
 

@@ -909,8 +909,7 @@ milton_main(bool is_fullscreen, char* file_to_open)
             if ( want_scrub && milton->current_mode != MiltonMode::DRAG_BRUSH_SIZE ) {
                 drag_brush_size_start(milton, platform.pointer);
             }
-            else if ( !want_scrub && milton->current_mode == MiltonMode::DRAG_BRUSH_SIZE
-                      && !(SDL_GetModState() & KMOD_SHIFT) ) {
+            else if ( !want_scrub && milton->current_mode == MiltonMode::DRAG_BRUSH_SIZE ) {
                 drag_brush_size_stop(milton);
             }
         }
@@ -1121,6 +1120,45 @@ milton_main(bool is_fullscreen, char* file_to_open)
 
         mlt_assert (platform.num_point_results <= platform.num_pressure_results);
 
+        // Shift while brushing/erasing locks the cursor to a screen-space horizontal or vertical line.
+        {
+            static b32 have_last = false;
+            static b32 anchored = false;
+            static v2l last_raw = {};
+            static v2l anchor = {};
+            static int axis = 0;  // 0 undecided, 1 horizontal, 2 vertical
+            b32 shift = (SDL_GetModState() & KMOD_SHIFT) != 0;
+            b32 drawing_mode = milton->current_mode == MiltonMode::PEN || milton->current_mode == MiltonMode::ERASER;
+            for ( i32 pi = 0; pi < platform.num_point_results; ++pi ) {
+                v2l p = milton_input.points[pi];
+                if ( !shift || !drawing_mode ) {
+                    axis = 0;
+                    anchored = false;
+                }
+                else {
+                    if ( !anchored ) {
+                        anchor = have_last ? last_raw : p;
+                        anchored = true;
+                        axis = 0;
+                    }
+                    if ( axis == 0 ) {
+                        i64 dx = p.x - anchor.x, dy = p.y - anchor.y;
+                        if ( llabs(dx) >= 6 || llabs(dy) >= 6 ) { axis = llabs(dx) >= llabs(dy) ? 1 : 2; }
+                    }
+                    if ( axis == 1 ) { milton_input.points[pi] = v2l{ p.x, anchor.y }; }
+                    else if ( axis == 2 ) { milton_input.points[pi] = v2l{ anchor.x, p.y }; }
+                    else { milton_input.points[pi] = anchor; }
+                }
+                last_raw = p;
+                have_last = true;
+            }
+            if ( milton_input.flags & MiltonInputFlags_END_STROKE ) {
+                have_last = false;
+                anchored = false;
+                axis = 0;
+            }
+        }
+
         milton_input.input_count = platform.num_point_results;
         if ( optimize_active() ) {
             // The layer is being rewritten: ignore all canvas input until it finishes.
@@ -1168,6 +1206,11 @@ milton_main(bool is_fullscreen, char* file_to_open)
         }
         PROFILE_GRAPH_END(GL);
         PROFILE_GRAPH_BEGIN(system);
+        {
+            static i32 applied_vsync = -1;
+            i32 want = milton->settings->vsync_off ? 0 : 1;
+            if ( want != applied_vsync ) { SDL_GL_SetSwapInterval(want); applied_vsync = want; }
+        }
         SDL_GL_SwapWindow(window);
 
         platform_event_tick();

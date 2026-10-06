@@ -1812,6 +1812,11 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
                         milton->settings->show_perf_stats = show_stats ? 1 : 0;
                     }
                     {
+                        bool vs = milton->settings->vsync_off == 0;
+                        if ( ImGui::Checkbox("VSync", &vs) ) { milton->settings->vsync_off = vs ? 0 : 1; }
+                        if ( !vs && milton->settings->max_fps == 0 ) { ImGui::TextDisabled("VSync off: the refresh-rate cap still applies."); }
+                    }
+                    {
                         int fps = milton->settings->max_fps;
                         if ( ImGui::SliderInt("Max FPS (0 = refresh rate)", &fps, 0, 240) ) {
                             if ( fps > 0 && fps < 20 ) { fps = 20; }
