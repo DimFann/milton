@@ -935,8 +935,12 @@ milton_settings_load(MiltonSettings* settings)
         u16 struct_size = 0;
         if ( fread(&struct_size, sizeof(u16), 1, fd) ) {
             // Layout changes (e.g. new actions) invalidate older files; defaults are used instead.
-            if (struct_size == sizeof(*settings)) {
-                if ( fread(settings, struct_size, 1, fd) ) {
+            // Older/newer files are read as far as they fit; fields they lack keep their defaults.
+            // Files from before the layout was append-only (bindings changed) are rejected.
+            const u16 min_size = (u16)(offsetof(MiltonSettings, pressure_smoothing));
+            if ( struct_size >= min_size ) {
+                u16 n = struct_size < sizeof(*settings) ? struct_size : (u16)sizeof(*settings);
+                if ( fread(settings, n, 1, fd) == 1 ) {
                     ok = true;
                 }
             }

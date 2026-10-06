@@ -13,6 +13,7 @@
 
 
 void settings_init(MiltonSettings* s);  // milton.cc
+static void milton_update_brushes(Milton* milton);
 
 #define NUM_BUTTONS 5
 #define GUI_PANEL_MIN_WIDTH 160
@@ -820,7 +821,65 @@ preset_apply(Milton* milton, const BrushPreset* p)
     if ( p->relative_to_canvas ) { milton->working_stroke.flags |= StrokeFlag_RELATIVE_TO_CANVAS; }
     else { milton->working_stroke.flags &= ~StrokeFlag_RELATIVE_TO_CANVAS; }
 
-    milton_set_brush_size(milton, clamp(p->size, 1, MILTON_MAX_BRUSH_SIZE));  // Also refreshes the brushes.
+    milton->brush_sizes[kind] = clamp(p->size, 1, MILTON_MAX_BRUSH_SIZE);
+    milton_update_brushes(milton);
+}
+
+// ---- Tool options persistence: the pen and eraser options are restored at start-up and saved as they change.
+static BrushPreset g_tool_saved[2];
+static bool g_tool_loaded = false;
+static u32  g_tool_last_write = 0;
+
+static void
+tool_state_path(PATH_CHAR* fname)
+{
+    PATH_CHAR tmp[MAX_PATH] = TO_PATH_STR("tool_options.bin");
+    platform_fname_at_config(tmp, MAX_PATH);
+    memcpy(fname, tmp, sizeof(tmp));
+}
+
+static void
+tool_state_tick(Milton* milton)
+{
+    PATH_CHAR fname[MAX_PATH];
+    tool_state_path(fname);
+    if ( !g_tool_loaded ) {
+        g_tool_loaded = true;
+        FILE* fd = platform_fopen(fname, TO_PATH_STR("rb"));
+        if ( fd ) {
+            u32 sz = 0;
+            BrushPreset in[2];
+            if ( fread(&sz, sizeof(sz), 1, fd) == 1 && sz == sizeof(BrushPreset)
+                 && fread(in, sizeof(BrushPreset), 2, fd) == 2
+                 && in[0].kind == BrushEnum_PEN && in[1].kind == BrushEnum_ERASER ) {
+                preset_apply(milton, &in[0]);
+                preset_apply(milton, &in[1]);
+            }
+            fclose(fd);
+        }
+        memset(g_tool_saved, 0, sizeof(g_tool_saved));
+        preset_capture(milton, &g_tool_saved[0], BrushEnum_PEN);
+        preset_capture(milton, &g_tool_saved[1], BrushEnum_ERASER);
+        return;
+    }
+    BrushPreset cur[2];
+    memset(cur, 0, sizeof(cur));
+    preset_capture(milton, &cur[0], BrushEnum_PEN);
+    preset_capture(milton, &cur[1], BrushEnum_ERASER);
+    if ( memcmp(cur, g_tool_saved, sizeof(cur)) == 0 ) { return; }
+    // Writes are throttled while a slider is dragged; the frame is kept alive so the last value is written.
+    if ( milton->platform ) { milton->platform->force_next_frame = true; }
+    u32 now = SDL_GetTicks();
+    if ( now - g_tool_last_write < 400 ) { return; }
+    g_tool_last_write = now;
+    FILE* fd = platform_fopen(fname, TO_PATH_STR("wb"));
+    if ( fd ) {
+        u32 sz = sizeof(BrushPreset);
+        fwrite(&sz, sizeof(sz), 1, fd);
+        fwrite(cur, sizeof(BrushPreset), 2, fd);
+        fclose(fd);
+        memcpy(g_tool_saved, cur, sizeof(cur));
+    }
 }
 
 static void
@@ -947,7 +1006,7 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
         }
         if ( selection_lasso_armed(milton) ) {
             bool whole = milton->settings->lasso_whole != 0;
-            if ( ImGui::Checkbox("Select whole strokes", &whole) ) { milton->settings->lasso_whole = whole ? 1 : 0; }
+            if ( ImGui::Checkbox("Select whole strokes", &whole) ) { milton->settings->lasso_whole = whole ? 1 : 0; milton_settings_save(milton->settings); }
             if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip("Select entire strokes instead of cutting them at the lasso boundary"); }
             window_height = (i32)ImGui::GetWindowSize().y;
             ImGui::End();
@@ -1053,6 +1112,7 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
             bool cut = milton->settings->eraser_cut != 0;
             if ( ImGui::Checkbox("Cut strokes", &cut) ) {
                 milton->settings->eraser_cut = cut ? 1 : 0;
+                milton_settings_save(milton->settings);
             }
             if ( ImGui::IsItemHovered() ) {
                 ImGui::SetTooltip("Splits strokes along the eraser path instead of erasing pixels.");
@@ -1462,6 +1522,7 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
 {
     CanvasState* canvas = milton->canvas;
     MiltonGui* gui = milton->gui;
+    tool_state_tick(milton);
     // ImGui Section
 
     // Spawn below the picker
