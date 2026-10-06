@@ -74,6 +74,7 @@ struct PlatformState
     SDL_Cursor* cursor_default;
     SDL_Cursor* cursor_hand;
     SDL_Cursor* cursor_crosshair;
+    SDL_Cursor* cursor_pick;  // High-contrast crosshair for the eyedropper and lasso.
     SDL_Cursor* cursor_sizeall;
     SDL_Cursor* cursor_brush;  // Custom cursor.
 

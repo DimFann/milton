@@ -848,6 +848,31 @@ milton_main(bool is_fullscreen, char* file_to_open)
         platform.cursor_crosshair = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR);
         platform.cursor_sizeall   = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEALL);
 
+        platform.cursor_pick = platform.cursor_crosshair;
+        const int cs = 32, c0 = 15;
+        SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormat(0, cs, cs, 32, SDL_PIXELFORMAT_RGBA32);
+        if ( surf ) {
+            SDL_FillRect(surf, NULL, 0);
+            auto px = [&](int x, int y, u32 col) {
+                if ( x >= 0 && y >= 0 && x < cs && y < cs ) { ((u32*)surf->pixels)[y * (surf->pitch / 4) + x] = col; }
+            };
+            const u32 white = SDL_MapRGBA(surf->format, 255, 255, 255, 255);
+            const u32 black = SDL_MapRGBA(surf->format, 0, 0, 0, 255);
+            for ( int pass = 0; pass < 2; ++pass ) {
+                int t = pass == 0 ? 2 : 0;  // Outline grows 2 px each side of the 2 px core.
+                u32 col = pass == 0 ? white : black;
+                for ( int i = 3; i <= 14; ++i ) {
+                    for ( int w = -t; w <= 1 + t; ++w ) {
+                        px(c0 - i, c0 + w, col); px(c0 + 1 + i, c0 + w, col);
+                        px(c0 + w, c0 - i, col); px(c0 + w, c0 + 1 + i, col);
+                    }
+                }
+            }
+            SDL_Cursor* cur = SDL_CreateColorCursor(surf, c0, c0);
+            if ( cur ) { platform.cursor_pick = cur; }
+            SDL_FreeSurface(surf);
+        }
+
         cursor_set_and_show(platform.cursor_default);
     }
 
@@ -1010,7 +1035,7 @@ milton_main(bool is_fullscreen, char* file_to_open)
                     else if ( milton->current_mode == MiltonMode::EYEDROPPER
                               || (current_mode_is_for_drawing(milton) && (SDL_GetModState() & KMOD_ALT)
                                   && !platform.is_right_button_down) ) {
-                        cursor_set_and_show(platform.cursor_crosshair);
+                        cursor_set_and_show(platform.cursor_pick);
                         platform.is_pointer_down = false;
                     }
                     else if ( milton->gui->visible
@@ -1018,7 +1043,7 @@ milton_main(bool is_fullscreen, char* file_to_open)
                         cursor_set_and_show(platform.cursor_default);
                     }
                     else if ( current_mode_is_for_drawing(milton) && selection_cursor(milton) == 1 ) {
-                        cursor_set_and_show(platform.cursor_crosshair);
+                        cursor_set_and_show(platform.cursor_pick);
                     }
                     else if ( current_mode_is_for_drawing(milton) && selection_cursor(milton) == 2 ) {
                         cursor_set_and_show(platform.cursor_default);

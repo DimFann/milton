@@ -718,6 +718,7 @@ settings_init(MiltonSettings* s)
     s->auto_cleanup_erased = 0;
     s->max_fps = 0;
     s->vsync_off = 0;
+    s->lasso_whole = 0;
 }
 
 void

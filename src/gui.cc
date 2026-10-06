@@ -915,13 +915,14 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
 
     const char* title = "Brush Options";
     switch ( milton->current_mode ) {
-        case MiltonMode::PEN:                 title = "Brush Options";  break;
-        case MiltonMode::ERASER:              title = "Eraser Options"; break;
-        case MiltonMode::PRIMITIVE_LINE:      title = "Line Options";   break;
-        case MiltonMode::PRIMITIVE_RECTANGLE: title = "Rect Options";   break;
-        case MiltonMode::PRIMITIVE_GRID:      title = "Grid Options";   break;
+        case MiltonMode::PEN:                 title = "Tool Options (Brush)";  break;
+        case MiltonMode::ERASER:              title = "Tool Options (Eraser)"; break;
+        case MiltonMode::PRIMITIVE_LINE:      title = "Tool Options (Line)";   break;
+        case MiltonMode::PRIMITIVE_RECTANGLE: title = "Tool Options (Rect)";   break;
+        case MiltonMode::PRIMITIVE_GRID:      title = "Tool Options (Grid)";   break;
         default: break;
     }
+    if ( selection_lasso_armed(milton) ) { title = "Tool Options (Lasso)"; }
     char title_id[64];
     snprintf(title_id, sizeof(title_id), "%s###brush_options", title);
 
@@ -939,6 +940,15 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
             }
         }
         if ( options_collapsed ) {
+            window_height = (i32)ImGui::GetWindowSize().y;
+            ImGui::End();
+            ImGui::PopStyleVar(3);
+            return window_height;
+        }
+        if ( selection_lasso_armed(milton) ) {
+            bool whole = milton->settings->lasso_whole != 0;
+            if ( ImGui::Checkbox("Select whole strokes", &whole) ) { milton->settings->lasso_whole = whole ? 1 : 0; }
+            if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip("Select entire strokes instead of cutting them at the lasso boundary"); }
             window_height = (i32)ImGui::GetWindowSize().y;
             ImGui::End();
             ImGui::PopStyleVar(3);

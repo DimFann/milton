@@ -127,6 +127,7 @@ struct MiltonSettings
     float pressure_curve_y[8];     // Output pressure of each point.
     u8    show_perf_stats;         // Faint resource readout in the corner (default off).
     u8    eraser_cut;              // Eraser cuts strokes apart instead of erasing pixels.
+    u8    lasso_whole;             // 1 = lasso selects whole strokes; 0 (default) splits strokes at its boundary.
     u8    vsync_off;               // 1 = swap interval 0 (relies on the Max FPS cap).
     u8    max_fps;                 // Frame rate cap; 0 = monitor refresh rate.
     u8    auto_cleanup_erased;     // Drop strokes that an opaque eraser stroke fully covers (default off).

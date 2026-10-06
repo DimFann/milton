@@ -1683,6 +1683,191 @@ segments_cross(double ax, double ay, double bx, double by,
     return ((d1 > 0) != (d2 > 0)) && ((d3 > 0) != (d4 > 0));
 }
 
+// Splits every stroke of the layer at the lasso boundary and returns the new indices of the pieces inside.
+// The split is recorded as one undoable CUT op. Caller frees the result.
+static i32*
+sel_lasso_split(Milton* milton, Layer* l, i32* out_n, double lminx, double lminy, double lmaxx, double lmaxy)
+{
+    Selection* s = milton->selection;
+    DArray<v2l>* poly = &s->lasso;
+    i64 count = l->strokes.count;
+    i32* picked = (i32*)malloc(sizeof(i32) * (size_t)(count > 0 ? count : 1));
+    i32 npicked = 0, cap_picked = (i32)(count > 0 ? count : 1);
+
+    SelOpItem* old_items = NULL; i32 n_old = 0, cap_old = 0;
+    SelOpItem* new_items = NULL; i32 n_new = 0, cap_new = 0;
+    CutPoints cur = {};
+    CutPiece* pieces = NULL; b32* piece_in = NULL; i32 n_pieces = 0, cap_pieces = 0;
+    double* ts = NULL; i32 ts_cap = 0;
+    i64 new_index = 0;
+
+    for ( i64 si = 0; si < count; ++si ) {
+        Stroke* st = get(&l->strokes, si);
+        n_pieces = 0;
+        cur.n = 0;
+        b32 in_bounds = st->num_points > 0 &&
+            !((double)st->bounding_rect.right < lminx || (double)st->bounding_rect.left > lmaxx ||
+              (double)st->bounding_rect.bottom < lminy || (double)st->bounding_rect.top > lmaxy);
+        if ( !in_bounds ) { ++new_index; continue; }
+
+        b32 cur_in = false;
+        b32 touched = false;
+        b32 any_in = false;
+        auto break_piece = [&]() {
+            if ( cur.n == 0 ) { return; }
+            if ( cur.n >= 2 || st->num_points == 1 ) {
+                if ( n_pieces == cap_pieces ) {
+                    cap_pieces = cap_pieces ? cap_pieces * 2 : 8;
+                    pieces = (CutPiece*)realloc(pieces, sizeof(CutPiece) * (size_t)cap_pieces);
+                    piece_in = (b32*)realloc(piece_in, sizeof(b32) * (size_t)cap_pieces);
+                }
+                CutPiece pc;
+                pc.n = cur.n;
+                pc.p = (v2l*)malloc(sizeof(v2l) * (size_t)cur.n);
+                pc.q = (f32*)malloc(sizeof(f32) * (size_t)cur.n);
+                memcpy(pc.p, cur.p, sizeof(v2l) * (size_t)cur.n);
+                memcpy(pc.q, cur.q, sizeof(f32) * (size_t)cur.n);
+                piece_in[n_pieces] = cur_in;
+                pieces[n_pieces++] = pc;
+            }
+            cur.n = 0;
+        };
+
+        if ( st->num_points == 1 ) {
+            b32 in = point_in_poly(poly, (double)st->points[0].x, (double)st->points[0].y);
+            if ( in ) {
+                if ( npicked == cap_picked ) { cap_picked *= 2; picked = (i32*)realloc(picked, sizeof(i32) * (size_t)cap_picked); }
+                picked[npicked++] = (i32)new_index;
+            }
+            ++new_index;
+            continue;
+        }
+
+        for ( i32 i = 0; i + 1 < st->num_points; ++i ) {
+            double Ax = (double)st->points[i].x, Ay = (double)st->points[i].y;
+            double Bx = (double)st->points[i + 1].x, By = (double)st->points[i + 1].y;
+            double Dx = Bx - Ax, Dy = By - Ay;
+            f32 qa = st->pressures[i], qb = st->pressures[i + 1];
+
+            i32 nts = 0;
+            b32 seg_near = !(max(Ax, Bx) < lminx || min(Ax, Bx) > lmaxx || max(Ay, By) < lminy || min(Ay, By) > lmaxy);
+            if ( (nts + 2) > ts_cap ) { ts_cap = ts_cap ? ts_cap * 2 : 64; ts = (double*)realloc(ts, sizeof(double) * (size_t)ts_cap); }
+            ts[nts++] = 0.0;
+            if ( seg_near ) {
+                for ( i64 e = 0; e < poly->count; ++e ) {
+                    v2l c = poly->data[e];
+                    v2l dd = poly->data[(e + 1) % poly->count];
+                    double Cx = (double)c.x, Cy = (double)c.y;
+                    double Sx = (double)dd.x - Cx, Sy = (double)dd.y - Cy;
+                    double denom = Dx * Sy - Dy * Sx;
+                    if ( fabs(denom) < 1e-12 ) { continue; }
+                    double t = ((Cx - Ax) * Sy - (Cy - Ay) * Sx) / denom;
+                    double u = ((Cx - Ax) * Dy - (Cy - Ay) * Dx) / denom;
+                    if ( t > 1e-9 && t < 1.0 - 1e-9 && u >= 0.0 && u <= 1.0 ) {
+                        if ( (nts + 2) > ts_cap ) { ts_cap *= 2; ts = (double*)realloc(ts, sizeof(double) * (size_t)ts_cap); }
+                        ts[nts++] = t;
+                    }
+                }
+            }
+            ts[nts++] = 1.0;
+            for ( i32 a = 1; a < nts; ++a ) {  // Insertion sort.
+                double v = ts[a]; i32 b = a - 1;
+                while ( b >= 0 && ts[b] > v ) { ts[b + 1] = ts[b]; --b; }
+                ts[b + 1] = v;
+            }
+
+            for ( i32 a = 0; a + 1 < nts; ++a ) {
+                double t0 = ts[a], t1 = ts[a + 1];
+                if ( t1 - t0 < 1e-9 ) { continue; }
+                b32 in = false;
+                if ( seg_near ) {
+                    double tm = (t0 + t1) * 0.5;
+                    in = point_in_poly(poly, Ax + Dx * tm, Ay + Dy * tm);
+                }
+                v2l p0 = (t0 <= 0.0) ? st->points[i] : v2l{ (i64)llround(Ax + Dx * t0), (i64)llround(Ay + Dy * t0) };
+                v2l p1 = (t1 >= 1.0) ? st->points[i + 1] : v2l{ (i64)llround(Ax + Dx * t1), (i64)llround(Ay + Dy * t1) };
+                f32 q0 = qa + (qb - qa) * (f32)t0, q1 = qa + (qb - qa) * (f32)t1;
+                if ( cur.n > 0 && in != cur_in ) { break_piece(); touched = true; }
+                if ( cur.n == 0 ) { cur_in = in; cut_points_push(&cur, p0, q0); }
+                cut_points_push(&cur, p1, q1);
+                if ( in ) { any_in = true; }
+            }
+        }
+        break_piece();
+
+        if ( n_pieces <= 1 && !touched ) {
+            if ( any_in ) {
+                if ( npicked == cap_picked ) { cap_picked *= 2; picked = (i32*)realloc(picked, sizeof(i32) * (size_t)cap_picked); }
+                picked[npicked++] = (i32)new_index;
+            }
+            for ( i32 pi = 0; pi < n_pieces; ++pi ) { free(pieces[pi].p); free(pieces[pi].q); }
+            ++new_index;
+            continue;
+        }
+
+        if ( n_old == cap_old ) {
+            cap_old = cap_old ? cap_old * 2 : 16;
+            old_items = (SelOpItem*)realloc(old_items, sizeof(SelOpItem) * (size_t)cap_old);
+        }
+        old_items[n_old] = {};
+        old_items[n_old].index = (i32)si;
+        ++n_old;
+
+        for ( i32 pi = 0; pi < n_pieces; ++pi ) {
+            Stroke ns_ = *st;
+            ns_.num_points = pieces[pi].n;
+            ns_.points = arena_alloc_array(&milton->canvas->arena, pieces[pi].n, v2l);
+            ns_.pressures = arena_alloc_array(&milton->canvas->arena, pieces[pi].n, f32);
+            memcpy(ns_.points, pieces[pi].p, sizeof(v2l) * (size_t)pieces[pi].n);
+            memcpy(ns_.pressures, pieces[pi].q, sizeof(f32) * (size_t)pieces[pi].n);
+            ns_.render_handle = 0;
+            ns_.id = milton->canvas->stroke_id_count++;
+            ns_.bounding_rect = bounding_box_for_stroke(&ns_);
+            free(pieces[pi].p);
+            free(pieces[pi].q);
+
+            if ( n_new == cap_new ) {
+                cap_new = cap_new ? cap_new * 2 : 16;
+                new_items = (SelOpItem*)realloc(new_items, sizeof(SelOpItem) * (size_t)cap_new);
+            }
+            new_items[n_new] = {};
+            new_items[n_new].index = (i32)new_index;
+            new_items[n_new].stroke = ns_;
+            ++n_new;
+            if ( piece_in[pi] ) {
+                if ( npicked == cap_picked ) { cap_picked *= 2; picked = (i32*)realloc(picked, sizeof(i32) * (size_t)cap_picked); }
+                picked[npicked++] = (i32)new_index;
+            }
+            ++new_index;
+        }
+    }
+
+    free(cur.p);
+    free(cur.q);
+    free(pieces);
+    free(piece_in);
+    free(ts);
+
+    if ( n_old == 0 ) {
+        free(old_items);
+        free(new_items);
+    } else {
+        SelOp op = {};
+        op.kind = SelOp_CUT;
+        op.layer_id = l->id;
+        op.n = n_old;
+        op.items = old_items;
+        op.n2 = n_new;
+        op.items2 = new_items;
+        list_remove(milton, l, op.items, op.n);
+        list_insert(l, op.items2, op.n2);
+        sel_push_op(milton, op);
+        milton->render_settings.do_full_redraw = true;
+    }
+    *out_n = npicked;
+    return picked;
+}
+
 static void
 sel_pick_from_lasso(Milton* milton)
 {
@@ -1701,8 +1886,14 @@ sel_pick_from_lasso(Milton* milton)
     }
 
     i64 cnt = l->strokes.count;
-    i32* picked = (i32*)calloc((size_t)(cnt > 0 ? cnt : 1), sizeof(i32));
+    i32* picked = NULL;
     i32 npicked = 0;
+    if ( !milton->settings->lasso_whole ) {
+        picked = sel_lasso_split(milton, l, &npicked, lminx, lminy, lmaxx, lmaxy);
+        cnt = 0;
+    } else {
+        picked = (i32*)calloc((size_t)(cnt > 0 ? cnt : 1), sizeof(i32));
+    }
     for ( i64 si = 0; si < cnt; ++si ) {
         Stroke* st = get(&l->strokes, si);
         if ( st->num_points <= 0 ) { continue; }
