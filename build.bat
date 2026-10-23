@@ -1,5 +1,8 @@
 @echo off
 
+rem === Always cd into the script's own directory first ===
+pushd %~dp0
+
 setlocal
 
 set "platform=x64"
