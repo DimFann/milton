@@ -87,6 +87,7 @@ void gpu_cook_stroke(Arena* arena, RenderBackend* renderer, Stroke* stroke,
 void gpu_free_strokes(RenderBackend* renderer, CanvasState* canvas, bool content_changed = true);
 void gpu_free_strokes(Stroke* strokes, i64 count, RenderBackend* renderer, bool content_changed = true);
 bool gpu_tile_cache_pending(RenderBackend* renderer);
+bool gpu_canvas_rendering(RenderBackend* renderer);
 void gpu_clear_tile_cache(RenderBackend* renderer);
 
 

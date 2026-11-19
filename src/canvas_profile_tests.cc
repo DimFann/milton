@@ -102,7 +102,7 @@ test_profile_canvas(const char* path)
     const char* tools[] = {"pen", "eraser", "blur", "preserve"};
     const char* modes[] = {"direct", "tiles", "worker"};
     size_t pixel_bytes = (size_t)width * height * 4;
-    u8* actual = (u8*)calloc(pixel_bytes, 1);
+    u8* actual = (u8*)calloc(max(pixel_bytes, (size_t)512 * 512 * 4), 1);
     u8* reference = (u8*)calloc(pixel_bytes, 1);
     if ( !actual || !reference ) { milton_die_gracefully("Cannot allocate profiling pixels."); }
     auto read = [&](u8* pixels) {
@@ -205,6 +205,34 @@ test_profile_canvas(const char* path)
             gpu_render(r, 0, 0, width, height);
             passed = wait(r->canvas_worker->requested_generation);
             gpu_render(r, 0, 0, width, height);
+            int idle_generation = r->canvas_worker->requested_generation;
+            u32 idle_started = SDL_GetTicks();
+            while ( SDL_AtomicGet(&r->canvas_worker->peripheral_completed) != idle_generation
+                    && SDL_GetTicks() - idle_started < 10000 ) { SDL_Delay(1); }
+            passed &= SDL_AtomicGet(&r->canvas_worker->peripheral_completed) == idle_generation;
+            if ( !passed ) { fprintf(stderr, "Idle peripheral coverage did not complete\n"); }
+            gpu_render(r, 0, 0, width, height);
+            int peripheral_count = 0;
+            size_t overview_ink = 0;
+            for ( CanvasRasterPreview& frame : r->canvas_worker->history ) {
+                peripheral_count += frame.peripheral != 0;
+                if ( frame.peripheral != 2 ) { continue; }
+                if ( !r->tiles->fbo ) { glGenFramebuffersEXT(1, &r->tiles->fbo); }
+                glBindFramebufferEXT(GL_FRAMEBUFFER, r->tiles->fbo);
+                glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, frame.texture, 0);
+                glReadPixels(0, 0, 512, 512, GL_RGBA, GL_UNSIGNED_BYTE, actual);
+                for ( size_t i = 0; i < (size_t)512 * 512 * 4; i += 4 ) {
+                    overview_ink += abs((int)actual[i] - (int)(255 * view->background_color.r)) > 4
+                                    || abs((int)actual[i + 1] - (int)(255 * view->background_color.g)) > 4
+                                    || abs((int)actual[i + 2] - (int)(255 * view->background_color.b)) > 4;
+                }
+                glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            }
+            glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
+            glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
+            passed &= peripheral_count == 2;
+            fprintf(stdout, "Idle peripheral coverage: %d cached levels, %zu whole-canvas ink pixels, %.0f ms including idle delay\n",
+                    peripheral_count, overview_ink, (double)(SDL_GetTicks() - idle_started));
             CanvasView base_view = *view;
             SDL_AtomicSet(&r->canvas_worker->hold, 1);
             const char* controls[] = {"pan", "zoom", "rotate"};

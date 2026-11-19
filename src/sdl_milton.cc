@@ -1299,7 +1299,7 @@ milton_main(bool is_fullscreen, char* file_to_open)
         PROFILE_GRAPH_BEGIN(GL);
         milton_update_and_render(milton, &milton_input);
         selection_draw_overlay(milton);
-        gui_loading_indicator(milton);
+        gui_rendering_indicator(milton);
         gui_perf_stats(milton);
         optimize_draw(milton);
         {

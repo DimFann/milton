@@ -20,6 +20,41 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
     auto check = [&](bool condition, const char* message) {
         if ( !condition ) { fprintf(stderr, "Canvas worker FAILED: %s\n", message); passed = false; }
     };
+    auto check_indicator = [&](bool visible) {
+        check(gpu_canvas_rendering(r) == visible, "render activity must reflect queued or active work");
+        ImGuiContext* previous = ImGui::GetCurrentContext();
+        ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO();
+        io.IniFilename = NULL;
+        io.DisplaySize = ImVec2((float)r->width, (float)r->height);
+        io.Fonts->AddFontDefault();
+        io.Fonts->Build();
+        bool menu_visible = milton->gui->menu_visible;
+        for ( int menu = 0; menu < 2; ++menu ) {
+            milton->gui->menu_visible = menu != 0;
+            ImGui::NewFrame();
+            float top = menu ? ImGui::GetFrameHeight() : 0;
+            io.MousePos = ImVec2(io.DisplaySize.x * 0.5f, top + 1);
+            gui_rendering_indicator(milton);
+            ImDrawList* draw = ImGui::GetOverlayDrawList();
+            check((draw->VtxBuffer.Size > 0) == visible, "render bar must disappear when idle");
+            if ( visible ) {
+                float min_y = FLT_MAX, max_y = -FLT_MAX, min_x = FLT_MAX, max_x = -FLT_MAX;
+                for ( const ImDrawVert& vertex : draw->VtxBuffer ) {
+                    min_y = min(min_y, vertex.pos.y); max_y = max(max_y, vertex.pos.y);
+                    min_x = min(min_x, vertex.pos.x); max_x = max(max_x, vertex.pos.x);
+                }
+                check(min_y == top && max_y - min_y <= max(2.0f, 3 * milton->gui->scale)
+                      && min_x == 0 && max_x == io.DisplaySize.x,
+                      "render bar must span the canvas top and remain only a few pixels thick");
+            }
+            ImGui::Render();
+            check(!io.WantCaptureMouse, "render bar must not intercept canvas input");
+        }
+        milton->gui->menu_visible = menu_visible;
+        ImGui::DestroyContext();
+        ImGui::SetCurrentContext(previous);
+    };
     auto clip = [&](ClipFlags flags) {
         gpu_clip_strokes_and_update(&milton->root_arena, r, view, view->scale, milton->canvas->root_layer,
                                     &milton->working_stroke, 0, 0, r->width, r->height, flags);
@@ -89,8 +124,7 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
         glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
         glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
     };
-    auto compare = [&](bool preview, const char* label) {
-        read(actual);
+    auto render_reference = [&](bool preview) {
         if ( preview ) {
             clip(ClipFlags_NAVIGATION_PREVIEW);
             gpu_render_canvas(r, 0, 0, r->width, r->height, 1, true);
@@ -107,6 +141,10 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
             r->tiles = presentation;
             r->canvas_worker = worker;
         }
+    };
+    auto compare = [&](bool preview, const char* label) {
+        read(actual);
+        render_reference(preview);
         int worst = 0;
         for ( size_t i = 0; i < (size_t)r->width * r->height * 4; ++i ) {
             worst = max(worst, abs((int)actual[i] - (int)expected[i]));
@@ -121,12 +159,14 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
     check(started, "shared-context renderer must start");
     if ( started ) {
         CanvasWorker* worker = r->canvas_worker;
+        SDL_AtomicSet(&worker->disable_peripheral, 1);
         r->disable_display_transitions = true;
         r->flags = RenderBackendFlags_NONE;
         SDL_AtomicSet(&worker->hold, 1);
         frame();
         int first = worker->requested_generation;
         check(wait(&worker->entered, first), "worker must receive its first snapshot");
+        check_indicator(true);
         check(SDL_AtomicGet(&worker->render_thread) != (int)SDL_ThreadID(),
               "reconstruction must execute on another thread");
         Stroke* source = get(&milton->canvas->root_layer->strokes, 0);
@@ -235,20 +275,25 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
         check(wait(&worker->completed, latest), "latest zoom/resize request must complete");
         r->disable_display_transitions = false;
         frame();
-        check(r->tiles->display_fading && !r->tiles->display_preview,
-              "a completed worker frame must use the existing rendered-quality fade");
+        check(!r->tiles->display_fading && !r->tiles->display_preview,
+              "a completed worker frame must display without a rendered-quality fade");
+        check(wait(&worker->rendering, 0), "worker must become idle after full reconstruction");
+        i64 saved_pending = r->cook_pending;
+        r->cook_pending = 1;
+        check_indicator(false);
+        r->cook_pending = saved_pending;
         r->flags = RenderBackendFlags_BRUSH_RESIZING;
         frame();
-        check(r->tiles->display_paused, "resizing must still pause worker-result fades");
+        check(r->tiles->display_paused, "resizing must still hold worker-result presentation");
         r->flags = RenderBackendFlags_NAVIGATION_PREVIEW | RenderBackendFlags_CANVAS_TRANSFORMING;
         frame();
         check(!r->tiles->display_paused && !r->tiles->display_fading && r->tiles->display_preview,
-              "navigation must preempt even a paused worker-result fade");
+              "navigation must preempt a held worker result");
         r->disable_display_transitions = true;
         r->flags = RenderBackendFlags_NONE;
         frame();
         latest = worker->requested_generation;
-        check(wait(&worker->completed, latest), "refinement must resume after interrupting a worker-result fade");
+        check(wait(&worker->completed, latest), "refinement must resume after interrupting a held worker result");
         frame();
         check(r->tiles->display_ready && worker->front_generation == latest
               && r->tiles->entries.count == 0 && r->tile_builds == 0 && r->tile_composites == 0,
@@ -330,6 +375,26 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
         check(worker->preview && r->tiles->navigation_valid && r->clip_array.count == 0,
               "exposed navigation regions must use asynchronous raster coverage, not foreground stroke replay");
         compare_view_texture(worker->preview, worker->preview_view, "newly exposed coverage");
+        CanvasView preview_camera = *view;
+        *view = worker->preview_view;
+        glBindFramebufferEXT(GL_FRAMEBUFFER, r->tiles->fbo);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, worker->preview, 0);
+        glReadPixels(0, 0, view->screen_size.w, view->screen_size.h, GL_RGBA, GL_UNSIGNED_BYTE, actual);
+        gpu_resize(r, view);
+        gpu_update_canvas(r, milton->canvas, view);
+        glViewport(0, 0, r->width, r->height);
+        clip(ClipFlags_NAVIGATION_PREVIEW);
+        gpu_render_canvas(r, 0, 0, r->width, r->height, 1, true);
+        read(expected);
+        int preview_worst = 0;
+        for ( size_t i = 0; i < (size_t)r->width * r->height * 4; ++i ) {
+            preview_worst = max(preview_worst, abs((int)actual[i] - (int)expected[i]));
+        }
+        check(preview_worst <= 2, "reduced-resolution worker pixels must match their published view, not the previous GL viewport");
+        *view = preview_camera;
+        gpu_resize(r, view);
+        gpu_update_canvas(r, milton->canvas, view);
+        frame();
         float navigation_alpha = milton->canvas->root_layer->alpha;
         milton->canvas->root_layer->alpha *= 0.5f;
         frame();
@@ -475,9 +540,102 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
         gpu_update_background(r, view->background_color);
         gpu_update_canvas(r, milton->canvas, view);
         r->flags = RenderBackendFlags_NONE;
+        SDL_AtomicSet(&worker->disable_peripheral, 0);
         frame();
         latest = worker->requested_generation;
         check(wait(&worker->completed, latest), "full quality must resume after changing the background");
+        frame();
+
+        gpu_set_navigation_cache_budget(r, 8 * frame_bytes);
+        check(wait(&worker->peripheral_completed, latest), "idle worker must generate near and whole-canvas coverage");
+        frame();
+        int peripheral_count = 0;
+        CanvasRasterPreview whole = {};
+        for ( CanvasRasterPreview& raster : worker->history ) {
+            peripheral_count += raster.peripheral != 0;
+            if ( raster.peripheral == 2 ) { whole = raster; }
+        }
+        check(peripheral_count == 2 && whole.texture && worker->history_bytes <= r->navigation_cache_budget,
+              "both peripheral levels must stay within the configured cache budget");
+        for ( i64 i = worker->history.count; i-- > 0; ) {
+            if ( worker->history[i].peripheral != 2 ) { canvas_raster_remove(worker, i); }
+        }
+        SDL_AtomicSet(&worker->hold, 1);
+        SDL_AtomicSet(&worker->disable_peripheral, 1);
+        *view = whole.view;
+        gpu_resize(r, view);
+        gpu_update_canvas(r, milton->canvas, view);
+        r->tiles->navigation_valid = r->tiles->capture_ready = false;
+        r->flags = RenderBackendFlags_NAVIGATION_PREVIEW | RenderBackendFlags_CANVAS_TRANSFORMING;
+        frame();
+        compare_view_texture(whole.texture, whole.view, "idle whole-canvas coverage while worker blocked");
+        int ink_pixels = 0;
+        for ( size_t i = 0; i < (size_t)r->width * r->height * 4; i += 4 ) {
+            ink_pixels += abs((int)actual[i] - (int)(255 * view->background_color.r)) > 4
+                          || abs((int)actual[i + 1] - (int)(255 * view->background_color.g)) > 4
+                          || abs((int)actual[i + 2] - (int)(255 * view->background_color.b)) > 4;
+        }
+        check(ink_pixels > 0, "idle overview must contain actual artwork, not just background");
+        SDL_AtomicSet(&worker->hold, 0);
+        *view = cached_view;
+        view->scale *= 64;
+        gpu_resize(r, view);
+        gpu_update_canvas(r, milton->canvas, view);
+        SDL_AtomicSet(&worker->single_tile_batches, 1);
+        SDL_AtomicSet(&worker->hold_after_partial, 1);
+        r->flags = RenderBackendFlags_NONE;
+        r->disable_display_transitions = false;
+        frame();
+        latest = worker->requested_generation;
+        check(wait(&worker->partial_completed, latest), "native tile coverage must publish before the whole view finishes");
+        frame();
+        check(worker->refinement && !r->tiles->display_ready && !r->tiles->display_fading
+              && SDL_AtomicGet(&worker->completed) != latest && r->clip_array.count == 0,
+              "completed tiles must display immediately over raster previews without foreground replay or a whole-view fade");
+        check(gpu_canvas_rendering(r), "render activity must remain visible through partial tile completion");
+        render_reference(false);
+        glBindFramebufferEXT(GL_FRAMEBUFFER, r->tiles->fbo);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, worker->refinement, 0);
+        glReadPixels(0, 0, r->width, r->height, GL_RGBA, GL_UNSIGNED_BYTE, actual);
+        int opaque = 0, transparent = 0, partial_worst = 0;
+        for ( size_t i = 0; i < (size_t)r->width * r->height * 4; i += 4 ) {
+            transparent += actual[i + 3] == 0;
+            if ( actual[i + 3] == 255 ) {
+                ++opaque;
+                for ( int channel = 0; channel < 4; ++channel ) {
+                    partial_worst = max(partial_worst, abs((int)actual[i + channel] - (int)expected[i + channel]));
+                }
+            }
+        }
+        check(opaque > 0 && transparent > 0 && partial_worst <= 2,
+              "partial native frames must match full-quality pixels and leave unfinished regions transparent");
+        fprintf(stdout, "Progressive tiles: %d completed pixels, %d preview pixels, %d LSB\n",
+                opaque, transparent, partial_worst);
+        CanvasView partial_view = *view;
+        view->pan_center.x += view->scale * view->screen_size.w;
+        gpu_update_canvas(r, milton->canvas, view);
+        r->flags = RenderBackendFlags_NAVIGATION_PREVIEW | RenderBackendFlags_CANVAS_TRANSFORMING;
+        frame();
+        check(!worker->refinement && !r->tiles->display_fading && r->clip_array.count == 0,
+              "new navigation must immediately discard old-view partial coverage without waiting for the worker");
+        *view = partial_view;
+        gpu_update_canvas(r, milton->canvas, view);
+        r->flags = RenderBackendFlags_NONE;
+        SDL_AtomicSet(&worker->single_tile_batches, 0);
+        frame();
+        latest = worker->requested_generation;
+        SDL_AtomicSet(&worker->hold, 0);
+        check(wait(&worker->completed, latest), "progressive native reconstruction must finish");
+        frame();
+        check(!worker->refinement && !r->tiles->display_fading,
+              "accurate completion must retire partial coverage without adding a fade");
+        r->disable_display_transitions = true;
+        compare(false, "completed progressive tiles");
+        *view = cached_view;
+        gpu_update_canvas(r, milton->canvas, view);
+        frame();
+        latest = worker->requested_generation;
+        check(wait(&worker->completed, latest), "drawing view must restore after progressive tests");
         frame();
 
         Stroke* working = &milton->working_stroke;
@@ -508,6 +666,7 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
             check(r->tiles->display_ready && !r->tiles->display_preview
                   && memcmp(actual, expected, (size_t)r->width * r->height * 4) == 0,
                   "starting a stroke must retain rendered paint while the worker is blocked");
+            check(worker->history.count == 0, "new paint must invalidate cached peripheral artwork");
             working->pressures[1] = 0.6f;
             frame();
             latest = worker->requested_generation;
@@ -570,6 +729,16 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
         frame();
         compare(false, "stroke committed between frames");
         SDL_AtomicSet(&worker->reference_only, 1);
+        SDL_AtomicSet(&worker->disable_peripheral, 0);
+        view->angle += 0.0001f;
+        gpu_update_canvas(r, milton->canvas, view);
+        frame();
+        latest = worker->requested_generation;
+        check(wait(&worker->completed, latest), "reference replay must warm before idle coverage");
+        frame();
+        check(wait(&worker->peripheral_completed, latest), "idle coverage must also run after reference replay");
+        frame();
+        SDL_AtomicSet(&worker->disable_peripheral, 1);
         for ( int tool = 0; tool < array_count(drawing_flags); ++tool ) {
             for ( int update = 0; update < 2; ++update ) {
                 working->num_points = 2;
@@ -582,6 +751,9 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
                 frame();
                 latest = worker->requested_generation;
                 check(wait(&worker->completed, latest), "reference-path drawing must complete");
+                if ( tool == 0 && update == 0 ) {
+                    check(worker->profile.replay_hits == 1, "idle peripheral rendering must preserve the main replay prefix");
+                }
                 if ( update != 0 ) {
                     fprintf(stdout, "Canvas worker reference %s: %d replay hits, %d dependent blur passes\n",
                             drawing_labels[tool], worker->profile.replay_hits, worker->profile.blur_runs);

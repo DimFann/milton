@@ -1,4 +1,4 @@
-// Included by renderer.cc. Only complete, immutable textures cross GL contexts.
+// Included by renderer.cc. Only GPU-complete, immutable textures cross GL contexts.
 
 struct CanvasSnapshotStroke
 {
@@ -39,6 +39,14 @@ struct CanvasRasterPreview
     CanvasView view;
     u64 touched;
     bool preview, selected;
+    u8 peripheral;
+};
+
+struct CanvasPeripheralFrame
+{
+    GLuint texture;
+    CanvasView view;
+    u64 scene;
 };
 
 #if defined(TESTING)
@@ -62,7 +70,7 @@ struct CanvasWorker
     SDL_Thread* thread;
     SDL_mutex* mutex;
     SDL_cond* condition;
-    SDL_atomic_t generation, minimum_generation, stop, status, result_ready;
+    SDL_atomic_t generation, minimum_generation, stop, status, result_ready, rendering;
     Uint32 wake_event;
     CanvasSnapshot* pending;
     CanvasView pending_view;
@@ -73,7 +81,9 @@ struct CanvasWorker
     int result_generation;
     CanvasView result_view;
     bool result_preview;
+    bool result_partial;
     u64 result_scene;
+    CanvasPeripheralFrame peripheral[2];
     CanvasSnapshot* scene;           // Main-thread-owned reference and request state.
     CanvasView requested_view;
     int requested_generation;
@@ -82,6 +92,9 @@ struct CanvasWorker
     GLuint front;
     int front_generation;
     GLuint preview;
+    GLuint refinement;
+    CanvasView refinement_view;
+    int refinement_generation;
     CanvasView preview_view;
     CanvasView front_view;
     u64 scene_revision, front_scene, preview_scene;
@@ -91,6 +104,8 @@ struct CanvasWorker
     CanvasView initial_view;
 #if defined(TESTING)
     SDL_atomic_t hold, entered, completed, render_thread, hold_after_completion, reference_only;
+    SDL_atomic_t single_tile_batches, hold_after_partial, partial_completed, peripheral_completed;
+    SDL_atomic_t disable_peripheral;
     CanvasWorkerProfile profile;
 #endif
 };
@@ -119,14 +134,16 @@ canvas_raster_trim(CanvasWorker* worker, u64 budget)
     while ( worker->history_bytes > budget ) {
         i64 oldest = 0;
         for ( i64 i = 1; i < worker->history.count; ++i ) {
-            if ( worker->history[i].touched < worker->history[oldest].touched ) { oldest = i; }
+            if ( (!worker->history[i].peripheral && worker->history[oldest].peripheral)
+                 || (!!worker->history[i].peripheral == !!worker->history[oldest].peripheral
+                     && worker->history[i].touched < worker->history[oldest].touched) ) { oldest = i; }
         }
         canvas_raster_remove(worker, oldest);
     }
 }
 
 static void
-canvas_raster_retain(RenderBackend* r, GLuint* texture, const CanvasView& view, bool preview, u64 scene)
+canvas_raster_retain(RenderBackend* r, GLuint* texture, const CanvasView& view, bool preview, u64 scene, u8 peripheral = 0)
 {
     CanvasWorker* worker = r->canvas_worker;
     u64 bytes = canvas_raster_bytes(view);
@@ -135,7 +152,8 @@ canvas_raster_retain(RenderBackend* r, GLuint* texture, const CanvasView& view, 
         glDeleteTextures(1, texture);
     } else {
         for ( i64 i = worker->history.count; i-- > 0; ) {
-            if ( memcmp(&worker->history[i].view, &view, sizeof(view)) == 0 ) {
+            if ( (peripheral && worker->history[i].peripheral == peripheral)
+                 || memcmp(&worker->history[i].view, &view, sizeof(view)) == 0 ) {
                 if ( preview && !worker->history[i].preview ) {
                     glDeleteTextures(1, texture); *texture = 0;
                     return;
@@ -144,7 +162,7 @@ canvas_raster_retain(RenderBackend* r, GLuint* texture, const CanvasView& view, 
             }
         }
         canvas_raster_trim(worker, r->navigation_cache_budget - bytes);
-        CanvasRasterPreview frame = {*texture, view, ++worker->history_clock, preview, false};
+        CanvasRasterPreview frame = {*texture, view, ++worker->history_clock, preview, false, peripheral};
         push(&worker->history, frame);
         worker->history_bytes += bytes;
     }
@@ -220,16 +238,25 @@ canvas_raster_present(RenderBackend* r)
         frame.selected = !frame.preview && canvas_raster_cover(r, frame.view, columns, &remaining);
     }
     bool preview = worker->preview && canvas_raster_cover(r, worker->preview_view, columns, &remaining);
-    for ( i64 i = worker->history.count; i-- > 0; ) {
-        CanvasRasterPreview& frame = worker->history[i];
-        if ( frame.preview ) { frame.selected = canvas_raster_cover(r, frame.view, columns, &remaining); }
-        if ( frame.selected ) { frame.touched = worker->history_clock; }
-    }
-    for ( int quality = 0; quality < 2; ++quality ) {
-        for ( CanvasRasterPreview& frame : worker->history ) {
-            if ( frame.selected && frame.preview == (quality == 0) ) { gpu_draw_view_texture(r, frame.texture, frame.view); }
+    for ( int kind = 0; kind <= 2; ++kind ) {
+        for ( i64 i = worker->history.count; i-- > 0; ) {
+            CanvasRasterPreview& frame = worker->history[i];
+            if ( frame.preview && frame.peripheral == kind ) {
+                frame.selected = canvas_raster_cover(r, frame.view, columns, &remaining);
+            }
         }
-        if ( quality == 0 && preview ) { gpu_draw_view_texture(r, worker->preview, worker->preview_view); }
+    }
+    for ( int kind = 2; kind >= 0; --kind ) {
+        for ( CanvasRasterPreview& frame : worker->history ) {
+            if ( frame.selected && frame.preview && frame.peripheral == kind ) {
+                gpu_draw_view_texture(r, frame.texture, frame.view);
+            }
+        }
+    }
+    if ( preview ) { gpu_draw_view_texture(r, worker->preview, worker->preview_view); }
+    for ( CanvasRasterPreview& frame : worker->history ) {
+        if ( frame.selected && !frame.preview ) { gpu_draw_view_texture(r, frame.texture, frame.view); }
+        if ( frame.selected ) { frame.touched = worker->history_clock; }
     }
     if ( cache->navigation_valid ) { gpu_draw_view_texture(r, cache->navigation_texture, cache->navigation_view); }
 }
@@ -548,6 +575,20 @@ canvas_worker_release_renderer(RenderBackend* r)
 }
 
 static void
+canvas_worker_release_layers(RenderBackend* r, DArray<CanvasWorkerLayer*>* layers, Stroke* working)
+{
+    for ( CanvasWorkerLayer* layer : *layers ) {
+        for ( i64 i = 0; i < layer->layer.strokes.count; ++i ) {
+            gpu_free_strokes(get(&layer->layer.strokes, i), 1, r);
+        }
+        release(&layer->previous); release(&layer->effects);
+        free(layer);
+    }
+    release(layers);
+    gpu_free_strokes(working, 1, r);
+}
+
+static void
 canvas_worker_wake(CanvasWorker* worker)
 {
     SDL_Event event = {};
@@ -555,6 +596,89 @@ canvas_worker_wake(CanvasWorker* worker)
     if ( SDL_PushEvent(&event) != 1 ) {
         milton_log("Cannot queue background canvas completion: %s\n", SDL_GetError());
     }
+}
+
+static CanvasView
+canvas_peripheral_view(CanvasView view, CanvasSnapshot* scene, bool whole_canvas)
+{
+    CanvasView result = view;
+    result.screen_size = {512, 512};
+    result.zoom_center = {256, 256};
+    result.pan_center = raster_to_canvas(&view, {view.screen_size.w / 2, view.screen_size.h / 2});
+    double span = 4.0 * max(view.screen_size.w, view.screen_size.h) * view.scale;
+    result.scale = (i64)min((double)INT_MAX, max(1.0, ceil(span / 508)));
+    if ( whole_canvas ) {
+        Rect bounds = raster_to_canvas_bounding_rect(&result, 0, 0, 512, 512, result.scale);
+        for ( CanvasSnapshotLayer& layer : scene->layers ) {
+            if ( !(layer.flags & LayerFlags_VISIBLE) || layer.alpha <= 0 ) { continue; }
+            for ( CanvasSnapshotStroke* stroke : layer.strokes ) {
+                if ( stroke->key.flags & (StrokeFlag_ERASER | StrokeFlag_BLUR) ) { continue; }
+                bounds.left = min(bounds.left, stroke->key.bounds.left);
+                bounds.right = max(bounds.right, stroke->key.bounds.right);
+                bounds.top = min(bounds.top, stroke->key.bounds.top);
+                bounds.bottom = max(bounds.bottom, stroke->key.bounds.bottom);
+            }
+        }
+        result.angle = 0; result.flipped = false;
+        result.pan_center = {bounds.left / 2 + bounds.right / 2, bounds.top / 2 + bounds.bottom / 2};
+        span = max((double)bounds.right - bounds.left, (double)bounds.bottom - bounds.top);
+        result.scale = (i64)min((double)INT_MAX, max(1.0, ceil(span / 508)));
+    }
+    return result;
+}
+
+static bool
+canvas_worker_idle(CanvasWorker* worker, int generation)
+{
+    SDL_LockMutex(worker->mutex);
+    bool idle = !worker->pending && !SDL_AtomicGet(&worker->stop) && SDL_AtomicGet(&worker->status) > 0
+                && generation >= SDL_AtomicGet(&worker->minimum_generation);
+#if defined(TESTING)
+    idle &= SDL_AtomicGet(&worker->hold) == 0;
+    idle &= SDL_AtomicGet(&worker->disable_peripheral) == 0;
+#endif
+    SDL_UnlockMutex(worker->mutex);
+    return idle;
+}
+
+static bool
+canvas_worker_publish_peripheral(CanvasWorker* worker, RenderBackend* r, Arena* arena, CanvasState* canvas,
+                                 CanvasView view, int generation, u64 scene, int slot)
+{
+    if ( r->vao ) { glBindVertexArray(r->vao); }
+    gpu_update_canvas(r, canvas, &view);
+    gpu_update_background(r, view.background_color);
+    glViewport(0, 0, r->width, r->height);
+    Stroke working = {};
+    gpu_clip_strokes_and_update(arena, r, &view, view.scale, canvas->root_layer, &working,
+                                0, 0, r->width, r->height, ClipFlags_NAVIGATION_PREVIEW);
+    gpu_render_canvas(r, 0, 0, r->width, r->height, 1, true);
+    GLuint texture = gl::new_color_texture(r->width, r->height);
+    glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
+    tile_copy_display_texture(texture, r->width, r->height);
+    glFinish();
+    GLenum error = glGetError();
+    if ( error != GL_NO_ERROR ) {
+        milton_log("Cannot render peripheral canvas preview: OpenGL error 0x%x\n", error);
+        glDeleteTextures(1, &texture);
+        return false;
+    }
+    SDL_LockMutex(worker->mutex);
+    if ( !worker->pending && !SDL_AtomicGet(&worker->stop)
+         && generation >= SDL_AtomicGet(&worker->minimum_generation) ) {
+        swap(texture, worker->peripheral[slot].texture);
+        worker->peripheral[slot].view = view;
+        worker->peripheral[slot].scene = scene;
+        SDL_AtomicSet(&worker->result_ready, 1);
+#if defined(TESTING)
+        if ( slot == 1 ) { SDL_AtomicSet(&worker->peripheral_completed, generation); }
+#endif
+    }
+    SDL_UnlockMutex(worker->mutex);
+    if ( texture ) { glDeleteTextures(1, &texture); }
+    canvas_worker_wake(worker);
+    return true;
 }
 
 static int
@@ -587,6 +711,11 @@ canvas_worker_thread(void* data)
     SDL_CondSignal(worker->condition);
     SDL_UnlockMutex(worker->mutex);
     DArray<CanvasWorkerLayer*> layers = {};
+    DArray<CanvasWorkerLayer*> peripheral_layers = {};
+    RenderBackend* peripheral_renderer = NULL;
+    CanvasSnapshot* peripheral_scene = NULL;
+    Stroke peripheral_working = {};
+    u64 peripheral_revision = 0;
     CanvasSnapshot* active = NULL;
     CanvasView installed_view = {};
     bool view_installed = false;
@@ -603,6 +732,7 @@ canvas_worker_thread(void* data)
         int generation = worker->pending_generation;
         bool preview = worker->pending_preview;
         u64 scene_revision = worker->pending_scene;
+        SDL_AtomicSet(&worker->rendering, scene != NULL);
         worker->pending = NULL;
         SDL_UnlockMutex(worker->mutex);
         if ( SDL_AtomicGet(&worker->stop) ) { canvas_snapshot_release(scene); break; }
@@ -611,7 +741,11 @@ canvas_worker_thread(void* data)
         SDL_AtomicSet(&worker->render_thread, (int)SDL_ThreadID());
         while ( SDL_AtomicGet(&worker->hold) && !SDL_AtomicGet(&worker->stop) ) { SDL_Delay(1); }
 #endif
-        if ( generation < SDL_AtomicGet(&worker->minimum_generation) ) { canvas_snapshot_release(scene); continue; }
+        if ( generation < SDL_AtomicGet(&worker->minimum_generation) ) {
+            SDL_AtomicSet(&worker->rendering, 0);
+            canvas_snapshot_release(scene);
+            continue;
+        }
         if ( preview && view.scale <= INT_MAX / 2 ) {
             // Guard texels cover odd viewport/center rounding when reprojected.
             view.screen_size = {max(1, (view.screen_size.w + 1) / 2) + 2,
@@ -636,12 +770,19 @@ canvas_worker_thread(void* data)
             view_installed = true;
         }
         r->request_generation = generation;
+        if ( r->vao ) { glBindVertexArray(r->vao); }
+        glViewport(0, 0, r->width, r->height);
 #if defined(TESTING)
         profile.install_ms = canvas_profile_elapsed(install_started);
 #endif
         bool failed = false;
+        u64 published_revision = 0;
         while ( !SDL_AtomicGet(&worker->stop) && generation >= SDL_AtomicGet(&worker->minimum_generation) ) {
 #if defined(TESTING)
+            while ( SDL_AtomicGet(&worker->hold) && !SDL_AtomicGet(&worker->stop)
+                    && generation >= SDL_AtomicGet(&worker->minimum_generation) ) { SDL_Delay(1); }
+            if ( SDL_AtomicGet(&worker->stop) || generation < SDL_AtomicGet(&worker->minimum_generation) ) { break; }
+            r->tile_job_limit = SDL_AtomicGet(&worker->single_tile_batches);
             u64 render_started = SDL_GetPerformanceCounter();
             r->replay_cache_hit = false;
             r->blur_filter_runs = 0;
@@ -674,7 +815,8 @@ canvas_worker_thread(void* data)
             }
             if ( generation < SDL_AtomicGet(&worker->minimum_generation) ) { break; }
             bool complete = !tiled || !r->tiles->pending;
-            if ( !complete && !r->tiles->display_ready ) { continue; }
+            if ( !complete && r->tiles->display_revision == published_revision ) { continue; }
+            if ( tiled ) { published_revision = r->tiles->display_revision; }
 #if defined(TESTING)
             u64 publish_started = SDL_GetPerformanceCounter();
 #endif
@@ -698,10 +840,15 @@ canvas_worker_thread(void* data)
                 worker->result_generation = generation;
                 worker->result_view = view;
                 worker->result_preview = preview;
+                worker->result_partial = !complete;
                 worker->result_scene = scene_revision;
                 SDL_AtomicSet(&worker->result_ready, 1);
 #if defined(TESTING)
                 worker->profile = profile;
+                if ( !complete ) {
+                    SDL_AtomicSet(&worker->partial_completed, generation);
+                    if ( SDL_AtomicCAS(&worker->hold_after_partial, 1, 0) ) { SDL_AtomicSet(&worker->hold, 1); }
+                }
                 if ( complete ) {
                     SDL_AtomicSet(&worker->completed, generation);
                     if ( SDL_AtomicCAS(&worker->hold_after_completion, 1, 0) ) {
@@ -715,17 +862,53 @@ canvas_worker_thread(void* data)
             canvas_worker_wake(worker);
             if ( complete ) { break; }
         }
+        SDL_AtomicSet(&worker->rendering, 0);
         if ( failed ) { SDL_AtomicSet(&worker->status, -1); canvas_worker_wake(worker); break; }
-    }
-    for ( CanvasWorkerLayer* layer : layers ) {
-        for ( i64 i = 0; i < layer->layer.strokes.count; ++i ) {
-            gpu_free_strokes(get(&layer->layer.strokes, i), 1, r);
+        if ( !preview && !scene->working && canvas_worker_idle(worker, generation) ) {
+            SDL_LockMutex(worker->mutex);
+            if ( !worker->pending && !SDL_AtomicGet(&worker->stop) ) {
+                if ( SDL_CondWaitTimeout(worker->condition, worker->mutex, 200) < 0 ) {
+                    milton_log("Cannot wait for idle canvas coverage: %s\n", SDL_GetError());
+                    SDL_AtomicSet(&worker->status, -1);
+                }
+            }
+            SDL_UnlockMutex(worker->mutex);
+            for ( int slot = 0; slot < 2 && canvas_worker_idle(worker, generation); ++slot ) {
+                SDL_AtomicSet(&worker->rendering, 1);
+                CanvasView peripheral_view = canvas_peripheral_view(view, scene, slot == 1);
+                if ( !peripheral_renderer ) {
+                    // A separate renderer preserves the primary replay prefix while changing overview views.
+                    peripheral_renderer = gpu_allocate_render_backend(&arena);
+                    peripheral_renderer->background_context = true;
+                    if ( !gpu_init(peripheral_renderer, &peripheral_view, NULL) ) {
+                        milton_log("Cannot initialize peripheral canvas rendering.\n");
+                        SDL_AtomicSet(&worker->status, -1);
+                        break;
+                    }
+                }
+                CanvasState peripheral_canvas = {};
+                peripheral_canvas.root_layer = canvas_worker_install(peripheral_renderer, &arena, &peripheral_layers,
+                    scene, &peripheral_working, peripheral_scene ? peripheral_scene->working : NULL, &peripheral_revision);
+                SDL_AtomicIncRef(&scene->refs);
+                canvas_snapshot_release(peripheral_scene);
+                peripheral_scene = scene;
+                if ( !canvas_worker_publish_peripheral(worker, peripheral_renderer, &arena, &peripheral_canvas,
+                                                        peripheral_view, generation, scene_revision, slot) ) {
+                    SDL_AtomicSet(&worker->status, -1);
+                    break;
+                }
+            }
+            SDL_AtomicSet(&worker->rendering, 0);
+            if ( SDL_AtomicGet(&worker->status) < 0 ) { canvas_worker_wake(worker); break; }
         }
-        release(&layer->previous); release(&layer->effects);
-        free(layer);
     }
-    release(&layers);
-    gpu_free_strokes(&working, 1, r);
+    SDL_AtomicSet(&worker->rendering, 0);
+    canvas_worker_release_layers(r, &layers, &working);
+    if ( peripheral_renderer ) {
+        canvas_worker_release_layers(peripheral_renderer, &peripheral_layers, &peripheral_working);
+        canvas_worker_release_renderer(peripheral_renderer);
+    }
+    canvas_snapshot_release(peripheral_scene);
     canvas_snapshot_release(active);
     canvas_worker_release_renderer(r);
     arena_free(&arena);
@@ -749,7 +932,8 @@ gpu_stop_canvas_worker(RenderBackend* r)
     if ( worker->thread ) { SDL_WaitThread(worker->thread, NULL); }
     canvas_snapshot_release(worker->pending);
     canvas_snapshot_release(worker->scene);
-    GLuint textures[] = {worker->result, worker->front, worker->preview};
+    GLuint textures[] = {worker->result, worker->front, worker->preview, worker->refinement,
+                         worker->peripheral[0].texture, worker->peripheral[1].texture};
     glDeleteTextures(array_count(textures), textures);
     canvas_raster_trim(worker, 0);
     release(&worker->history);
@@ -815,6 +999,19 @@ gpu_start_canvas_worker(RenderBackend* r, SDL_Window* window)
     return true;
 }
 
+bool
+gpu_canvas_rendering(RenderBackend* r)
+{
+    if ( r->canvas_worker ) {
+        CanvasWorker* worker = r->canvas_worker;
+        SDL_LockMutex(worker->mutex);
+        bool rendering = worker->pending != NULL || SDL_AtomicGet(&worker->rendering);
+        SDL_UnlockMutex(worker->mutex);
+        return rendering;
+    }
+    return r->cook_pending > 0 || (r->tiles && r->tiles->pending);
+}
+
 static bool
 canvas_worker_render(RenderBackend* r)
 {
@@ -842,10 +1039,11 @@ canvas_worker_render(RenderBackend* r)
     bool camera_preview = navigating && !scene_control
                           && ((r->flags & RenderBackendFlags_CANVAS_TRANSFORMING)
                               || cache->navigation_valid || (worker->requested && worker->requested_preview));
+    bool changed = false;
     if ( navigating && !camera_preview ) {
         canvas_worker_cancel(worker);
     } else {
-        bool changed = !canvas_snapshot_matches(worker->scene, r);
+        changed = !canvas_snapshot_matches(worker->scene, r);
         bool continuing = false;
         if ( changed ) {
             ++worker->scene_revision;
@@ -886,18 +1084,36 @@ canvas_worker_render(RenderBackend* r)
             canvas_snapshot_release(obsolete);
         }
     }
+    if ( worker->refinement && worker->refinement_generation < SDL_AtomicGet(&worker->minimum_generation) ) {
+        glDeleteTextures(1, &worker->refinement); worker->refinement = 0;
+    }
+    if ( !navigating && !changed && !scene_control
+         && (!worker->front || worker->front_generation < SDL_AtomicGet(&worker->minimum_generation)) ) {
+        gpu_capture_navigation(r);
+    }
     SDL_LockMutex(worker->mutex);
     GLuint result = worker->result;
     int generation = worker->result_generation;
     CanvasView result_view = worker->result_view;
     bool result_preview = worker->result_preview;
+    bool result_partial = worker->result_partial;
     u64 result_scene = worker->result_scene;
+    CanvasPeripheralFrame peripheral[2] = {worker->peripheral[0], worker->peripheral[1]};
+    worker->peripheral[0] = {}; worker->peripheral[1] = {};
     worker->result = 0;
     SDL_AtomicSet(&worker->result_ready, 0);
     SDL_UnlockMutex(worker->mutex);
+    for ( int slot = 0; slot < 2; ++slot ) {
+        canvas_raster_retain(r, &peripheral[slot].texture, peripheral[slot].view, true, peripheral[slot].scene, (u8)(slot + 1));
+    }
     if ( result ) {
         if ( worker->requested && generation >= SDL_AtomicGet(&worker->minimum_generation) ) {
-            if ( result_preview ) {
+            if ( result_partial ) {
+                if ( worker->refinement ) { glDeleteTextures(1, &worker->refinement); }
+                worker->refinement = result;
+                worker->refinement_view = result_view;
+                worker->refinement_generation = generation;
+            } else if ( result_preview ) {
                 canvas_raster_retain(r, &worker->preview, worker->preview_view, true, worker->preview_scene);
                 worker->preview = result;
                 worker->preview_view = result_view;
@@ -914,6 +1130,7 @@ canvas_worker_render(RenderBackend* r)
                  && worker->front_generation >= SDL_AtomicGet(&worker->minimum_generation);
     cache->capture_ready = ready;
     if ( ready ) {
+        if ( worker->refinement ) { glDeleteTextures(1, &worker->refinement); worker->refinement = 0; }
         cache->navigation_valid = false;
         canvas_raster_retain(r, &worker->preview, worker->preview_view, true, worker->preview_scene);
         glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
@@ -922,7 +1139,7 @@ canvas_worker_render(RenderBackend* r)
         glBindTexture(GL_TEXTURE_2D, worker->front);
         glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST);
         gpu_fill_with_texture(r);
-    } else if ( camera_preview || cache->navigation_valid ) {
+    } else if ( camera_preview || cache->navigation_valid || worker->refinement || worker->history.count ) {
         glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
         glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
         glViewport(0, 0, r->width, r->height);
@@ -931,13 +1148,20 @@ canvas_worker_render(RenderBackend* r)
         glClearColor(r->background_color.r, r->background_color.g, r->background_color.b, 1);
         glClear(GL_COLOR_BUFFER_BIT);
         canvas_raster_present(r);
+        if ( worker->refinement ) {
+            glEnable(GL_BLEND);
+            glBlendEquation(GL_FUNC_ADD);
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            gpu_draw_view_texture(r, worker->refinement, worker->refinement_view);
+            glDisable(GL_BLEND);
+        }
     } else {
         gpu_set_cook_budget(r, 0.002f);
         gpu_clip_strokes_and_update(r->tile_arena, r, &r->tile_view, r->tile_view.scale, r->tile_root,
                                     r->tile_working, 0, 0, r->width, r->height, ClipFlags_NAVIGATION_PREVIEW);
         gpu_set_cook_budget(r, 0);
         gpu_render_canvas(r, 0, 0, r->width, r->height, 1, true);
-        cache->capture_ready = true;
+        cache->capture_ready = r->cook_pending == 0;
     }
     cache->display_ready = ready;
     cache->pending = !ready;

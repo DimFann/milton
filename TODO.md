@@ -26,9 +26,9 @@ there is no canvas-format change or permanent flattening.
   Reuse unchanged sample arrays and worker geometry; retain only the latest
   queued request. Runtime content revisions do not change the canvas format.
 - [x] Cancel obsolete requests at job boundaries without joining the worker.
-  Publish only GPU-complete whole-view textures, reject stale generations, and
+  Publish only GPU-complete textures, reject stale generations, and
   wake the UI via completion events. Input handling never waits for the worker.
-- [x] Preserve fades, resize priority, previews, deterministic exports, and
+- [x] Preserve resize priority, previews, deterministic exports, and
   resident resolution reuse. Cancel pending work and release all worker-owned
   GL resources before deleting its context; report worker failures explicitly.
 - [x] Avoid reallocating foreground viewport textures on same-size pan updates.
@@ -49,7 +49,7 @@ there is no canvas-format change or permanent flattening.
 - [x] Fill newly exposed regions with asynchronous half-resolution, effect-free
   worker frames, reprojecting older compatible coverage rather than waiting for
   the newest camera request. Keep the original snapshot immutable through
-  navigation and settling, then fade to accurate completed paint.
+  navigation and settling, then replace it as accurate paint completes.
 - [x] Invalidate camera snapshots for history, selection transforms, and
   incompatible scene edits. Never pin placeholder background as artwork.
 - [x] Retain full-quality views and asynchronous gap previews across camera
@@ -62,6 +62,19 @@ there is no canvas-format change or permanent flattening.
 - [x] Verify full/low-resolution revisits with the worker blocked, transformed
   coverage culling against unculled composition, actual GL texture deletion on
   budget reduction, edit/background invalidation, and old/new settings loading.
+- [x] Generate near-area and whole-artwork 512-square previews after 200 ms of
+  worker idle time. Prioritize new requests between jobs, skip live strokes, and
+  use independent overview programs/geometry/targets to preserve replay reuse.
+  Keep the two overview levels preferentially within the configured cache target.
+- [x] Stream completed native-tile coverage as transparent partial frames over
+  the retained preview. Remove whole-view fades from worker presentation;
+  history/camera changes discard obsolete partial coverage immediately. Full
+  replay fallbacks remain atomic and replace the preview without a fade.
+- [x] Explicitly restore worker viewport/VAO state for full and reduced-resolution
+  jobs so preview raster pixels correspond to their published camera metadata.
+- [x] Show a thin, noninteractive animated bar at the canvas top during queued
+  or active rendering, including full replay and idle peripheral previews.
+  Hide it when idle, without treating stale foreground upload counts as work.
 
 - [x] Canvas-space 256-pixel tile cores with sampling gutters and power-of-two
   resolution levels, including negative coordinates.
@@ -84,12 +97,10 @@ there is no canvas-format change or permanent flattening.
   includes its possible opacity-history and blur intermediates.
 - [x] Retain resident coarse and fine levels across navigation. Stop starting
   full-quality tile reconstruction jobs when navigation controls activate.
-- [x] Cross-fade the whole view over 50 ms toward preview and 100 ms toward
-  rendered quality. Replace interrupted fades rather than queueing them, and
-  hold preview mode throughout active transforms and settling. Hold the preview
-  until cached tiles cover the whole view, including resident resolution
-  fallbacks; do not reveal individually arriving tiles. Bypass fades for drawing.
-  Two viewport-sized RGBA8 snapshots are separate from the tile/workspace budgets.
+- [x] Keep legacy 50/100 ms whole-view fades for the foreground compatibility
+  renderer, replacing interrupted fades rather than queueing them. Normal worker
+  rendering instead reveals completed native tiles immediately over previews.
+  Transition snapshots are separate from tile/workspace budgets.
 - [x] Incremental idle reconstruction with an approximately 4 ms cooperative
   budget between GPU-completed jobs; publish completed tiles, not half-rendered
   intermediates. Revalidate jobs each frame instead of retaining obsolete view
@@ -158,5 +169,9 @@ These measurements exclude display refresh/presentation and the initial cold
 rebuild, which can still be expensive after camera or history changes.
 Navigation profiling also compares raw-stroke replay with snapshot presentation
 for pan/zoom/rotation, both with a blocked worker and with live gap coverage.
+It also waits for both idle overview levels and reports whole-artwork preview
+content. Integration tests verify overview reprojection while the worker is
+blocked, completed/transparent partial-frame pixels against full rendering,
+immediate tile presentation/cancellation, and replay-prefix reuse after idle work.
 Reprojection checks use an independent CPU texture sampler for pan, zoom,
 rotation, mirroring, resize, and newly exposed regions (within 2 LSB/channel).

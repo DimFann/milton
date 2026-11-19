@@ -68,6 +68,10 @@ struct CanvasTileCache
     bool background_context;
     SDL_atomic_t* cancel_generation;
     int request_generation;
+    u64 display_revision;
+#if defined(TESTING)
+    int job_limit;
+#endif
 };
 
 struct TileBounds
@@ -315,6 +319,7 @@ gpu_present_tile_transition(RenderBackend* r, bool saved_preview, bool preview, 
         cache->display_paused = false;
     }
     bool immediate = (r->tile_working && r->tile_working->num_points > 0)
+                     || r->canvas_worker != NULL
                      || (r->flags & (RenderBackendFlags_CANVAS_TRANSFORMING
                                     | RenderBackendFlags_HISTORY_CHANGED));
 #if defined(TESTING)
@@ -406,6 +411,9 @@ tile_workspace(RenderBackend* r, int size)
 static bool
 tile_time_available(CanvasTileCache* cache)
 {
+#if defined(TESTING)
+    if ( cache->job_limit && cache->jobs >= cache->job_limit ) { return false; }
+#endif
     if ( !cache->can_build ) { return false; }
     if ( cache->cancel_generation
          && cache->request_generation < SDL_AtomicGet(cache->cancel_generation) ) {
@@ -759,6 +767,7 @@ gpu_render_tile_cache(RenderBackend* r, i32, i32, i32, i32)
         push(&cache->layers, scene);
     }
     cache->jobs = 0; cache->failed = false; cache->pending = false;
+    cache->display_revision = 0;
     cache->background_context = r->background_context;
     cache->cancel_generation = r->cancel_generation;
     cache->request_generation = r->request_generation;
@@ -766,6 +775,7 @@ gpu_render_tile_cache(RenderBackend* r, i32, i32, i32, i32)
     cache->deadline = perf_counter() + (u64)(0.004 / perf_count_to_sec(1000000) * 1000000);
     if ( r->tile_working->num_points ) { cache->deadline = 0; }
 #if defined(TESTING)
+    cache->job_limit = r->tile_job_limit;
     if ( r->tile_cache_unlimited ) { cache->deadline = 0; }
 #endif
     if ( !cache->layers.count ) { return false; }
@@ -799,7 +809,7 @@ gpu_render_tile_cache(RenderBackend* r, i32, i32, i32, i32)
         return false;
     }
     cache->logged_limit = false;
-    if ( cache->pending || (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW) ) {
+    if ( !r->background_context && (cache->pending || (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW)) ) {
         gpu_set_cook_budget(r, 0.002f);
         gpu_clip_strokes_and_update(r->tile_arena, r, &r->tile_view, r->tile_view.scale, r->tile_root,
                                     r->tile_working, 0, 0, r->width, r->height, ClipFlags_NAVIGATION_PREVIEW);
@@ -813,8 +823,10 @@ gpu_render_tile_cache(RenderBackend* r, i32, i32, i32, i32)
     glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
     glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
     glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND);
-    if ( !cache->pending ) {
-        glClearColor(r->background_color.r, r->background_color.g, r->background_color.b, 1);
+    if ( !cache->pending || r->background_context ) {
+        // Partial worker frames leave unfinished pixels for the UI's retained preview.
+        if ( cache->pending ) { glClearColor(0, 0, 0, 0); }
+        else { glClearColor(r->background_color.r, r->background_color.g, r->background_color.b, 1); }
         glClear(GL_COLOR_BUFFER_BIT);
     }
     i64 i = 0;
@@ -840,6 +852,7 @@ gpu_render_tile_cache(RenderBackend* r, i32, i32, i32, i32)
             }
             if ( tile >= 0 ) {
                 tile_draw_view(r, cache->entries[tile], xx, yy, scale);
+                cache->display_revision = max(cache->display_revision, cache->entries[tile].serial);
             } else {
                 bool old_build = cache->can_build;
                 cache->can_build = false;
@@ -850,7 +863,10 @@ gpu_render_tile_cache(RenderBackend* r, i32, i32, i32, i32)
                     for ( i64 fy = yy * ratio; fy < (yy + 1) * ratio; ++fy ) {
                         for ( i64 fx = xx * ratio; fx < (xx + 1) * ratio; ++fx ) {
                             i64 resident = tile_request(r, top_layer, fx, fy, fine);
-                            if ( resident >= 0 ) { tile_draw_view(r, cache->entries[resident], fx, fy, fine); }
+                            if ( resident >= 0 ) {
+                                tile_draw_view(r, cache->entries[resident], fx, fy, fine);
+                                cache->display_revision = max(cache->display_revision, cache->entries[resident].serial);
+                            }
                             else { level_covered = false; }
                         }
                     }

@@ -194,6 +194,7 @@ struct RenderBackend
     bool disable_opacity_regions;
     bool disable_opacity_history_cache;
     bool tile_cache_unlimited;
+    int tile_job_limit;
     bool disable_display_transitions;
     int tile_builds;
     int tile_composites;
