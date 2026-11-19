@@ -13,13 +13,14 @@ This fork adds some quality of life features I've been wanting for years, as wel
 * Rebindable hotkeys
 * Reorganized UI, with dark mode
 * Pressure response tuning, pressure and position smoothing
+* Pen and eraser pressure-opacity options are saved separately, including when you quit with the eraser active. Opening a canvas keeps the current pressure-opacity option.
 * From 8 to 16 bit color values for smoother stroke appearances
 * The triangle color picker keeps the selected hue fully saturated along the edge from pure hue to black.
 * Below the color wheel, H/S/V sliders preview the colors they produce. Type a hue in degrees or saturation and value as percentages, then press Enter. Ten recent color swatches sit below the sliders.
 * Better precision for stroke placement
 * Allow for deeper zoom, start canvas zoom further out for more in/out by default.
 * Variable hardness for brush and eraser + other brush options & tilt support
-* **Preserve opacity** in Pen tool options uses the strongest opacity at each pixel across consecutive enabled strokes of the same color on one layer. Different colors, regular strokes, and pixel erasers break the group. Layer optimization and erased-stroke cleanup are unavailable on layers containing these strokes so they don't accidentally join separate groups.
+* **Preserve opacity** in Pen tool options prevents new strokes from adding opacity over matching-color paint on the same layer, including strokes made before this feature or saved in previous sessions. Existing paint is unchanged; higher-pressure or higher-opacity strokes can raise the maximum. Other colors do not break this behavior, and erasing reduces the protected opacity so you can repaint erased areas. Press **A** to toggle it, or rebind **Toggle Preserve opacity** in Hotkeys. Layer optimization and erased-stroke cleanup remain unavailable on layers containing preserving strokes.
 * Rectangular brushes
 * Lasso Functions
     * Arm with S

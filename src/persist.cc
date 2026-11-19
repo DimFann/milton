@@ -288,11 +288,13 @@ milton_load(Milton* milton)
                     }
                 }
 
-                // Set the flags of the working layer to the last stroke of the working layer.
+                // Pressure opacity is a live tool option, not a property to inherit from saved paint.
                 if (layer->id == saved_working_layer_id) {
                     i64 stroke_count = count(&layer->strokes);
                     if (stroke_count > 0) {
-                        milton->working_stroke.flags = layer->strokes[ stroke_count - 1]->flags;
+                        u32 pressure_flag = milton->working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY;
+                        milton->working_stroke.flags = (layer->strokes[ stroke_count - 1]->flags
+                                                       & ~StrokeFlag_PRESSURE_TO_OPACITY) | pressure_flag;
                     }
                 }
             }
@@ -948,6 +950,47 @@ platform_settings_save(PlatformSettings* prefs)
     }
 }
 
+static bool
+read_milton_settings(MiltonSettings* settings, FILE* fd)
+{
+    u16 struct_size = 0;
+    if ( fread(&struct_size, sizeof(struct_size), 1, fd) != 1 ) { return false; }
+
+    constexpr size_t legacy_max_size = sizeof(MiltonSettings) - sizeof(Binding);
+    constexpr size_t bindings_end = offsetof(MiltonSettings, pressure_smoothing);
+    constexpr size_t new_binding_offset = offsetof(MiltonSettings, bindings) +
+                                         Action_TOGGLE_PRESERVE_OPACITY * sizeof(Binding);
+    if ( struct_size < bindings_end - sizeof(Binding) ) { return false; }
+
+    MiltonSettings loaded = *settings;
+    if ( struct_size <= legacy_max_size ) {
+        // The new press action is inserted before the sentinel and the release bindings.
+        auto* bytes = reinterpret_cast<u8*>(&loaded);
+        if ( fread(bytes, 1, new_binding_offset, fd) != new_binding_offset ||
+             fread(bytes + new_binding_offset + sizeof(Binding), 1, struct_size - new_binding_offset, fd)
+                 != struct_size - new_binding_offset ) {
+            return false;
+        }
+        for ( int i = ActionRelease_PEEK_OUT; i < Action_COUNT_WITH_RELEASE; ++i ) {
+            Binding& release = loaded.bindings.bindings[i];
+            if ( release.action == i - 1 ) { release.action = (BindableAction)i; }
+        }
+
+        bool a_in_use = loaded.rotate_key == 'a';
+        for ( int i = Action_FIRST; i < Action_TOGGLE_PRESERVE_OPACITY; ++i ) {
+            const Binding& existing = loaded.bindings.bindings[i];
+            a_in_use |= existing.bound_key == 'a' && existing.modifiers == Modifier_NONE;
+        }
+        binding(&loaded.bindings, Modifier_NONE, a_in_use ? (i8)Binding::UNBOUND : 'a',
+                Action_TOGGLE_PRESERVE_OPACITY);
+    } else {
+        size_t n = min((size_t)struct_size, sizeof(loaded));
+        if ( fread(&loaded, 1, n, fd) != n ) { return false; }
+    }
+    *settings = loaded;
+    return true;
+}
+
 b32
 milton_settings_load(MiltonSettings* settings)
 {
@@ -958,19 +1001,8 @@ milton_settings_load(MiltonSettings* settings)
     b32 ok = false;
     auto* fd = platform_fopen(settings_fname, TO_PATH_STR("rb"));
     if ( fd ) {
-        u16 struct_size = 0;
-        if ( fread(&struct_size, sizeof(u16), 1, fd) ) {
-            // Layout changes (e.g. new actions) invalidate older files; defaults are used instead.
-            // Older/newer files are read as far as they fit; fields they lack keep their defaults.
-            // Files from before the layout was append-only (bindings changed) are rejected.
-            const u16 min_size = (u16)(offsetof(MiltonSettings, pressure_smoothing));
-            if ( struct_size >= min_size ) {
-                u16 n = struct_size < sizeof(*settings) ? struct_size : (u16)sizeof(*settings);
-                if ( fread(settings, n, 1, fd) == 1 ) {
-                    ok = true;
-                }
-            }
-        }
+        ok = read_milton_settings(settings, fd);
+        fclose(fd);
     }
     if ( !ok ) {
         milton_log("Warning: Failed to read settings file\n");
@@ -995,6 +1027,7 @@ void milton_settings_save(MiltonSettings* settings)
                 ok = true;
             }
         }
+        if ( fclose(fd) != 0 ) { ok = false; }
     }
     if ( !ok ) {
         milton_log("Warning: could not correctly save settings file\n");

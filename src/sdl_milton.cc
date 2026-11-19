@@ -1291,6 +1291,7 @@ milton_main(bool is_fullscreen, char* file_to_open)
         }
     }
 
+    gui_save_tool_state(milton);
     platform_deinit(&platform);
 
     arena_free(&milton->root_arena);

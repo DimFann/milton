@@ -303,8 +303,12 @@ test_preserve_opacity()
     v2l offscreen[] = {raster_to_canvas(view, v2l{400, 160}), raster_to_canvas(view, v2l{460, 160})};
     f32 pressure[] = {1, 1};
     f32 low_pressure[] = {0.5f, 0.5f};
-    auto add = [&](u32 flags, f32 alpha, v2l* points, f32* pressures) {
+    auto add = [&](u32 flags, f32 alpha, v2l* points, f32* pressures,
+                   v3f color = v3f{0.25f, 0.5f, 0.75f}, f32 hardness = k_max_hardness,
+                   i32 shape = BrushShape_ROUND) {
         Stroke stroke = {};
+        stroke.id = milton.canvas->stroke_id_count++;
+        stroke.layer_id = layer->id;
         stroke.flags = flags;
         stroke.points = points;
         stroke.pressures = pressures;
@@ -313,22 +317,25 @@ test_preserve_opacity()
         stroke.brush.radius = 16 * view->scale;
         stroke.brush.alpha = alpha;
         stroke.brush.pressure_opacity_min = 0.0f;
-        stroke.brush.color = to_premultiplied(v3f{0.25f, 0.5f, 0.75f}, alpha);
+        stroke.brush.color = to_premultiplied(color, alpha);
+        stroke.brush.hardness = hardness;
+        stroke.brush.shape = shape;
         stroke.bounding_rect = bounding_box_for_stroke(&stroke);
-        layer::layer_push_stroke(layer, stroke);
+        return layer::layer_push_stroke(layer, stroke);
     };
-    auto alpha_at_center = [&]() {
-        gpu_clip_strokes_and_update(&milton.root_arena, r, view, view->scale, layer,
+    u8 pixel[4] = {};
+    auto alpha_at_center = [&](float background = 0.0f, int offset_y = 0) {
+        gpu_clip_strokes_and_update(&milton.root_arena, r, view, view->scale, milton.canvas->root_layer,
                                     &milton.working_stroke, 0, 0, size, size);
-        gpu_render_canvas(r, 0, 0, size, size, 0.0f);
+        gpu_render_canvas(r, 0, 0, size, size, background);
         glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
-        u8 rgba[4] = {};
-        glReadPixels(size / 2, size / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-        return (int)rgba[3];
+        glReadPixels(size / 2, size / 2 - offset_y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+        return (int)pixel[3];
     };
 
     constexpr u32 preserve = StrokeFlag_PRESERVE_OPACITY;
-    add(preserve, 0.5f, line, pressure);
+    // The base stroke predates Preserve opacity and carries no new flags.
+    add(0, 0.5f, line, pressure);
     int single = alpha_at_center();
     add(preserve, 0.5f, line, pressure);
     int repeated = alpha_at_center();
@@ -343,9 +350,85 @@ test_preserve_opacity()
     int ordinary = alpha_at_center();
     bool passed = abs(single - 128) <= 1 && abs(repeated - single) <= 1
                   && abs(same_pressure_opacity - single) <= 1 && abs(stronger - 191) <= 1
-                  && abs(separated - 223) <= 1 && abs(ordinary - 239) <= 1;
+                  && abs(separated - stronger) <= 1 && abs(ordinary - 223) <= 1;
     fprintf(passed ? stdout : stderr, "Opacity readback (single, repeat, pressure, stronger, separated, ordinary): %d %d %d %d %d %d\n",
             single, repeated, same_pressure_opacity, stronger, separated, ordinary);
+
+    // Returning to a color after another preserving color rebuilds its history.
+    add(preserve, 0.4f, line, pressure, v3f{0.75f, 0.25f, 0.5f});
+    int with_other_color = alpha_at_center();
+    u8 other_color_pixel[4];
+    memcpy(other_color_pixel, pixel, sizeof(pixel));
+    add(preserve, 0.5f, line, pressure);
+    int returned_color = alpha_at_center();
+    passed = passed && abs(returned_color - with_other_color) <= 1
+             && memcmp(other_color_pixel, pixel, sizeof(pixel)) == 0;
+
+    auto clear_strokes = [&]() {
+        gpu_free_strokes(r, milton.canvas);
+        reset(&layer->strokes);
+    };
+    // Soft and square strokes must protect their actual per-pixel coverage, not master alpha.
+    clear_strokes();
+    add(StrokeFlag_DISTANCE_TO_OPACITY, 0.5f, line, pressure, v3f{0.25f, 0.5f, 0.75f}, 2.0f, BrushShape_RECTANGLE);
+    int soft = alpha_at_center(0.0f, 3);
+    add(preserve | StrokeFlag_DISTANCE_TO_OPACITY, 0.5f, line, pressure, v3f{0.25f, 0.5f, 0.75f}, 2.0f, BrushShape_RECTANGLE);
+    int soft_repeat = alpha_at_center(0.0f, 3);
+    passed = passed && soft > 0 && abs(soft_repeat - soft) <= 1;
+
+    // Erasing matching paint must lower its remembered opacity before a fresh pass.
+    clear_strokes();
+    add(0, 0.5f, line, pressure);
+    add(StrokeFlag_ERASER, 0.5f, line, pressure);
+    add(preserve, 0.5f, line, pressure);
+    int after_erasing = alpha_at_center();
+    passed = passed && after_erasing > single && after_erasing < ordinary;
+    alpha_at_center(1.0f);
+    // On white, the old 50% pass, half erasing, and preserving repaint must return to 50% color.
+    passed = passed && abs(pixel[0] - 159) <= 2 && abs(pixel[1] - 191) <= 2 && abs(pixel[2] - 223) <= 2;
+
+    clear_strokes();
+    add(0, 0.5f, line, pressure);
+    add(0, 0.5f, line, pressure);
+    int old_overlap = alpha_at_center();
+    add(preserve, 0.5f, line, pressure);
+    passed = passed && abs(old_overlap - 191) <= 1 && abs(alpha_at_center() - old_overlap) <= 1;
+
+    // Check true save/load: a legacy stroke remains protected after GPU handles are rebuilt.
+    clear_strokes();
+    add(0, 0.5f, line, pressure);
+    milton.persist->mlt_file_path = TO_PATH_STR("TEST_preserve_opacity.mlt");
+    milton_save(&milton);
+    milton_load(&milton);
+    layer = milton.canvas->working_layer;
+    gpu_update_canvas(r, milton.canvas, view);
+    int reopened = alpha_at_center();
+    add(preserve, 0.5f, line, pressure);
+    int reopened_repeat = alpha_at_center();
+    passed = passed && reopened > 0 && abs(reopened_repeat - reopened) <= 1;
+    fprintf(passed ? stdout : stderr,
+            "Legacy/other-color/soft/erased/reopened opacity: %d %d / %d %d / %d / %d %d (%s)\n",
+            with_other_color, returned_color, soft, soft_repeat, after_erasing,
+            reopened, reopened_repeat, passed ? "passed" : "FAILED");
+
+    milton_new_layer(&milton);
+    layer = milton.canvas->working_layer;
+    add(preserve, 0.5f, line, pressure);
+    int other_layer = alpha_at_center();
+    Stroke undone = pop(&layer->strokes);
+    int undo_alpha = alpha_at_center();
+    push(&layer->strokes, undone);
+    int redo_alpha = alpha_at_center();
+    bool layer_ok = abs(other_layer - 191) <= 1 && abs(undo_alpha - reopened) <= 1
+                    && abs(redo_alpha - other_layer) <= 1;
+    passed = passed && layer_ok;
+    fprintf(layer_ok ? stdout : stderr, "Separate layer, undo, redo opacity: %d %d %d (%s)\n",
+            other_layer, undo_alpha, redo_alpha, layer_ok ? "passed" : "FAILED");
+    GLenum error = glGetError();
+    if ( error != GL_NO_ERROR ) {
+        fprintf(stderr, "OpenGL error after opacity history rendering: 0x%x\n", error);
+        passed = false;
+    }
     gpu_free_strokes(r, milton.canvas);
     arena_free(&milton.root_arena);
     SDL_GL_DeleteContext(context);
@@ -354,9 +437,132 @@ test_preserve_opacity()
     return passed;
 }
 
+static bool
+test_tool_pressure_persistence()
+{
+    Milton source = {}, restored = {};
+    milton_init(&source, 320, 320, 1, NULL, MiltonInit_FOR_TEST);
+    milton_init(&restored, 320, 320, 1, NULL, MiltonInit_FOR_TEST);
+    bool passed = true;
+    for ( int pen = 0; pen <= 1; ++pen ) {
+        for ( int eraser = 0; eraser <= 1; ++eraser ) {
+            source.flags_in_eraser_mode = true;
+            source.pen_pressure_opacity_stash = pen != 0;
+            source.eraser_pressure_opacity = eraser != 0;
+            source.working_stroke.flags = StrokeFlag_ERASER | (eraser ? StrokeFlag_PRESSURE_TO_OPACITY : 0);
+            BrushPreset saved[2] = {};
+            preset_capture(&source, &saved[0], BrushEnum_PEN);
+            preset_capture(&source, &saved[1], BrushEnum_ERASER);
+            passed = passed && saved[0].pressure_opacity == pen && saved[1].pressure_opacity == eraser;
+
+            restored.flags_in_eraser_mode = false;
+            restored.working_stroke.flags = 0;
+            preset_apply(&restored, &saved[0]);
+            preset_apply(&restored, &saved[1]);
+            passed = passed && ((restored.working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY) != 0) == (pen != 0)
+                     && restored.eraser_pressure_opacity == (eraser != 0);
+
+            // Applying a pen preset while erasing must update the pen stash, not the eraser flag.
+            restored.flags_in_eraser_mode = true;
+            restored.pen_pressure_opacity_stash = pen == 0;
+            restored.working_stroke.flags = StrokeFlag_ERASER | (eraser ? StrokeFlag_PRESSURE_TO_OPACITY : 0);
+            preset_apply(&restored, &saved[0]);
+            passed = passed && restored.pen_pressure_opacity_stash == (pen != 0)
+                     && ((restored.working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY) != 0) == (eraser != 0);
+        }
+    }
+
+    milton_reset_canvas_and_set_default(&source);
+    source.persist->mlt_file_path = TO_PATH_STR("TEST_tool_pressure.mlt");
+    restored.persist->mlt_file_path = source.persist->mlt_file_path;
+    Stroke stroke = {};
+    stroke.brush = default_brush();
+    stroke.brush.radius = source.view->scale * 10;
+    stroke.num_points = 2;
+    stroke.points = arena_alloc_array(&source.canvas->arena, 2, v2l);
+    stroke.pressures = arena_alloc_array(&source.canvas->arena, 2, f32);
+    stroke.points[0] = {0, 0};
+    stroke.points[1] = {1000, 1000};
+    stroke.pressures[0] = stroke.pressures[1] = 1.0f;
+    stroke.layer_id = source.canvas->working_layer->id;
+    stroke.id = source.canvas->stroke_id_count++;
+    stroke.bounding_rect = bounding_box_for_stroke(&stroke);
+    Stroke* saved_stroke = layer::layer_push_stroke(source.canvas->working_layer, stroke);
+    for ( int enabled = 0; enabled <= 1; ++enabled ) {
+        saved_stroke->flags = enabled ? StrokeFlag_ERASER : StrokeFlag_PRESSURE_TO_OPACITY;
+        milton_save(&source);
+        restored.flags_in_eraser_mode = false;
+        restored.working_stroke.flags = enabled ? StrokeFlag_PRESSURE_TO_OPACITY : 0;
+        milton_load(&restored);
+        passed = passed && ((restored.working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY) != 0) == (enabled != 0);
+    }
+    arena_free(&source.root_arena);
+    arena_free(&restored.root_arena);
+    fprintf(passed ? stdout : stderr, "Pen/eraser pressure-option capture, restore, and canvas loading: %s\n", passed ? "passed" : "FAILED");
+    return passed;
+}
+
+static bool
+test_preserve_opacity_binding()
+{
+    MiltonSettings saved = {};
+    settings_init(&saved);
+    set_default_bindings(&saved.bindings);
+    saved.preserve_opacity = 1;
+    saved.position_smoothing = 0.73f;
+    binding_with_release(&saved.bindings, Modifier_ALT, 'p', Action_PEEK_OUT, ActionRelease_PEEK_OUT);
+
+    auto round_trip = [](const MiltonSettings& source, bool legacy, MiltonSettings* loaded) {
+        FILE* file = tmpfile();
+        if ( !file ) { return false; }
+        bool ok = false;
+        if ( legacy ) {
+            MiltonSettings fixture = source;
+            Binding& release = fixture.bindings.bindings[ActionRelease_PEEK_OUT];
+            release.action = (BindableAction)(ActionRelease_PEEK_OUT - 1);
+            constexpr size_t offset = offsetof(MiltonSettings, bindings) + Action_TOGGLE_PRESERVE_OPACITY * sizeof(Binding);
+            const u16 size = sizeof(fixture) - sizeof(Binding);
+            const auto* bytes = reinterpret_cast<const u8*>(&fixture);
+            ok = fwrite(&size, sizeof(size), 1, file) == 1
+                 && fwrite(bytes, 1, offset, file) == offset
+                 && fwrite(bytes + offset + sizeof(Binding), 1, size - offset, file) == size - offset;
+        } else {
+            const u16 size = sizeof(source);
+            ok = fwrite(&size, sizeof(size), 1, file) == 1 && fwrite(&source, size, 1, file) == 1;
+        }
+        rewind(file);
+        ok = ok && read_milton_settings(loaded, file);
+        fclose(file);
+        return ok;
+    };
+
+    MiltonSettings loaded = {};
+    bool passed = round_trip(saved, true, &loaded);
+    const Binding& toggle = loaded.bindings.bindings[Action_TOGGLE_PRESERVE_OPACITY];
+    const Binding& release = loaded.bindings.bindings[ActionRelease_PEEK_OUT];
+    passed = passed && toggle.bound_key == 'a' && !toggle.accepts_repeats
+             && release.action == ActionRelease_PEEK_OUT && release.modifiers == Modifier_ALT
+             && release.bound_key == 'p' && release.on_release
+             && loaded.preserve_opacity && loaded.position_smoothing == saved.position_smoothing;
+    binding(&saved.bindings, Modifier_NONE, 'a', Action_MODE_PEN);
+    passed = passed && round_trip(saved, true, &loaded) && toggle.bound_key == Binding::UNBOUND
+             && loaded.bindings.bindings[Action_MODE_PEN].bound_key == 'a';
+    binding(&saved.bindings, Modifier_CTRL, 'k', Action_TOGGLE_PRESERVE_OPACITY);
+    passed = passed && round_trip(saved, false, &loaded) && toggle.bound_key == 'k'
+             && toggle.modifiers == Modifier_CTRL && toggle.action == Action_TOGGLE_PRESERVE_OPACITY;
+    if ( !passed ) { fprintf(stderr, "Preserve opacity shortcut migration or rebinding failed\n"); }
+    return passed;
+}
+
 extern "C" int
 main(int argc, char** argv)
 {
+    if ( argc == 2 && strcmp(argv[1], "--tool-pressure") == 0 ) {
+        return test_tool_pressure_persistence() ? 0 : 1;
+    }
+    if ( argc == 2 && strcmp(argv[1], "--preserve-opacity-binding") == 0 ) {
+        return test_preserve_opacity_binding() ? 0 : 1;
+    }
     if ( argc == 2 && strcmp(argv[1], "--preserve-opacity") == 0 ) {
         return test_preserve_opacity() ? 0 : 1;
     }

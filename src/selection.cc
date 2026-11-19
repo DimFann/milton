@@ -586,7 +586,7 @@ selection_auto_cleanup(Milton* milton, Layer* l)
     i64 ei = l->strokes.count - 1;
     Stroke* e = get(&l->strokes, ei);
     if ( !sel_eraser_is_opaque(e) ) { return; }
-    // Removing even a fully erased stroke could join two formerly separate groups.
+    // Keep cleanup conservative around opacity histories used by later preserving strokes.
     if ( layer_has_preserved_opacity(l) ) { return; }
 
     double margin = (double)milton->view->scale * 2.0;

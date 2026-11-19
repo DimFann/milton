@@ -161,6 +161,7 @@ init_localization()
         EN(TXT_Action_SELECT_NONE, "Deselect");
         EN(TXT_Action_SELECT_TRANSFORM, "Free transform selection");
         EN(TXT_Action_SELECT_COMMIT, "Apply free transform");
+        EN(TXT_Action_TOGGLE_PRESERVE_OPACITY, "Toggle Preserve opacity");
     #if MILTON_ENABLE_PROFILING
         EN(TXT_Action_TOGGLE_DEBUG_WINDOW, "Toggle debug window");
     #endif

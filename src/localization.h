@@ -151,6 +151,7 @@ enum Texts
     TXT_Action_TOGGLE_DEBUG_WINDOW,
 #endif
 
+    TXT_Action_TOGGLE_PRESERVE_OPACITY,
     TXT_Count,
 };
 

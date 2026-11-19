@@ -57,6 +57,7 @@ enum BindableAction
         Action_TOGGLE_DEBUG_WINDOW,
     #endif
 
+    Action_TOGGLE_PRESERVE_OPACITY,
     Action_COUNT,
 
     // Press-and-release actions.

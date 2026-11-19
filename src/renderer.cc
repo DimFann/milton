@@ -33,6 +33,7 @@ enum RenderElementFlags
     RenderElementFlags_PRESSURE_TO_OPACITY  = 1<<1,
     RenderElementFlags_DISTANCE_TO_OPACITY  = 1<<2,
     RenderElementFlags_ERASER               = 1<<3,
+    RenderElementFlags_PRESERVE_OPACITY     = 1<<4,
 };
 
 struct RenderElement
@@ -68,7 +69,6 @@ struct RenderElement
     };
 
     int     flags;  // RenderElementFlags enum;
-    i64     opacity_group;  // Zero for ordinary strokes and layer boundaries.
 };
 
 struct RenderBackend
@@ -126,7 +126,8 @@ struct RenderBackend
     GLuint helper_texture;  // Used for various effects..
     GLuint stencil_texture;
     GLuint stroke_info_texture;
-    GLuint opacity_group_texture;
+    GLuint opacity_stroke_texture;
+    GLuint opacity_history_texture;
 
     GLuint fbo;
 
@@ -711,8 +712,9 @@ gpu_resize(RenderBackend* r, CanvasView* view)
     gl::resize_color_texture(r->canvas_texture, r->width, r->height);
     gl::resize_color_texture(r->helper_texture, r->width, r->height);
     gl::resize_color_texture(r->stroke_info_texture, r->width, r->height);
-    if ( r->opacity_group_texture ) {
-        gl::resize_color_texture(r->opacity_group_texture, r->width, r->height);
+    if ( r->opacity_stroke_texture ) {
+        gl::resize_color_texture(r->opacity_stroke_texture, r->width, r->height);
+        gl::resize_color_texture(r->opacity_history_texture, r->width, r->height);
     }
     gl::resize_depth_stencil_texture(r->stencil_texture, r->width, r->height);
 }
@@ -1205,6 +1207,9 @@ gpu_cook_stroke(Arena* arena, RenderBackend* r, Stroke* stroke, CookStrokeOpt co
             if (stroke->flags & StrokeFlag_DISTANCE_TO_OPACITY) {
                 re->flags |= RenderElementFlags_DISTANCE_TO_OPACITY;
             }
+            if (stroke->flags & StrokeFlag_PRESERVE_OPACITY) {
+                re->flags |= RenderElementFlags_PRESERVE_OPACITY;
+            }
 
             mlt_assert(re->count > 1);
 
@@ -1281,16 +1286,8 @@ gpu_get_cook_progress(RenderBackend* r, i64* pending, i64* done)
 }
 
 static bool
-stroke_preserves_opacity(const Stroke* s)
+same_paint_color(v4f ca, v4f cb)
 {
-    return s && (s->flags & (StrokeFlag_PRESERVE_OPACITY | StrokeFlag_ERASER)) == StrokeFlag_PRESERVE_OPACITY;
-}
-
-static bool
-same_opacity_group(const Stroke* a, const Stroke* b)
-{
-    if ( !stroke_preserves_opacity(a) || !stroke_preserves_opacity(b) ) { return false; }
-    const v4f ca = a->brush.color, cb = b->brush.color;
     if ( ca.a <= 0.0f || cb.a <= 0.0f ) { return false; }
     for ( int channel = 0; channel < 3; ++channel ) {
         if ( fabsf(ca.d[channel] / ca.a - cb.d[channel] / cb.a) > 0.000001f ) { return false; }
@@ -1316,7 +1313,6 @@ gpu_clip_strokes_and_update(Arena* arena,
     reset(clip_array);
     r->cook_pending = 0;
     i64 cooked_this_pass = 0;
-    i64 opacity_group = 0;
 
     if (screen_bounds.left != screen_bounds.right &&
         screen_bounds.top != screen_bounds.bottom) {
@@ -1335,13 +1331,6 @@ gpu_clip_strokes_and_update(Arena* arena,
 
             StrokeBucket* bucket = &l->strokes.root;
             i64 bucket_i = 0;
-            const Stroke* previous = NULL;
-            auto track_group = [&](const Stroke* s) -> i64 {
-                bool preserve = stroke_preserves_opacity(s);
-                if ( preserve && !same_opacity_group(previous, s) ) { ++opacity_group; }
-                previous = s;
-                return preserve ? opacity_group : 0;
-            };
 
             while ( bucket ) {
                 i64 count = 0;
@@ -1368,7 +1357,6 @@ gpu_clip_strokes_and_update(Arena* arena,
                         Stroke* s = &bucket->data[i];
 
                         if ( s != NULL ) {
-                            i64 group = track_group(s);
                             Rect bounds = s->bounding_rect;
 
                             b32 stroke_outside =   screen_bounds.left   > bounds.right
@@ -1388,7 +1376,7 @@ gpu_clip_strokes_and_update(Arena* arena,
                                 }
                                 if ( needs_cook ) { cooked_this_pass++; r->cook_burst_done++; }
                                 gpu_cook_stroke(arena, r, s);
-                                push(clip_array, *get_render_element(s->render_handle))->opacity_group = group;
+                                push(clip_array, *get_render_element(s->render_handle));
                             }
                             else if ( stroke_outside && ( flags & ClipFlags_UPDATE_GPU_DATA ) ) {
                                 // If it is far away, delete.
@@ -1405,10 +1393,6 @@ gpu_clip_strokes_and_update(Arena* arena,
                     }
                 }
                 else {
-                    // A clipped stroke can still break a run between two visible strokes.
-                    if ( stroke_preserves_opacity(previous) ) {
-                        for ( i64 i = 0; i < count; ++i ) { track_group(&bucket->data[i]); }
-                    }
                     if ( flags & ClipFlags_UPDATE_GPU_DATA ) { gpu_free_strokes(bucket->data, count, r); }
                 }
                 #if MILTON_ENABLE_PROFILING
@@ -1431,8 +1415,7 @@ gpu_clip_strokes_and_update(Arena* arena,
                 if ( working_stroke->num_points > 0 && !(working_stroke->flags & StrokeFlag_CUT) ) {
                     gpu_cook_stroke(arena, r, working_stroke, CookStroke_UPDATE_WORKING_STROKE);
 
-                    push(clip_array, *get_render_element(working_stroke->render_handle))->opacity_group =
-                        track_group(working_stroke);
+                    push(clip_array, *get_render_element(working_stroke->render_handle));
                 }
             }
 
@@ -1445,11 +1428,13 @@ gpu_clip_strokes_and_update(Arena* arena,
 }
 
 static void
-gpu_fill_with_texture(RenderBackend* r, float alpha = 1.0f)
+gpu_fill_with_texture(RenderBackend* r, float alpha = 1.0f, bool preserve_opacity = false)
 {
     // Assumes that texture object is already bound.
     gl::use_program(r->texture_fill_program);
     gl::set_uniform_f(r->texture_fill_program, "u_alpha", alpha);
+    gl::set_uniform_i(r->texture_fill_program, "u_preserve_opacity", preserve_opacity);
+    gl::set_uniform_i(r->texture_fill_program, "u_opacity_history", 1);
     {
         GLint t_loc = glGetAttribLocation(r->texture_fill_program, "a_position");
         if ( t_loc >= 0 ) {
@@ -1542,35 +1527,100 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
 
     DArray<RenderElement>* clip_array = &r->clip_array;
 
-    PUSH_GRAPHICS_GROUP("render elements");
-    i64 active_group = 0;
-    for ( i64 i = 0; i < (i64)clip_array->count; i++ ) {
-        RenderElement* re = &clip_array->data[i];
-        if ( re->opacity_group != active_group ) {
-            if ( active_group ) {
-                glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, layer_texture, 0);
-                glBindTexture(texture_target, r->opacity_group_texture);
-                glBlendEquation(GL_FUNC_ADD);
-                glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-                glDisable(GL_DEPTH_TEST);
-                gpu_fill_with_texture(r);
-                glEnable(GL_DEPTH_TEST);
-            }
-            active_group = re->opacity_group;
-            if ( active_group ) {
-                if ( !r->opacity_group_texture ) {
-                    r->opacity_group_texture = gl::new_color_texture(r->width, r->height);
-                }
-                glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                          texture_target, r->opacity_group_texture, 0);
-                glClearColor(0,0,0,0);
-                glClear(GL_COLOR_BUFFER_BIT);
-                // For the same straight RGB, max premultiplied RGBA keeps the strongest coverage.
-                glBlendEquation(GL_MAX);
-            }
+    auto stroke_pass = [r](RenderElement* re, GLuint program) {
+        gl::use_program(program);
+        gl::set_uniform_vec4(program, "u_brush_color", 1, re->color.d);
+        gl::set_uniform_i(program, "u_radius", re->radius);
+        gl::set_uniform_i(program, "u_shape", re->shape);
+        gl::set_uniform_i(program, "u_size_pressure", re->pressure_size);
+        gl::set_uniform_f(program, "u_size_min", re->pressure_size_min);
+        gl::set_uniform_vec2(program, "u_shape_axis", re->shape_axis_x, re->shape_axis_y);
+        gl::set_uniform_f(program, "u_shape_aspect", re->shape_aspect);
+
+        DEBUG_gl_validate_buffer(re->vbo_stroke);
+        DEBUG_gl_validate_buffer(re->vbo_pointa);
+        DEBUG_gl_validate_buffer(re->vbo_pointb);
+        DEBUG_gl_validate_buffer(re->indices);
+        gl::vertex_attrib_v3f(program, "a_pointa", re->vbo_pointa);
+        gl::vertex_attrib_v3f(program, "a_pointb", re->vbo_pointb);
+        gl::vertex_attrib_v3f(program, "a_position", re->vbo_stroke);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, re->indices);
+        glDrawElements(GL_TRIANGLES, re->count, GL_UNSIGNED_SHORT, 0);
+    };
+
+    // Keep only one color's opacity history resident. Rebuild it from earlier visible
+    // strokes when the next preserving stroke uses a different color.
+    bool have_history = false;
+    v4f history_color = {};
+    i64 layer_start = 0;
+    auto render_opacity_stroke = [&](RenderElement* re) {
+        bool eraser = (re->flags & RenderElementFlags_ERASER) != 0;
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, r->opacity_stroke_texture, 0);
+        glClearColor(0,0,0,0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        if ( !eraser && !(re->flags & (RenderElementFlags_PRESSURE_TO_OPACITY | RenderElementFlags_DISTANCE_TO_OPACITY)) ) {
+            glEnable(GL_DEPTH_TEST);
+            glEnable(GL_BLEND);
+            glBlendEquation(GL_FUNC_ADD);
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            gl::set_uniform_i(r->stroke_program, "u_aa_rim", 0);
+            stroke_pass(re, r->stroke_program);
+            gl::set_uniform_i(r->stroke_program, "u_aa_rim", 1);
+            stroke_pass(re, r->stroke_program);
+            return;
         }
 
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, r->stroke_info_texture, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendEquationSeparate(GL_MAX, GL_FUNC_ADD);
+        glBlendFunc(GL_ONE, GL_ONE);
+        gl::set_uniform_i(r->stroke_info_program, "u_use_pressure", (re->flags & RenderElementFlags_PRESSURE_TO_OPACITY) != 0);
+        gl::set_uniform_i(r->stroke_info_program, "u_use_distance", (re->flags & RenderElementFlags_DISTANCE_TO_OPACITY) != 0);
+        gl::set_uniform_f(r->stroke_info_program, "u_master_alpha", eraser ? re->master_alpha : 1.0f);
+        gl::set_uniform_f(r->stroke_info_program, "u_opacity_min", re->min_opacity);
+        gl::set_uniform_f(r->stroke_info_program, "u_hardness", re->hardness);
+        stroke_pass(re, r->stroke_info_program);
+
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, r->opacity_stroke_texture, 0);
+        glBindTexture(texture_target, r->stroke_info_texture);
+        glEnable(GL_DEPTH_TEST);
+        glBlendEquation(GL_FUNC_ADD);
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        RenderElement fill = *re;
+        if ( eraser ) { fill.color = {1,1,1,1}; }
+        stroke_pass(&fill, r->stroke_fill_program_pressure);
+    };
+    auto update_opacity_history = [&](RenderElement* re) {
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(texture_target, 0);
+        glActiveTexture(GL_TEXTURE0);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, r->opacity_history_texture, 0);
+        glBindTexture(texture_target, r->opacity_stroke_texture);
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        if ( re->flags & RenderElementFlags_ERASER ) {
+            glBlendEquation(GL_FUNC_ADD);
+            glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
+        } else {
+            glBlendEquation((re->flags & RenderElementFlags_PRESERVE_OPACITY) ? GL_MAX : GL_FUNC_ADD);
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        }
+        gpu_fill_with_texture(r);
+        glBlendEquation(GL_FUNC_ADD);
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, layer_texture, 0);
+        glEnable(GL_DEPTH_TEST);
+    };
+
+    PUSH_GRAPHICS_GROUP("render elements");
+    for ( i64 i = 0; i < (i64)clip_array->count; i++ ) {
+        RenderElement* re = &clip_array->data[i];
+
         if ( re->flags & RenderElementFlags_LAYER ) {
+            have_history = false;
+            layer_start = i + 1;
 
             // Layer render element.
             // The current framebuffer's color attachment is layer_texture.
@@ -1664,34 +1714,43 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         }
         // If this render element is not a layer, then it is a stroke.
         else {
-            GLuint program_for_stroke = r->stroke_program;
-
-            auto stroke_pass = [r, texture_target](RenderElement* re, GLuint program_for_stroke) {
-                i64 count = re->count;
-                gl::use_program(program_for_stroke);
-                gl::set_uniform_vec4(program_for_stroke, "u_brush_color", 1, re->color.d);
-                gl::set_uniform_i(program_for_stroke, "u_radius", re->radius);
-                gl::set_uniform_i(program_for_stroke, "u_shape", re->shape);
-                gl::set_uniform_i(program_for_stroke, "u_size_pressure", re->pressure_size);
-                gl::set_uniform_f(program_for_stroke, "u_size_min", re->pressure_size_min);
-                gl::set_uniform_vec2(program_for_stroke, "u_shape_axis", re->shape_axis_x, re->shape_axis_y);
-                gl::set_uniform_f(program_for_stroke, "u_shape_aspect", re->shape_aspect);
-
-                DEBUG_gl_validate_buffer(re->vbo_stroke);
-                DEBUG_gl_validate_buffer(re->vbo_pointa);
-                DEBUG_gl_validate_buffer(re->vbo_pointb);
-                DEBUG_gl_validate_buffer(re->indices);
-
-                gl::vertex_attrib_v3f(program_for_stroke, "a_pointa", re->vbo_pointa);
-                gl::vertex_attrib_v3f(program_for_stroke, "a_pointb", re->vbo_pointb);
-                gl::vertex_attrib_v3f(program_for_stroke, "a_position", re->vbo_stroke);
-
-                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, re->indices);
-
-                glDrawElements(GL_TRIANGLES, count, GL_UNSIGNED_SHORT, 0);
-            };
-
             if ( re->count > 0 ) {
+                bool eraser = (re->flags & RenderElementFlags_ERASER) != 0;
+                bool preserve = !eraser && (re->flags & RenderElementFlags_PRESERVE_OPACITY);
+                if ( preserve && (!have_history || !same_paint_color(history_color, re->color)) ) {
+                    if ( !r->opacity_stroke_texture ) {
+                        r->opacity_stroke_texture = gl::new_color_texture(r->width, r->height);
+                        r->opacity_history_texture = gl::new_color_texture(r->width, r->height);
+                    }
+                    history_color = re->color;
+                    have_history = true;
+                    glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, r->opacity_history_texture, 0);
+                    glClearColor(0,0,0,0);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    for ( i64 previous = layer_start; previous < i; ++previous ) {
+                        RenderElement* old = &clip_array->data[previous];
+                        if ( old->count > 0 && ((old->flags & RenderElementFlags_ERASER) || same_paint_color(history_color, old->color)) ) {
+                            render_opacity_stroke(old);
+                            update_opacity_history(old);
+                        }
+                    }
+                }
+                if ( have_history && (eraser || same_paint_color(history_color, re->color)) ) {
+                    render_opacity_stroke(re);
+                    if ( !eraser ) {
+                        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, layer_texture, 0);
+                        glBindTexture(texture_target, r->opacity_stroke_texture);
+                        glActiveTexture(GL_TEXTURE1);
+                        glBindTexture(texture_target, r->opacity_history_texture);
+                        glActiveTexture(GL_TEXTURE0);
+                        glDisable(GL_DEPTH_TEST);
+                        gpu_fill_with_texture(r, 1.0f, preserve);
+                    }
+                    update_opacity_history(re);
+                    if ( !eraser ) { continue; }
+                    // The mask pass used the same stroke depth; allow the real eraser pass through.
+                    glClear(GL_DEPTH_BUFFER_BIT);
+                }
                 if (re->flags & RenderElementFlags_ERASER) {
                     if ( (re->flags & (RenderElementFlags_PRESSURE_TO_OPACITY | RenderElementFlags_DISTANCE_TO_OPACITY))
                          || re->master_alpha < 0.999f ) {
@@ -1749,12 +1808,12 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                     gl::set_uniform_f(r->stroke_info_program, "u_hardness", re->hardness);
                     stroke_pass(re, r->stroke_info_program);
 
-                    glBlendEquation(active_group ? GL_MAX : GL_FUNC_ADD);
+                    glBlendEquation(GL_FUNC_ADD);
                     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
                     glEnable(GL_DEPTH_TEST);
                     glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                              texture_target, active_group ? r->opacity_group_texture : layer_texture, 0);
+                                              texture_target, layer_texture, 0);
                     glBindTexture(texture_target, r->stroke_info_texture);
 
                     stroke_pass(re, r->stroke_fill_program_pressure);

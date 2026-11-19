@@ -910,8 +910,9 @@ preset_capture(Milton* milton, BrushPreset* p, int kind)
     p->shape_aspect = b.shape_aspect;
     p->shape_angle = b.shape_angle;
     p->tilt_angle = b.tilt_angle;
-    p->pressure_opacity = (kind == BrushEnum_ERASER) ? (milton->eraser_pressure_opacity ? 1 : 0)
-                                                      : ((milton->working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY) ? 1 : 0);
+    p->pressure_opacity = (kind == BrushEnum_ERASER) ? milton->eraser_pressure_opacity
+        : (milton->flags_in_eraser_mode ? milton->pen_pressure_opacity_stash
+           : (milton->working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY) != 0);
     p->relative_to_canvas = (milton->working_stroke.flags & StrokeFlag_RELATIVE_TO_CANVAS) ? 1 : 0;
 }
 
@@ -931,6 +932,7 @@ preset_apply(Milton* milton, const BrushPreset* p)
     b->tilt_angle = p->tilt_angle;
 
     if ( kind == BrushEnum_ERASER ) { milton->eraser_pressure_opacity = p->pressure_opacity != 0; }
+    else if ( milton->flags_in_eraser_mode ) { milton->pen_pressure_opacity_stash = p->pressure_opacity != 0; }
     else if ( p->pressure_opacity ) { milton->working_stroke.flags |= StrokeFlag_PRESSURE_TO_OPACITY; }
     else { milton->working_stroke.flags &= ~StrokeFlag_PRESSURE_TO_OPACITY; }
 
@@ -955,7 +957,7 @@ tool_state_path(PATH_CHAR* fname)
 }
 
 static void
-tool_state_tick(Milton* milton)
+tool_state_tick(Milton* milton, bool flush = false)
 {
     PATH_CHAR fname[MAX_PATH];
     tool_state_path(fname);
@@ -986,16 +988,28 @@ tool_state_tick(Milton* milton)
     // Writes are throttled while a slider is dragged; the frame is kept alive so the last value is written.
     if ( milton->platform ) { milton->platform->force_next_frame = true; }
     u32 now = SDL_GetTicks();
-    if ( now - g_tool_last_write < 400 ) { return; }
+    if ( !flush && now - g_tool_last_write < 400 ) { return; }
     g_tool_last_write = now;
     FILE* fd = platform_fopen(fname, TO_PATH_STR("wb"));
     if ( fd ) {
         u32 sz = sizeof(BrushPreset);
-        fwrite(&sz, sizeof(sz), 1, fd);
-        fwrite(cur, sizeof(BrushPreset), 2, fd);
-        fclose(fd);
-        memcpy(g_tool_saved, cur, sizeof(cur));
+        bool ok = fwrite(&sz, sizeof(sz), 1, fd) == 1
+                  && fwrite(cur, sizeof(BrushPreset), 2, fd) == 2;
+        if ( fclose(fd) != 0 ) { ok = false; }
+        if ( ok ) {
+            memcpy(g_tool_saved, cur, sizeof(cur));
+        } else {
+            milton_log("Could not write tool options\n");
+        }
+    } else {
+        milton_log("Could not open tool options for writing\n");
     }
+}
+
+void
+gui_save_tool_state(Milton* milton)
+{
+    tool_state_tick(milton, true);
 }
 
 static void

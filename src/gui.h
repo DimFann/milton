@@ -147,6 +147,7 @@ void milton_imgui_tick(MiltonInput* input, PlatformState* platform_state,  Milto
 
 //
 void                gui_init(Arena* root_arena, MiltonGui* gui, f32 scale);
+void                gui_save_tool_state(Milton* milton);
 // Lays out the picker and its color buttons to fill the panel at the top right corner.
 void                gui_anchor_picker_top_right(MiltonGui* gui, i32 screen_width);
 void                gui_toggle_menu_visibility(MiltonGui* gui);
