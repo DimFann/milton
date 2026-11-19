@@ -40,7 +40,7 @@ struct CanvasWorker
     SDL_Thread* thread;
     SDL_mutex* mutex;
     SDL_cond* condition;
-    SDL_atomic_t generation, stop, status, result_ready;
+    SDL_atomic_t generation, minimum_generation, stop, status, result_ready;
     Uint32 wake_event;
     CanvasSnapshot* pending;
     CanvasView pending_view;
@@ -55,7 +55,7 @@ struct CanvasWorker
     int front_generation;
     CanvasView initial_view;
 #if defined(TESTING)
-    SDL_atomic_t hold, entered, completed, render_thread;
+    SDL_atomic_t hold, entered, completed, render_thread, hold_after_completion;
 #endif
 };
 
@@ -187,11 +187,51 @@ canvas_snapshot_create(RenderBackend* r, CanvasSnapshot* previous)
     return scene;
 }
 
+static bool
+canvas_snapshot_continues_drawing(CanvasSnapshot* previous, CanvasSnapshot* scene)
+{
+    if ( !previous || previous->layers.count != scene->layers.count ) { return false; }
+    bool committed = false;
+    for ( i64 i = 0; i < scene->layers.count; ++i ) {
+        CanvasSnapshotLayer& old = previous->layers[i];
+        CanvasSnapshotLayer& next = scene->layers[i];
+        if ( old.source != next.source || old.id != next.id || old.flags != next.flags
+             || old.alpha != next.alpha || old.effects.count != next.effects.count
+             || next.strokes.count < old.strokes.count ) { return false; }
+        for ( i64 j = 0; j < old.effects.count; ++j ) {
+            if ( memcmp(&old.effects[j], &next.effects[j], sizeof(ReplayCacheEffect)) != 0 ) { return false; }
+        }
+        for ( i64 j = 0; j < old.strokes.count; ++j ) {
+            if ( old.strokes[j] != next.strokes[j] ) { return false; }
+        }
+        if ( next.strokes.count != old.strokes.count ) {
+            if ( previous->working ) {
+                if ( committed || previous->working->data.layer_id != next.id
+                     || next.strokes.count != old.strokes.count + 1 ) { return false; }
+                Stroke& stroke = next.strokes[old.strokes.count]->data;
+                Stroke& working = previous->working->data;
+                if ( stroke.flags != working.flags
+                     || memcmp(&stroke.brush, &working.brush, sizeof(Brush)) != 0 ) { return false; }
+            }
+            committed = true;
+        }
+    }
+    if ( !committed && previous->working && scene->working ) {
+        Stroke& old = previous->working->data;
+        Stroke& next = scene->working->data;
+        if ( old.layer_id != next.layer_id || old.flags != next.flags || next.num_points < old.num_points
+             || memcmp(&old.brush, &next.brush, sizeof(Brush)) != 0 ) { return false; }
+    }
+    // Removing an uncommitted stroke must discard frames that still contain it.
+    return committed || scene->working != NULL;
+}
+
 static void
 canvas_worker_cancel(CanvasWorker* worker)
 {
     if ( !worker->requested ) { return; }
-    SDL_AtomicAdd(&worker->generation, 1);
+    int generation = SDL_AtomicAdd(&worker->generation, 1) + 1;
+    SDL_AtomicSet(&worker->minimum_generation, generation);
     worker->requested = false;
     SDL_LockMutex(worker->mutex);
     CanvasSnapshot* pending = worker->pending;
@@ -358,7 +398,7 @@ canvas_worker_thread(void* data)
     Arena arena = arena_init(1024 * 1024);
     RenderBackend* r = gpu_allocate_render_backend(&arena);
     r->background_context = true;
-    r->cancel_generation = &worker->generation;
+    r->cancel_generation = &worker->minimum_generation;
     gpu_init(r, &worker->initial_view, NULL);
     gpu_resize(r, &worker->initial_view);
     GLenum startup_error = glGetError();
@@ -390,7 +430,7 @@ canvas_worker_thread(void* data)
         SDL_AtomicSet(&worker->render_thread, (int)SDL_ThreadID());
         while ( SDL_AtomicGet(&worker->hold) && !SDL_AtomicGet(&worker->stop) ) { SDL_Delay(1); }
 #endif
-        if ( SDL_AtomicGet(&worker->generation) != generation ) { canvas_snapshot_release(scene); continue; }
+        if ( generation < SDL_AtomicGet(&worker->minimum_generation) ) { canvas_snapshot_release(scene); continue; }
         CanvasState canvas = {};
         canvas.root_layer = canvas_worker_install(r, &arena, &layers, scene, &working,
                                                    active ? active->working : NULL, &revision);
@@ -401,7 +441,7 @@ canvas_worker_thread(void* data)
         gpu_update_canvas(r, &canvas, &view);
         r->request_generation = generation;
         bool failed = false;
-        while ( !SDL_AtomicGet(&worker->stop) && SDL_AtomicGet(&worker->generation) == generation ) {
+        while ( !SDL_AtomicGet(&worker->stop) && generation >= SDL_AtomicGet(&worker->minimum_generation) ) {
             gpu_clip_strokes_and_update(&arena, r, &view, view.scale, canvas.root_layer, &working,
                                         0, 0, r->width, r->height, ClipFlags_TILE_SCENE);
             bool tiled = gpu_render_tile_cache(r, 0, 0, r->width, r->height);
@@ -415,7 +455,7 @@ canvas_worker_thread(void* data)
                 milton_log("Background canvas renderer OpenGL error: 0x%x\n", error);
                 failed = true; break;
             }
-            if ( SDL_AtomicGet(&worker->generation) != generation ) { break; }
+            if ( generation < SDL_AtomicGet(&worker->minimum_generation) ) { break; }
             bool complete = !tiled || !r->tiles->pending;
             if ( !complete && !r->tiles->display_ready ) { continue; }
             GLuint texture = gl::new_color_texture(r->width, r->height);
@@ -430,12 +470,17 @@ canvas_worker_thread(void* data)
                 failed = true; break;
             }
             SDL_LockMutex(worker->mutex);
-            if ( SDL_AtomicGet(&worker->generation) == generation && !SDL_AtomicGet(&worker->stop) ) {
+            if ( generation >= SDL_AtomicGet(&worker->minimum_generation) && !SDL_AtomicGet(&worker->stop) ) {
                 swap(texture, worker->result);
                 worker->result_generation = generation;
                 SDL_AtomicSet(&worker->result_ready, 1);
 #if defined(TESTING)
-                if ( complete ) { SDL_AtomicSet(&worker->completed, generation); }
+                if ( complete ) {
+                    SDL_AtomicSet(&worker->completed, generation);
+                    if ( SDL_AtomicCAS(&worker->hold_after_completion, 1, 0) ) {
+                        SDL_AtomicSet(&worker->hold, 1);
+                    }
+                }
 #endif
             }
             SDL_UnlockMutex(worker->mutex);
@@ -469,7 +514,8 @@ gpu_stop_canvas_worker(RenderBackend* r)
     CanvasWorker* worker = r->canvas_worker;
     if ( !worker ) { return; }
     SDL_AtomicSet(&worker->stop, 1);
-    SDL_AtomicAdd(&worker->generation, 1);
+    int generation = SDL_AtomicAdd(&worker->generation, 1) + 1;
+    SDL_AtomicSet(&worker->minimum_generation, generation);
     SDL_LockMutex(worker->mutex);
     SDL_CondSignal(worker->condition);
     SDL_UnlockMutex(worker->mutex);
@@ -558,14 +604,21 @@ canvas_worker_render(RenderBackend* r)
         canvas_worker_cancel(worker);
     } else {
         bool changed = !canvas_snapshot_matches(worker->scene, r);
+        bool continuing = false;
         if ( changed ) {
             CanvasSnapshot* scene = canvas_snapshot_create(r, worker->scene);
+            continuing = canvas_snapshot_continues_drawing(worker->scene, scene);
             canvas_snapshot_release(worker->scene);
             worker->scene = scene;
         }
-        if ( changed || !worker->requested || memcmp(&worker->requested_view, &r->tile_view, sizeof(CanvasView)) != 0 ) {
+        bool view_changed = memcmp(&worker->requested_view, &r->tile_view, sizeof(CanvasView)) != 0;
+        if ( changed || !worker->requested || view_changed ) {
             SDL_AtomicAdd(&worker->generation, 1);
             worker->requested_generation = SDL_AtomicGet(&worker->generation);
+            if ( !continuing || !worker->requested || view_changed
+                 || (r->flags & (RenderBackendFlags_HISTORY_CHANGED | RenderBackendFlags_CANVAS_TRANSFORMING)) ) {
+                SDL_AtomicSet(&worker->minimum_generation, worker->requested_generation);
+            }
             worker->requested_view = r->tile_view;
             worker->requested = true;
             SDL_AtomicIncRef(&worker->scene->refs);
@@ -586,13 +639,13 @@ canvas_worker_render(RenderBackend* r)
     SDL_AtomicSet(&worker->result_ready, 0);
     SDL_UnlockMutex(worker->mutex);
     if ( result ) {
-        if ( worker->requested && generation == worker->requested_generation ) {
+        if ( worker->requested && generation >= SDL_AtomicGet(&worker->minimum_generation) ) {
             if ( worker->front ) { glDeleteTextures(1, &worker->front); }
             worker->front = result; worker->front_generation = generation;
         } else { glDeleteTextures(1, &result); }
     }
     bool ready = !navigating && worker->requested && worker->front
-                 && worker->front_generation == worker->requested_generation;
+                 && worker->front_generation >= SDL_AtomicGet(&worker->minimum_generation);
     if ( ready ) {
         glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
         glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);

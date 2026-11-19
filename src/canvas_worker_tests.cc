@@ -244,6 +244,102 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
         frame();
         compare(false, "rapid camera requests");
 
+        Stroke* working = &milton->working_stroke;
+        Stroke saved_working = *working;
+        i32 saved_stroke_id = milton->canvas->stroke_id_count;
+        Layer* drawing_layer = milton->canvas->root_layer;
+        const u32 drawing_flags[] = {0, StrokeFlag_ERASER, StrokeFlag_BLUR, StrokeFlag_PRESERVE_OPACITY};
+        const char* drawing_labels[] = {"drawing pen", "drawing eraser", "drawing blur", "drawing preserve opacity"};
+        for ( int tool = 0; tool < array_count(drawing_flags); ++tool ) {
+            frame();
+            read(expected);
+            SDL_AtomicSet(&worker->hold, 1);
+            working->layer_id = drawing_layer->id;
+            working->num_points = 2;
+            working->flags = drawing_flags[tool];
+            working->brush = default_brush();
+            working->brush.radius = 24 * view->scale;
+            working->brush.alpha = 0.7f;
+            working->brush.color = to_premultiplied(v3f{0.25f, 0.45f, 0.75f}, 0.7f);
+            working->points[0] = raster_to_canvas(view, v2l{240, 240});
+            working->points[1] = raster_to_canvas(view, v2l{280, 280});
+            working->pressures[0] = working->pressures[1] = 1;
+            working->bounding_rect = bounding_box_for_stroke(working);
+            frame();
+            int drawing = worker->requested_generation;
+            check(wait(&worker->entered, drawing), "worker must receive the initial drawing snapshot");
+            read(actual);
+            check(r->tiles->display_ready && !r->tiles->display_preview
+                  && memcmp(actual, expected, (size_t)r->width * r->height * 4) == 0,
+                  "starting a stroke must retain rendered paint while the worker is blocked");
+            working->pressures[1] = 0.6f;
+            frame();
+            latest = worker->requested_generation;
+            check(latest != drawing && SDL_AtomicGet(&worker->minimum_generation) <= drawing,
+                  "new stroke samples must queue latest work without cancelling in-flight drawing");
+            SDL_AtomicSet(&worker->hold_after_completion, 1);
+            SDL_AtomicSet(&worker->hold, 0);
+            check(wait(&worker->entered, latest) && SDL_AtomicGet(&worker->completed) == drawing,
+                  "in-flight drawing must finish before the next queued snapshot begins");
+            frame();
+            check(r->tiles->display_ready && !r->tiles->display_preview && worker->front_generation == drawing,
+                  "completed drawing progress must display even while newer samples are pending");
+            SDL_AtomicSet(&worker->hold, 0);
+            check(wait(&worker->completed, latest), "latest drawing samples must complete");
+            frame();
+            compare(false, drawing_labels[tool]);
+
+            frame();
+            read(expected);
+            SDL_AtomicSet(&worker->hold, 1);
+            working->points[1].x += 4 * view->scale;
+            working->bounding_rect = bounding_box_for_stroke(working);
+            frame();
+            drawing = worker->requested_generation;
+            check(wait(&worker->entered, drawing), "worker must receive the final drawing snapshot");
+            Stroke committed = {};
+            copy_stroke(&milton->canvas->arena, view, working, &committed);
+            committed.id = milton->canvas->stroke_id_count++;
+            layer::layer_push_stroke(drawing_layer, committed);
+            reset_working_stroke(milton);
+            frame();
+            latest = worker->requested_generation;
+            read(actual);
+            check(r->tiles->display_ready && !r->tiles->display_preview
+                  && SDL_AtomicGet(&worker->minimum_generation) <= drawing
+                  && memcmp(actual, expected, (size_t)r->width * r->height * 4) == 0,
+                  "committing a stroke must retain rendered paint and in-flight progress");
+            SDL_AtomicSet(&worker->hold, 0);
+            check(wait(&worker->completed, latest), "committed drawing must finish");
+            frame();
+            compare(false, "committed drawing");
+        }
+        frame();
+        read(expected);
+        SDL_AtomicSet(&worker->hold, 1);
+        Stroke tap = {};
+        copy_stroke(&milton->canvas->arena, view,
+                    get(&drawing_layer->strokes, drawing_layer->strokes.count - 1), &tap);
+        tap.id = milton->canvas->stroke_id_count++;
+        layer::layer_push_stroke(drawing_layer, tap);
+        frame();
+        latest = worker->requested_generation;
+        check(wait(&worker->entered, latest), "worker must receive a stroke committed between frames");
+        read(actual);
+        check(r->tiles->display_ready && !r->tiles->display_preview
+              && memcmp(actual, expected, (size_t)r->width * r->height * 4) == 0,
+              "a stroke committed between frames must not switch to preview");
+        SDL_AtomicSet(&worker->hold, 0);
+        check(wait(&worker->completed, latest), "stroke committed between frames must finish");
+        frame();
+        compare(false, "stroke committed between frames");
+        for ( int tool = 0; tool < array_count(drawing_flags) + 1; ++tool ) {
+            Stroke removed = pop(&drawing_layer->strokes);
+            gpu_free_strokes(&removed, 1, r);
+        }
+        *working = saved_working;
+        milton->canvas->stroke_id_count = saved_stroke_id;
+
         SDL_AtomicSet(&worker->hold, 1);
         gpu_free_strokes(source, 1, r);
         source->points[0] = original_point;

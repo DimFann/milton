@@ -341,7 +341,7 @@ tile_time_available(CanvasTileCache* cache)
 {
     if ( !cache->can_build ) { return false; }
     if ( cache->cancel_generation
-         && SDL_AtomicGet(cache->cancel_generation) != cache->request_generation ) {
+         && cache->request_generation < SDL_AtomicGet(cache->cancel_generation) ) {
         cache->can_build = false;
         return false;
     }

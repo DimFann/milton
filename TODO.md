@@ -32,6 +32,10 @@ there is no canvas-format change or permanent flattening.
   resident resolution reuse. Cancel pending work and release all worker-owned
   GL resources before deleting its context; report worker failures explicitly.
 - [x] Avoid reallocating foreground viewport textures on same-size pan updates.
+- [x] Retain full-quality same-view paint while drawing and committing strokes.
+  Let in-flight drawing finish and display intermediate progress while keeping
+  only the latest queued update. Navigation/history and incompatible edits still
+  invalidate older frames immediately; new ink remains asynchronous.
 
 - [x] Canvas-space 256-pixel tile cores with sampling gutters and power-of-two
   resolution levels, including negative coordinates.
@@ -109,3 +113,7 @@ redo events are processed and displayed. It verifies immutable samples, latest-
 request cancellation, zoom/resize, fade/resize interruption, unchanged-frame
 reuse, output agreement with synchronous tiles within 2 LSB/channel, pixel-exact
 exports during pending work, and shutdown/restart without losing the UI context.
+Drawing checks retain rendered pixels with a blocked worker, display completed
+intermediate samples despite a newer queued update, and compare pen, eraser,
+blur, Preserve opacity, and committed strokes against synchronous tiles. Strokes
+committed entirely between frames also retain rendered paint.
