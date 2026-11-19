@@ -18,6 +18,9 @@
 
 
 #define RENDER_CHUNK_SIZE_LOG2 28
+#define OPACITY_HISTORY_CACHE_SLOTS 3
+
+static const u64 OPACITY_HISTORY_CACHE_BYTES = 32ULL * 1024 * 1024;
 
 
 enum ImmediateFlag
@@ -150,6 +153,7 @@ struct RenderBackend
     GLuint stroke_info_texture;
     GLuint opacity_stroke_texture;
     GLuint opacity_history_texture;
+    GLuint opacity_history_cache_textures[OPACITY_HISTORY_CACHE_SLOTS];
     GLuint blur_brush_textures[2];
     GLuint replay_layer_texture;
     GLuint replay_canvas_texture;
@@ -165,6 +169,9 @@ struct RenderBackend
     bool replay_cache_hit;
     int blur_filter_runs;
     int opacity_stroke_runs;
+    int opacity_history_cache_hits;
+    bool disable_opacity_regions;
+    bool disable_opacity_history_cache;
 #endif
 
     GLuint fbo;
@@ -755,6 +762,8 @@ gpu_resize(RenderBackend* r, CanvasView* view)
     r->replay_valid = false;
     r->width = view->screen_size.w;
     r->height = view->screen_size.h;
+    glDeleteTextures(array_count(r->opacity_history_cache_textures), r->opacity_history_cache_textures);
+    for ( GLuint& texture : r->opacity_history_cache_textures ) { texture = 0; }
 
     gl::resize_color_texture(r->eraser_texture, r->width, r->height);
     gl::resize_color_texture(r->canvas_texture, r->width, r->height);
@@ -1387,6 +1396,8 @@ gpu_clip_strokes_and_update(Arena* arena,
     layer_element.flags |= RenderElementFlags_LAYER;
 
     Rect screen_bounds = raster_to_canvas_bounding_rect(view, x, y, w, h, scale);
+    CanvasView render_view = *view;
+    render_view.scale = scale;
 
     reset(clip_array);
     r->cook_pending = 0;
@@ -1462,9 +1473,7 @@ gpu_clip_strokes_and_update(Arena* arena,
                                 if ( needs_cook ) { cooked_this_pass++; r->cook_burst_done++; }
                                 gpu_cook_stroke(arena, r, s);
                                 RenderElement element = *get_render_element(s->render_handle);
-                                if ( element.flags & RenderElementFlags_BLUR ) {
-                                    element.raster_bounds = canvas_to_raster_bounding_rect(view, s->bounding_rect);
-                                }
+                                element.raster_bounds = canvas_to_raster_bounding_rect(&render_view, s->bounding_rect);
                                 push(clip_array, element);
                             }
                             else if ( stroke_outside && ( flags & ClipFlags_UPDATE_GPU_DATA ) ) {
@@ -1510,9 +1519,7 @@ gpu_clip_strokes_and_update(Arena* arena,
                         element = *get_render_element(working_stroke->render_handle);
                     }
                     element.flags |= RenderElementFlags_WORKING;
-                    if ( element.flags & RenderElementFlags_BLUR ) {
-                        element.raster_bounds = canvas_to_raster_bounding_rect(view, bounding_box_for_stroke(working_stroke));
-                    }
+                    element.raster_bounds = canvas_to_raster_bounding_rect(&render_view, bounding_box_for_stroke(working_stroke));
                     push(clip_array, element);
                 }
             }
@@ -1581,6 +1588,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
     r->replay_cache_hit = false;
     r->blur_filter_runs = 0;
     r->opacity_stroke_runs = 0;
+    r->opacity_history_cache_hits = 0;
 #endif
 
     // FLip it. GL is bottom-left.
@@ -1653,15 +1661,37 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         glDrawElements(GL_TRIANGLES, re->count, GL_UNSIGNED_SHORT, 0);
     };
 
-    // Keep only one color's opacity history resident. Rebuild it from earlier visible
-    // strokes when the next preserving stroke uses a different color.
+    bool use_opacity_regions = true;
+    u64 history_texture_bytes = (u64)r->width * r->height * 4;
+    int history_cache_limit = history_texture_bytes
+        ? (int)min((u64)OPACITY_HISTORY_CACHE_SLOTS, OPACITY_HISTORY_CACHE_BYTES / history_texture_bytes) : 0;
+#if defined(TESTING)
+    use_opacity_regions = !r->disable_opacity_regions;
+    if ( r->disable_opacity_history_cache ) { history_cache_limit = 0; }
+#endif
+    struct HistoryEntry
+    {
+        bool valid;
+        v4f color;
+        i64 next;
+        i64 used;
+    };
+    HistoryEntry histories[OPACITY_HISTORY_CACHE_SLOTS] = {};
     bool have_history = false;
     v4f history_color = {};
     i64 layer_start = 0;
+    auto scissor_stroke = [&](RenderElement* re, int padding) {
+        int left = max(x, re->raster_bounds.left - padding);
+        int right = min(x + w, re->raster_bounds.right + padding);
+        int top = max(r->height - y - h, re->raster_bounds.top - padding);
+        int bottom = min(r->height - y, re->raster_bounds.bottom + padding);
+        glScissor(left, r->height - bottom, max(0, right - left), max(0, bottom - top));
+    };
     auto render_opacity_stroke = [&](RenderElement* re) {
 #if defined(TESTING)
         ++r->opacity_stroke_runs;
 #endif
+        if ( use_opacity_regions ) { scissor_stroke(re, 2); }
         bool eraser = (re->flags & (RenderElementFlags_ERASER | RenderElementFlags_BLUR)) != 0;
         glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, r->opacity_stroke_texture, 0);
         glClearColor(0,0,0,0);
@@ -1722,20 +1752,13 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         }
         float first_step = sigma / sqrtf(variance);
         gl::vertex_attrib_v2f(program, "a_position", r->vbo_screen_quad);
-        auto scissor_brush = [&](int padding) {
-            int left = max(x, re->raster_bounds.left - padding - 1);
-            int right = min(x + w, re->raster_bounds.right + padding + 1);
-            int top = max(r->height - y - h, re->raster_bounds.top - padding - 1);
-            int bottom = min(r->height - y, re->raster_bounds.bottom + padding + 1);
-            glScissor(left, r->height - bottom, max(0, right - left), max(0, bottom - top));
-        };
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(texture_target, 0);
         glActiveTexture(GL_TEXTURE2);
         glBindTexture(texture_target, 0);
         glActiveTexture(GL_TEXTURE0);
         // The cascaded filter's support is less than 0.6 brush radii on each axis.
-        scissor_brush((int)ceilf(0.6f * re->radius / r->scale) + 1);
+        scissor_stroke(re, (int)ceilf(0.6f * re->radius / r->scale) + 2);
         for ( int pass = 0; pass < 2 * stages; ++pass ) {
             glBindTexture(texture_target, pass == 0 ? target : r->blur_brush_textures[(pass - 1) % 2]);
             glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target,
@@ -1744,7 +1767,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
             gl::set_uniform_f(program, "u_step", ldexpf(first_step, pass % stages));
             glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
         }
-        scissor_brush(0);
+        scissor_stroke(re, 1);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(texture_target, r->blur_brush_textures[1]);
         glActiveTexture(GL_TEXTURE2);
@@ -1770,6 +1793,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     };
     auto update_opacity_history = [&](RenderElement* re) {
+        if ( use_opacity_regions ) { scissor_stroke(re, 2); }
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(texture_target, 0);
         glActiveTexture(GL_TEXTURE0);
@@ -1789,6 +1813,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, layer_texture, 0);
         glEnable(GL_DEPTH_TEST);
+        glScissor(x, y, w, h);
     };
 
     // Keep the checkpoint before the active layer's marker, even between strokes,
@@ -1909,6 +1934,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
 
         if ( re->flags & RenderElementFlags_LAYER ) {
             have_history = false;
+            for ( HistoryEntry& entry : histories ) { entry.valid = false; }
             layer_start = i + 1;
 
             // Layer render element.
@@ -2024,12 +2050,41 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                         r->opacity_stroke_texture = gl::new_color_texture(r->width, r->height);
                         r->opacity_history_texture = gl::new_color_texture(r->width, r->height);
                     }
+                    // A cached color catches up only on operations since it was last active.
+                    // Metadata is local to this replay and is discarded at each layer boundary.
+                    i64 history_start = layer_start;
+                    int slot = -1;
+                    for ( int j = 0; j < history_cache_limit; ++j ) {
+                        // Approximate paint-color equality is not transitive; cache keys must be exact.
+                        if ( histories[j].valid && memcmp(&histories[j].color, &re->color, sizeof(history_color)) == 0 ) {
+                            slot = j;
+                            history_start = histories[j].next;
+#if defined(TESTING)
+                            ++r->opacity_history_cache_hits;
+#endif
+                            break;
+                        }
+                    }
+                    bool found_history = slot >= 0;
+                    if ( !found_history && have_history && history_cache_limit > 0 ) {
+                        slot = 0;
+                        for ( int j = 1; j < history_cache_limit; ++j ) {
+                            if ( !histories[j].valid || histories[j].used < histories[slot].used ) { slot = j; }
+                        }
+                    }
+                    if ( slot >= 0 ) {
+                        if ( !r->opacity_history_cache_textures[slot] ) {
+                            r->opacity_history_cache_textures[slot] = gl::new_color_texture(r->width, r->height);
+                        }
+                        swap(r->opacity_history_texture, r->opacity_history_cache_textures[slot]);
+                        histories[slot] = HistoryEntry{have_history, history_color, i, i};
+                    }
                     history_color = re->color;
                     have_history = true;
                     glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, r->opacity_history_texture, 0);
                     glClearColor(0,0,0,0);
-                    glClear(GL_COLOR_BUFFER_BIT);
-                    for ( i64 previous = layer_start; previous < i; ++previous ) {
+                    if ( !found_history ) { glClear(GL_COLOR_BUFFER_BIT); }
+                    for ( i64 previous = history_start; previous < i; ++previous ) {
                         RenderElement* old = &clip_array->data[previous];
                         if ( old->count > 0 && (old->flags & RenderElementFlags_BLUR) ) {
                             if ( !navigation_preview ) {
@@ -2045,6 +2100,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                     if ( cacheable && i == cache_end && (re->flags & RenderElementFlags_WORKING) ) {
                         cache_history();
                     }
+                    glScissor(x, y, w, h);
                 }
                 if ( have_history && (eraser || same_paint_color(history_color, re->color)) ) {
                     render_opacity_stroke(re);
@@ -2411,6 +2467,8 @@ gpu_release_data(RenderBackend* r)
     glDeleteTextures(array_count(textures), textures);
     r->replay_layer_texture = r->replay_canvas_texture = r->replay_history_texture = 0;
     r->replay_valid = false;
+    glDeleteTextures(array_count(r->opacity_history_cache_textures), r->opacity_history_cache_textures);
+    for ( GLuint& texture : r->opacity_history_cache_textures ) { texture = 0; }
 }
 
 

@@ -434,8 +434,12 @@ test_blur_performance(Milton* milton)
     auto read = [&](u8* pixels) { glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels); };
     auto matches_reference = [&]() {
         read(cached);
+        r->disable_opacity_regions = true;
+        r->disable_opacity_history_cache = true;
         draw(true);
         read(reference);
+        r->disable_opacity_regions = false;
+        r->disable_opacity_history_cache = false;
         return memcmp(reference, cached, bytes) == 0;
     };
     passed = passed && matches_reference();
@@ -584,6 +588,63 @@ test_blur_performance(Milton* milton)
     draw(true);
     read(cached);
     passed = passed && r->opacity_stroke_runs > 0 && memcmp(reference, cached, bytes) == 0;
+
+    for ( int i = 0; i < 12; ++i ) {
+        add(i % 3, StrokeFlag_PRESERVE_OPACITY | StrokeFlag_DISTANCE_TO_OPACITY | StrokeFlag_PRESSURE_TO_OPACITY);
+        if ( i % 4 == 0 ) { add(1, StrokeFlag_BLUR); }
+        if ( i % 4 == 2 ) { add(0, StrokeFlag_ERASER); }
+    }
+    r->disable_opacity_regions = true;
+    r->disable_opacity_history_cache = true;
+    double original_ms = measure(true);
+    int original_masks = r->opacity_stroke_runs;
+    read(reference);
+    r->disable_opacity_regions = false;
+    double regional_ms = measure(true);
+    read(cached);
+    passed = passed && memcmp(reference, cached, bytes) == 0;
+    r->disable_opacity_history_cache = false;
+    double optimized_ms = measure(true);
+    int optimized_masks = r->opacity_stroke_runs;
+    read(cached);
+    passed = passed && r->opacity_history_cache_hits > 0 && optimized_masks < original_masks
+             && memcmp(reference, cached, bytes) == 0;
+    fprintf(stdout, "Opacity/blur replay original/regional/cached histories: %.2f / %.2f / %.2f ms; masks %d / %d; history cache hits %d\n",
+            original_ms, regional_ms, optimized_ms, original_masks, optimized_masks, r->opacity_history_cache_hits);
+    for ( int i = 0; i < 6; ++i ) { add(i, StrokeFlag_PRESERVE_OPACITY); }
+    add(0, StrokeFlag_PRESERVE_OPACITY);
+    draw(true);
+    passed = passed && matches_reference();
+    u64 allocated_history_bytes = 0;
+    for ( GLuint texture : r->opacity_history_cache_textures ) {
+        if ( texture ) { allocated_history_bytes += (u64)width * height * 4; }
+    }
+    passed = passed && allocated_history_bytes <= OPACITY_HISTORY_CACHE_BYTES;
+    gpu_resize(r, view);
+    for ( GLuint texture : r->opacity_history_cache_textures ) { passed = passed && texture == 0; }
+    draw(true);
+    passed = passed && matches_reference();
+    milton_new_layer(milton);
+    layer = milton->canvas->working_layer;
+    add(1, StrokeFlag_PRESERVE_OPACITY);
+    add(0, StrokeFlag_PRESERVE_OPACITY);
+    add(2, StrokeFlag_PRESERVE_OPACITY);
+    draw(true);
+    passed = passed && matches_reference();
+
+    view->screen_size = {3200, 900};
+    view->zoom_center = view->screen_size / 2;
+    gpu_resize(r, view);
+    gpu_update_canvas(r, milton->canvas, view);
+    glViewport(0, 0, 3200, 900);
+    gpu_clip_strokes_and_update(&milton->root_arena, r, view, view->scale, milton->canvas->root_layer,
+                                working, 0, 0, 3200, 900);
+    gpu_render_canvas(r, 0, 0, 3200, 900, background_alpha);
+    allocated_history_bytes = 0;
+    for ( GLuint texture : r->opacity_history_cache_textures ) {
+        if ( texture ) { allocated_history_bytes += 3200ULL * 900 * 4; }
+    }
+    passed = passed && allocated_history_bytes > 0 && allocated_history_bytes <= OPACITY_HISTORY_CACHE_BYTES;
 
     mlt_free(reference, "Blur cache test");
     mlt_free(cached, "Blur cache test");
