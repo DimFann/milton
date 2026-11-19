@@ -15,6 +15,9 @@ enum RenderBackendFlags
 
     RenderBackendFlags_GUI_VISIBLE        = 1<<0,
     RenderBackendFlags_NAVIGATION_PREVIEW = 1<<1,
+    RenderBackendFlags_BRUSH_RESIZING     = 1<<2,
+    RenderBackendFlags_CANVAS_TRANSFORMING = 1<<3,
+    RenderBackendFlags_HISTORY_CHANGED    = 1<<4,
 };
 
 typedef u64 RenderHandle;
@@ -29,6 +32,10 @@ struct Stroke;
 struct Layer;
 struct Milton;
 struct CanvasState;
+struct SDL_Window;
+
+bool gpu_start_canvas_worker(RenderBackend* renderer, SDL_Window* window);
+void gpu_stop_canvas_worker(RenderBackend* renderer);
 
 RenderBackend* gpu_allocate_render_backend(Arena* arena);
 

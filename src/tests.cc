@@ -378,6 +378,116 @@ test_navigation_preview()
 }
 
 static bool
+test_input_priority()
+{
+    if ( SDL_Init(SDL_INIT_EVENTS) != 0 ) {
+        fprintf(stderr, "Input priority: cannot initialize SDL events: %s\n", SDL_GetError());
+        return false;
+    }
+    ImGui::CreateContext();
+    SDL_SetModState(KMOD_NONE);
+    SDL_Event key = {};
+    key.type = SDL_KEYDOWN;
+    key.key.keysym.sym = SDLK_z;
+    key.key.keysym.scancode = SDL_SCANCODE_Z;
+    key.key.keysym.mod = KMOD_LCTRL;
+    bool passed = SDL_PushEvent(&key) == 1;
+    CanvasTileCache cache = {};
+    cache.can_build = true;
+    cache.deadline = ~0ULL;
+    passed = passed && !tile_time_available(&cache) && !cache.can_build;
+    cache.can_build = true;
+    cache.jobs = 1;
+    passed = passed && !tile_time_available(&cache) && !cache.can_build;
+    SDL_Event queued = {};
+    passed = passed && SDL_PeepEvents(&queued, 1, SDL_GETEVENT, SDL_KEYDOWN, SDL_KEYDOWN) == 1
+             && queued.key.keysym.sym == SDLK_z && queued.key.keysym.mod == KMOD_LCTRL;
+    cache.can_build = true;
+    passed = passed && tile_time_available(&cache);
+    SDL_Event mouse = {};
+    mouse.type = SDL_MOUSEMOTION;
+    passed = passed && SDL_PushEvent(&mouse) == 1 && tile_time_available(&cache);
+    passed = passed && SDL_PeepEvents(&queued, 1, SDL_GETEVENT, SDL_MOUSEMOTION, SDL_MOUSEMOTION) == 1;
+    mouse.type = SDL_MOUSEWHEEL;
+    passed = passed && SDL_PushEvent(&mouse) == 1
+             && !tile_time_available(&cache) && !cache.can_build;
+    passed = passed && SDL_PeepEvents(&queued, 1, SDL_GETEVENT, SDL_MOUSEWHEEL, SDL_MOUSEWHEEL) == 1;
+
+    Milton milton = {};
+    MiltonSettings settings = {};
+    PlatformState platform = {};
+    MiltonInput input = {};
+    milton.settings = &settings;
+    set_default_bindings(&settings.bindings);
+    shortcut_handle_key(&milton, &platform, &key, &input, false);
+    passed = passed && (input.flags & MiltonInputFlags_UNDO);
+    SDL_SetModState(KMOD_LCTRL);
+    key.key.keysym.mod = KMOD_NONE;
+    input.flags = 0;
+    shortcut_handle_key(&milton, &platform, &key, &input, false);
+    passed = passed && !(input.flags & MiltonInputFlags_UNDO);
+
+    SDL_SetModState(KMOD_NONE);
+    binding(&settings.bindings, Modifier_SPACE, 'z', Action_UNDO);
+    platform.is_space_down = true;
+    shortcut_handle_key(&milton, &platform, &key, &input, false);
+    passed = passed && (input.flags & MiltonInputFlags_UNDO);
+    ImGui::GetIO().WantCaptureKeyboard = true;
+    key.key.keysym.mod = KMOD_LALT;
+    shortcut_handle_key(&milton, &platform, &key, &input, false);
+    passed = passed && ImGui::GetIO().KeyAlt && !ImGui::GetIO().KeyCtrl;
+    ImGui::DestroyContext();
+    SDL_Quit();
+    fprintf(passed ? stdout : stderr,
+            "Input priority: queued keys preempt first/subsequent tile jobs without consumption; event-time shortcut modifiers: %s\n",
+            passed ? "passed" : "FAILED");
+    return passed;
+}
+
+static bool
+test_brush_resize_priority()
+{
+    Milton milton = {};
+    MiltonGui gui = {};
+    CanvasView view = {};
+    MiltonDragBrush drag = {};
+    view.scale = 1024;
+    milton.gui = &gui;
+    milton.view = &view;
+    milton.drag_brush = &drag;
+    milton.current_mode = MiltonMode::PEN;
+    milton.brush_sizes[BrushEnum_PEN] = 20;
+    bool passed = !brush_resize_active(&milton, 0);
+    milton_increase_brush_size(&milton);
+    u32 changed_at = milton.render_settings.brush_resize_changed_at;
+    passed = passed && milton_get_brush_radius(&milton) == 21
+             && brush_resize_active(&milton, changed_at)
+             && brush_resize_active(&milton, changed_at + 119)
+             && !brush_resize_active(&milton, changed_at + 120);
+    milton.current_mode = MiltonMode::DRAG_BRUSH_SIZE;
+    drag.brush_idx = BrushEnum_PEN;
+    passed = passed && brush_resize_active(&milton, 1000) && brush_resize_active(&milton, 6000);
+    milton.brushes[BrushEnum_PEN].shape = BrushShape_RECTANGLE;
+    milton.brushes[BrushEnum_PEN].shape_aspect = 0.25f;
+    i32 shape = 0;
+    f32 aspect = 1, angle = 0;
+    get_outline_shape(&milton, &shape, &aspect, &angle);
+    passed = passed && shape == BrushShape_RECTANGLE && aspect == 0.25f;
+    milton.current_mode = MiltonMode::PEN;
+    passed = passed && brush_resize_active(&milton, 6119) && !brush_resize_active(&milton, 6120);
+    gui.flags |= MiltonGuiFlags_SHOWING_PREVIEW;
+    passed = passed && brush_resize_active(&milton, 7000) && brush_resize_active(&milton, 12000);
+    milton.working_stroke.num_points = 1;
+    passed = passed && !brush_resize_active(&milton, 12001);
+    milton.working_stroke.num_points = 0;
+    gui.flags &= ~MiltonGuiFlags_SHOWING_PREVIEW;
+    passed = passed && !brush_resize_active(&milton, 12002);
+    fprintf(passed ? stdout : stderr, "Brush resizing: keyboard, held scrub, slider, shape, settling and drawing priority: %s\n",
+            passed ? "passed" : "FAILED");
+    return passed;
+}
+
+static bool
 test_blur_performance(Milton* milton)
 {
     const int width = 1920, height = 1080;
@@ -1238,7 +1348,8 @@ main(int argc, char** argv)
     }
 #endif
     if ( argc == 2 && strcmp(argv[1], "--blur-performance") == 0 ) {
-        return test_navigation_preview() && test_preserve_opacity(false, true) ? 0 : 1;
+        return test_navigation_preview() && test_input_priority() && test_brush_resize_priority()
+               && test_preserve_opacity(false, true) ? 0 : 1;
     }
     if ( argc == 2 && strcmp(argv[1], "--blur") == 0 ) {
         bool ui = test_blur_tool_ui();

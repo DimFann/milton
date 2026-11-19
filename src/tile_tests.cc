@@ -1,4 +1,6 @@
 // Hidden-window integration tests for the canvas tile renderer.
+#include "canvas_worker_tests.cc"
+
 static bool
 test_tile_cache()
 {
@@ -251,32 +253,86 @@ test_tile_cache()
     check(!r->tiles->pending && r->tiles->display_fading && gpu_tile_cache_pending(r)
           && memcmp(before, tiled, bytes) == 0,
           "main render must fade from the held preview only after the whole view is ready");
-    r->flags |= RenderBackendFlags_NAVIGATION_PREVIEW;
-    clip_scene();
-    gpu_render(r, 0, 0, size, size);
-    check(r->tiles->display_preview && r->tiles->display_fading
-          && r->tile_builds == 0 && r->tile_composites == 0,
-          "starting a transform must replace the active fade-in with one fade-out");
-    u32 fade_started_at = r->tiles->display_changed_at;
-    GLuint fade_from = r->tiles->display_from;
-    for ( int i = 0; i < 3; ++i ) {
-        view->pan_center.x = (i + 1) * 8 * view->scale;
-        view->scale = i == 1 ? 512 : 1024;
-        gpu_update_canvas(r, milton.canvas, view);
+    r->flags |= RenderBackendFlags_BRUSH_RESIZING;
+    u32 fade_before_resize = r->tiles->display_changed_at;
+    u64 frame_before_resize = r->tiles->frame;
+    int original_size = milton_get_brush_radius(&milton);
+    for ( int i = 1; i <= 2; ++i ) {
+        milton_set_brush_size(&milton, original_size + i);
         clip_scene();
         gpu_render(r, 0, 0, size, size);
-        check(r->tiles->display_preview && r->tiles->display_changed_at == fade_started_at
-              && r->tiles->display_from == fade_from
-              && r->tile_builds == 0 && r->tile_composites == 0,
-              "transform updates must not restart, queue or reverse the active preview fade");
+        read(tiled);
+        check(milton_get_brush_radius(&milton) == original_size + i
+              && r->tiles->display_paused && r->tiles->frame == frame_before_resize
+              && r->tile_builds == 0 && r->tile_composites == 0
+              && r->tiles->display_changed_at == fade_before_resize
+              && memcmp(before, tiled, bytes) == 0,
+              "brush resizing must update size while holding the image and skipping canvas reconstruction");
+        if ( i == 1 ) { SDL_Delay(25); }
     }
-    SDL_Delay(55);
+    r->flags &= ~RenderBackendFlags_BRUSH_RESIZING;
     clip_scene();
     gpu_render(r, 0, 0, size, size);
-    check(r->tiles->display_preview && !r->tiles->display_fading,
-          "held transform must remain in preview after its single fade-out completes");
+    check(!r->tiles->display_paused && r->tiles->display_fading
+          && (u32)(r->tiles->display_changed_at - fade_before_resize) >= 25,
+          "the fade must resume with its paused time excluded after resizing");
+    PlatformState* saved_platform = milton.platform;
+    RenderSettings saved_settings = milton.render_settings;
+    MiltonMode saved_mode = milton.current_mode;
+    for ( int i = 0; i < 9; ++i ) {
+        PlatformState platform = {};
+        MiltonInput input = {};
+        milton.platform = &platform;
+        milton.current_mode = MiltonMode::PEN;
+        milton.render_settings.have_previous_view = true;
+        milton.render_settings.previous_view = *view;
+        switch ( i ) {
+            case 0: platform.is_space_down = true; break;
+            case 1: platform.is_middle_button_down = true; break;
+            case 2: platform.is_panning = true; break;
+            case 3: input.flags |= MiltonInputFlags_PANNING; break;
+            case 4: input.scale = 1; break;
+            case 5: milton.current_mode = MiltonMode::DRAG_ZOOM; break;
+            case 6: milton.current_mode = MiltonMode::TRANSFORM; break;
+            case 7: milton.current_mode = MiltonMode::PEEK_OUT; break;
+        }
+        check(canvas_transform_active(&milton, &input, view->scale) == (i != 8),
+              "held transform controls must activate before the view moves");
+        if ( i % 3 == 1 ) { SDL_Delay(25); }
+        if ( i % 3 == 2 ) { SDL_Delay(90); }
+        if ( i == 4 || i == 5 || i == 7 ) { view->scale = view->scale == 1024 ? 512 : 1024; }
+        else if ( i == 6 || i == 8 ) { view->angle += 0.05f; }
+        else { view->pan_center.x += 8 * view->scale; }
+        check(canvas_transform_active(&milton, &input, view->scale),
+              "direct view changes must also interrupt fades");
+        gpu_update_canvas(r, milton.canvas, view);
+        r->flags |= RenderBackendFlags_NAVIGATION_PREVIEW | RenderBackendFlags_CANVAS_TRANSFORMING;
+        clip();
+        gpu_render_canvas(r, 0, 0, size, size, 1, true);
+        read(reference);
+        clip_scene();
+        gpu_render(r, 0, 0, size, size);
+        read(tiled);
+        check(r->tiles->display_preview && !r->tiles->display_fading
+              && r->tile_builds == 0 && r->tile_composites == 0
+              && memcmp(tiled, reference, bytes) == 0,
+              "the first transform frame must show the exact new view, not a faded old snapshot");
+        clip_scene();
+        gpu_render(r, 0, 0, size, size);
+        check(!r->tiles->display_fading && r->tiles->display_preview,
+              "held transforms must not start another fade");
+        r->flags &= ~(RenderBackendFlags_NAVIGATION_PREVIEW | RenderBackendFlags_CANVAS_TRANSFORMING);
+        clip_scene();
+        gpu_render(r, 0, 0, size, size);
+        check(!r->tiles->display_preview && r->tiles->display_fading,
+              "rendered fade-in must remain available after ending each transform");
+    }
+    milton.platform = saved_platform;
+    milton.render_settings = saved_settings;
+    milton.current_mode = saved_mode;
     view->pan_center = {0, 0};
     view->scale = 1024;
+    view->angle = 0;
     gpu_update_canvas(r, milton.canvas, view);
     r->flags &= ~RenderBackendFlags_NAVIGATION_PREVIEW;
     clip_scene();
@@ -290,8 +346,69 @@ test_tile_cache()
           "main-render fade must finish without replaying or recompositing tiles");
     read(tiled);
     compare("completed whole-view fade");
+    PlatformState history_platform = {};
+    milton.platform = &history_platform;
+    u32 saved_flags = milton.flags;
+    milton.flags |= MiltonStateFlags_AUTOSAVE_BLOCKED;
+    bool saved_gui_visible = milton.mode_gui_visibility[Milton::GuiVisibleCategory_DRAWING];
+    milton.mode_gui_visibility[Milton::GuiVisibleCategory_DRAWING] = false;
+    saved_settings = milton.render_settings;
+    HistoryElement history = {HistoryElement_STROKE_ADD, upper->id};
+    push(&milton.canvas->history, history);
+    push(&milton.canvas->history, history);
+    i64 original_stroke_count = upper->strokes.count;
+    for ( int i = 0; i < 4; ++i ) {
+        r->flags = RenderBackendFlags_NAVIGATION_PREVIEW | RenderBackendFlags_CANVAS_TRANSFORMING;
+        clip_scene();
+        gpu_render(r, 0, 0, size, size);
+        r->flags = RenderBackendFlags_NONE;
+        clip_scene();
+        gpu_render(r, 0, 0, size, size);
+        check(r->tiles->display_fading && !r->tiles->display_preview,
+              "history priority test must interrupt a rendered fade");
+        if ( i == 0 ) {
+            r->flags |= RenderBackendFlags_BRUSH_RESIZING;
+            clip_scene();
+            gpu_render(r, 0, 0, size, size);
+            check(r->tiles->display_paused, "history priority must also cover a resize-paused fade");
+            milton.render_settings.brush_resize_pending = true;
+            milton.render_settings.brush_resize_changed_at = SDL_GetTicks();
+        } else {
+            SDL_Delay(i == 1 ? 25 : 90);
+        }
+        MiltonInput input = {};
+        input.flags = (i < 2 ? MiltonInputFlags_UNDO : MiltonInputFlags_REDO)
+                      | MiltonInputFlags_IMGUI_GRABBED_INPUT;
+        input.mode_to_set = MiltonMode::MODE_COUNT;
+        milton_update_and_render(&milton, &input);
+        read(tiled);
+        i64 expected_count = original_stroke_count - (i < 2 ? i + 1 : 3 - i);
+        check(upper->strokes.count == expected_count
+              && (r->flags & RenderBackendFlags_HISTORY_CHANGED)
+              && r->tiles->display_preview && !r->tiles->display_fading
+              && !r->tiles->display_paused
+              && r->tile_builds == 0 && r->tile_composites == 0,
+              "undo/redo must update history, cancel even paused fades and skip reconstruction immediately");
+        clip();
+        gpu_render_canvas(r, 0, 0, size, size, 1, true);
+        read(reference);
+        check(memcmp(tiled, reference, bytes) == 0,
+              "the first undo/redo frame must match the updated preview without old-image blending");
+    }
+    pop(&milton.canvas->history);
+    pop(&milton.canvas->history);
+    milton.flags = saved_flags;
+    milton.platform = saved_platform;
+    milton.mode_gui_visibility[Milton::GuiVisibleCategory_DRAWING] = saved_gui_visible;
+    milton.gui->visible = saved_gui_visible;
+    milton.render_settings = saved_settings;
+    r->flags = RenderBackendFlags_NONE;
     r->disable_display_transitions = true;
-    fprintf(stdout, "Whole-view preview fades: 50/100 ms endpoints, midpoint, held transform, cancellation, reversal and timer wrap checked\n");
+    clip_scene();
+    gpu_render(r, 0, 0, size, size);
+    read(tiled);
+    compare("after immediate undo/redo");
+    fprintf(stdout, "Whole-view preview fades: 50/100 ms timing, resize pause, immediate pan/zoom/rotate and undo/redo, reversal and timer wrap checked\n");
 
     gpu_clear_tile_cache(r);
     auto timed_tile_frame = [&]() {
@@ -548,6 +665,21 @@ test_tile_cache()
           "clearing a preview-only cache must preserve the main framebuffer");
     r->flags &= ~RenderBackendFlags_NAVIGATION_PREVIEW;
     r->tile_cache_unlimited = false;
+    SDL_Event pending_key = {};
+    pending_key.type = SDL_KEYDOWN;
+    pending_key.key.windowID = SDL_GetWindowID(window);
+    pending_key.key.keysym.sym = SDLK_SPACE;
+    check(SDL_PushEvent(&pending_key) == 1, "input-priority test must queue a key event");
+    clip_scene();
+    gpu_render(r, 0, 0, size, size);
+    check(r->tile_builds == 0 && r->tile_composites == 0 && r->tiles->pending
+          && r->tiles->display_preview && !r->tiles->can_build,
+          "input arriving after polling must preempt even the first background tile job");
+    SDL_Event queued_key = {};
+    check(SDL_PeepEvents(&queued_key, 1, SDL_GETEVENT, SDL_KEYDOWN, SDL_KEYDOWN) == 1
+          && queued_key.key.windowID == pending_key.key.windowID
+          && queued_key.key.keysym.sym == SDLK_SPACE,
+          "background reconstruction must leave the key event intact for normal input handling");
     bool complete = false;
     bool saw_pending = false;
     int total_builds = 0;
@@ -578,6 +710,8 @@ test_tile_cache()
         compare("budgeted warm redraw");
     }
     r->tile_cache_unlimited = true;
+
+    check(test_canvas_worker(&milton, window), "isolated background canvas rendering");
 
     // Save, alter the scene, then load over the warm cache.
     char filename[128];

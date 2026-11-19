@@ -132,20 +132,20 @@ void
 shortcut_handle_key(Milton* milton, PlatformState* platform, SDL_Event* event, MiltonInput* input, b32 is_keyup)
 {
     ImGuiIO& io = ImGui::GetIO();
+    SDL_Keymod m = (SDL_Keymod)event->key.keysym.mod;
 
     if (io.WantCaptureKeyboard) {
         int key = event->key.keysym.scancode;
         IM_ASSERT(key >= 0 && key < IM_ARRAYSIZE(io.KeysDown));
         io.KeysDown[key] = (event->type == SDL_KEYDOWN);
-        io.KeyShift = ((SDL_GetModState() & KMOD_SHIFT) != 0);
-        io.KeyCtrl = ((SDL_GetModState() & KMOD_CTRL) != 0);
-        io.KeyAlt = ((SDL_GetModState() & KMOD_ALT) != 0);
-        io.KeySuper = ((SDL_GetModState() & KMOD_GUI) != 0);
+        io.KeyShift = ((m & KMOD_SHIFT) != 0);
+        io.KeyCtrl = ((m & KMOD_CTRL) != 0);
+        io.KeyAlt = ((m & KMOD_ALT) != 0);
+        io.KeySuper = ((m & KMOD_GUI) != 0);
     }
     else {
         MiltonBindings* bindings = &milton->settings->bindings;
 
-        SDL_Keymod m = SDL_GetModState();
         SDL_Keycode k = event->key.keysym.sym;
 
         i8 active_key = 0;
@@ -191,7 +191,7 @@ shortcut_handle_key(Milton* milton, PlatformState* platform, SDL_Event* event, M
         if (m & KMOD_SHIFT) { active_modifiers |= Modifier_SHIFT; }
         if (m & KMOD_GUI) { active_modifiers |= Modifier_WIN; }
         if (m & KMOD_ALT) { active_modifiers |= Modifier_ALT; }
-        if (SDL_GetKeyboardState(NULL)[SDL_SCANCODE_SPACE]) { active_modifiers |= Modifier_SPACE; }
+        if (platform->is_space_down || k == SDLK_SPACE) { active_modifiers |= Modifier_SPACE; }
 
         if (is_keyup) {
 
@@ -874,6 +874,9 @@ milton_main(bool is_fullscreen, char* file_to_open)
     }
 
     milton_resize_and_pan(milton, {}, {platform.width, platform.height});
+    if ( !gpu_start_canvas_worker(milton->renderer, window) ) {
+        platform_dialog("Background canvas rendering is unavailable. Using foreground rendering; see the log.", "Rendering error");
+    }
 
     platform.window_id = SDL_GetWindowID(window);
 
@@ -1326,7 +1329,7 @@ milton_main(bool is_fullscreen, char* file_to_open)
 
         platform_event_tick();
 
-        // Sleep if the frame took less time than the refresh rate.
+        // Wait for input or the remaining frame-cap interval.
         u64 frame_time_us = perf_counter() - frame_start_us;
 
         i32 cap_hz = display_hz;
@@ -1334,8 +1337,7 @@ milton_main(bool is_fullscreen, char* file_to_open)
         f32 expected_us = (f32)1000000 / cap_hz;
         if ( frame_time_us < expected_us ) {
             f32 to_sleep_us = expected_us - frame_time_us;
-            //  milton_log("Sleeping at least %d ms\n", (u32)(to_sleep_us/1000));
-            SDL_Delay((u32)(to_sleep_us/1000));
+            SDL_WaitEventTimeout(NULL, (i32)(to_sleep_us/1000));
         }
         #if REDRAW_EVERY_FRAME
         platform.force_next_frame = true;

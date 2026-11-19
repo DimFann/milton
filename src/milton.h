@@ -181,6 +181,8 @@ struct RenderSettings
     bool have_previous_view;
     bool navigation_preview;
     u32 navigation_changed_at;
+    bool brush_resize_pending;
+    u32 brush_resize_changed_at;
 };
 
 struct MiltonDragBrush

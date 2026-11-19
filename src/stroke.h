@@ -60,6 +60,7 @@ struct Stroke
     i32             layer_id;
     Rect            bounding_rect;
     RenderHandle    render_handle;
+    u64             content_revision;  // Runtime only; independent of GPU geometry eviction.
 
     u32 flags; // StrokeFlag
 

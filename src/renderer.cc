@@ -97,9 +97,16 @@ struct ReplayCacheEffect
 };
 
 struct CanvasTileCache;
+struct CanvasWorker;
+static void canvas_worker_invalidate(RenderBackend* r);
+static bool canvas_worker_has_result(RenderBackend* r);
 
 struct RenderBackend
 {
+    CanvasWorker* canvas_worker;
+    bool background_context;
+    SDL_atomic_t* cancel_generation;
+    int request_generation;
     CanvasTileCache* tiles;
     Arena* tile_arena;
     Layer* tile_root;
@@ -140,6 +147,8 @@ struct RenderBackend
 
     // VBO for the screen-covering quad.
     GLuint vbo_screen_quad;
+    GLuint vbo_screen_uv;
+    GLuint vao;
 
     // Handles for color picker.
     GLuint vbo_picker;
@@ -200,6 +209,8 @@ struct RenderBackend
     // Screen size.
     i32 width;
     i32 height;
+    i32 allocated_width;
+    i32 allocated_height;
 
     v3f background_color;
     i32 scale;  // zoom
@@ -230,27 +241,27 @@ enum GLVendor
     GLVendor_UNKNOWN,
 };
 
-char DEBUG_g_buffers[100000];
+SDL_atomic_t DEBUG_g_buffers[100000];
 
 static void
 DEBUG_gl_mark_buffer(GLuint buffer)
 {
     mlt_assert(buffer < 100000);
-    DEBUG_g_buffers[buffer] = 1;
+    SDL_AtomicSet(&DEBUG_g_buffers[buffer], 1);
 }
 
 static void
 DEBUG_gl_unmark_buffer(GLuint buffer)
 {
     mlt_assert(buffer < 100000);
-    DEBUG_g_buffers[buffer] = 0;
+    SDL_AtomicSet(&DEBUG_g_buffers[buffer], 0);
 }
 
 static void
 DEBUG_gl_validate_buffer(GLuint buffer)
 {
     mlt_assert(buffer < 100000);
-    mlt_assert(DEBUG_g_buffers[buffer]);
+    mlt_assert(SDL_AtomicGet(&DEBUG_g_buffers[buffer]));
 }
 
 static void
@@ -502,9 +513,8 @@ gpu_init(RenderBackend* r, CanvasView* view, ColorPicker* picker)
 
     // Create a single VAO and bind it.
     #if USE_GL_3_2
-        GLuint proxy_vao = 0;
-        glGenVertexArrays(1, &proxy_vao);
-        glBindVertexArray(proxy_vao);
+        glGenVertexArrays(1, &r->vao);
+        glBindVertexArray(r->vao);
     #endif
 
     GLVendor vendor = GLVendor_UNKNOWN;
@@ -556,6 +566,7 @@ gpu_init(RenderBackend* r, CanvasView* view, ColorPicker* picker)
         glBindBuffer(GL_ARRAY_BUFFER, vbo_uv);
         DEBUG_gl_mark_buffer(vbo_uv);
         glBufferData(GL_ARRAY_BUFFER, array_count(uv_data)*sizeof(*uv_data), uv_data, GL_STATIC_DRAW);
+        r->vbo_screen_uv = vbo_uv;
 
         r->vbo_screen_quad = vbo;
 
@@ -743,8 +754,6 @@ gpu_init(RenderBackend* r, CanvasView* view, ColorPicker* picker)
         r->canvas_texture = gl::new_color_texture(view->screen_size.w, view->screen_size.h);
         r->eraser_texture = gl::new_color_texture(view->screen_size.w, view->screen_size.h);
 
-        glGenTextures(1, &r->helper_texture);
-
         r->helper_texture = gl::new_color_texture(view->screen_size.w, view->screen_size.h);
 
         // Stroke info buffer
@@ -753,8 +762,6 @@ gpu_init(RenderBackend* r, CanvasView* view, ColorPicker* picker)
             print_framebuffer_status();
         }
 
-
-        glGenTextures(1, &r->stencil_texture);
 
         r->stencil_texture = gl::new_depth_stencil_texture(view->screen_size.w, view->screen_size.h);
 
@@ -771,7 +778,9 @@ gpu_init(RenderBackend* r, CanvasView* view, ColorPicker* picker)
     glGenBuffers(1, &r->vbo_picker_norm);
 
     // Call gpu_update_picker() to initialize the color picker
-    gpu_update_picker(r, picker);
+    if ( picker ) { gpu_update_picker(r, picker); }
+    r->allocated_width = view->screen_size.w;
+    r->allocated_height = view->screen_size.h;
     return result;
 }
 
@@ -783,6 +792,9 @@ gpu_resize(RenderBackend* r, CanvasView* view)
     r->height = view->screen_size.h;
     glDeleteTextures(array_count(r->opacity_history_cache_textures), r->opacity_history_cache_textures);
     for ( GLuint& texture : r->opacity_history_cache_textures ) { texture = 0; }
+    if ( r->allocated_width == r->width && r->allocated_height == r->height ) { return; }
+    r->allocated_width = r->width;
+    r->allocated_height = r->height;
 
     gl::resize_color_texture(r->eraser_texture, r->width, r->height);
     gl::resize_color_texture(r->canvas_texture, r->width, r->height);
@@ -1320,6 +1332,7 @@ gpu_free_strokes(Stroke* strokes, i64 count, RenderBackend* r, bool content_chan
 {
     for ( i64 i = 0; i < count; ++i ) {
         Stroke* s = &strokes[i];
+        if ( content_changed ) { ++s->content_revision; }
         RenderElement* re = get_render_element(s->render_handle);
         u64 content_revision = re ? re->content_revision + (content_changed ? 1 : 0) : 0;
         if ( re && re->vbo_stroke != 0 ) {
@@ -1332,15 +1345,15 @@ gpu_free_strokes(Stroke* strokes, i64 count, RenderBackend* r, bool content_chan
             DEBUG_gl_validate_buffer(re->vbo_pointb);
             DEBUG_gl_validate_buffer(re->indices);
 
-            glDeleteBuffers(1, &re->vbo_stroke);
-            glDeleteBuffers(1, &re->vbo_pointa);
-            glDeleteBuffers(1, &re->vbo_pointb);
-            glDeleteBuffers(1, &re->indices);
-
             DEBUG_gl_unmark_buffer(re->vbo_stroke);
             DEBUG_gl_unmark_buffer(re->vbo_pointa);
             DEBUG_gl_unmark_buffer(re->vbo_pointb);
             DEBUG_gl_unmark_buffer(re->indices);
+
+            glDeleteBuffers(1, &re->vbo_stroke);
+            glDeleteBuffers(1, &re->vbo_pointa);
+            glDeleteBuffers(1, &re->vbo_pointb);
+            glDeleteBuffers(1, &re->indices);
 
             *re = {};
         }
@@ -2258,8 +2271,8 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                     stroke_pass(re, r->stroke_program);
                 }
             } else {
-                static int n = 0;
-                milton_log("Warning: Render element with count 0 [%d times]\n", ++n);
+                static SDL_atomic_t n = {};
+                milton_log("Warning: Render element with count 0 [%d times]\n", SDL_AtomicAdd(&n, 1) + 1);
             }
         }
     }
@@ -2272,6 +2285,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
 }
 
 #include "tile_renderer.cc"
+#include "canvas_worker.cc"
 
 void
 gpu_render(RenderBackend* r,  i32 view_x, i32 view_y, i32 view_width, i32 view_height)
@@ -2285,21 +2299,28 @@ gpu_render(RenderBackend* r,  i32 view_x, i32 view_y, i32 view_width, i32 view_h
     print_framebuffer_status();
 
     // TODO: Do less work when idling
-    bool tiled = gpu_render_tile_cache(r, view_x, view_y, view_width, view_height);
-    if ( !tiled ) {
-        view_x = view_y = 0;
-        view_width = r->width;
-        view_height = r->height;
-        gpu_clip_strokes_and_update(r->tile_arena, r, &r->tile_view, r->tile_view.scale, r->tile_root,
-                                    r->tile_working, view_x, view_y, view_width, view_height,
-                                    (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW)
-                                        ? ClipFlags_NAVIGATION_PREVIEW : ClipFlags_JUST_CLIP);
-        gpu_render_canvas(r, view_x, view_y, view_width, view_height, 1.0f,
-                          (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW) != 0);
+    bool hold_display = (r->flags & RenderBackendFlags_BRUSH_RESIZING)
+                        && !(r->flags & RenderBackendFlags_NAVIGATION_PREVIEW)
+                        && gpu_hold_tile_display(r, SDL_GetTicks());
+    if ( hold_display && r->canvas_worker ) { canvas_worker_cancel(r->canvas_worker); }
+    if ( !hold_display ) {
+        bool tiled = r->canvas_worker ? canvas_worker_render(r)
+                                     : gpu_render_tile_cache(r, view_x, view_y, view_width, view_height);
+        if ( !tiled ) {
+            view_x = view_y = 0;
+            view_width = r->width;
+            view_height = r->height;
+            gpu_clip_strokes_and_update(r->tile_arena, r, &r->tile_view, r->tile_view.scale, r->tile_root,
+                                        r->tile_working, view_x, view_y, view_width, view_height,
+                                        (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW)
+                                            ? ClipFlags_NAVIGATION_PREVIEW : ClipFlags_JUST_CLIP);
+            gpu_render_canvas(r, view_x, view_y, view_width, view_height, 1.0f,
+                              (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW) != 0);
+        }
+        bool preview = (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW) != 0
+                       || (tiled && !r->tiles->display_ready);
+        gpu_present_tile_transition(r, tiled && preview && !r->canvas_worker, preview, SDL_GetTicks());
     }
-    bool preview = (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW) != 0
-                   || (tiled && !r->tiles->display_ready);
-    gpu_present_tile_transition(r, tiled && preview, preview, SDL_GetTicks());
 
     GLenum texture_target;
     texture_target = GL_TEXTURE_2D;
@@ -2539,6 +2560,7 @@ gpu_render_to_buffer(Milton* milton, u8* buffer, i32 scale, i32 x, i32 y, i32 w,
 void
 gpu_release_data(RenderBackend* r)
 {
+    gpu_stop_canvas_worker(r);
     gpu_clear_tile_cache(r);
     release(&r->clip_array);
     release(&r->replay_elements);

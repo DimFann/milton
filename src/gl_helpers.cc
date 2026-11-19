@@ -245,11 +245,7 @@ set_attribute_vec2(GLuint program, char* name, GLfloat* data, size_t data_sz)
 void
 use_program(GLuint program)
 {
-    static GLuint cached_program = 0;
-    if (program != cached_program) {
-        glUseProgram(program);
-        cached_program = program;
-    }
+    glUseProgram(program);
 }
 
 bool

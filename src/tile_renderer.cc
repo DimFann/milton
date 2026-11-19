@@ -60,6 +60,11 @@ struct CanvasTileCache
     i32 display_width, display_height;
     u32 display_changed_at;
     bool display_valid, display_preview, display_fading;
+    bool display_paused;
+    u32 display_paused_at;
+    bool background_context;
+    SDL_atomic_t* cancel_generation;
+    int request_generation;
 };
 
 struct TileBounds
@@ -90,8 +95,7 @@ tile_stroke_key(Stroke* stroke, i64 position)
     key.bounds = stroke->bounding_rect;
     key.points = stroke->num_points;
     key.flags = stroke->flags;
-    RenderElement* element = get_render_element(stroke->render_handle);
-    key.revision = element ? element->content_revision : 0;
+    key.revision = stroke->content_revision;
     key.position = position;
     return key;
 }
@@ -162,6 +166,7 @@ tile_entry_release(CanvasTile* tile)
 void
 gpu_clear_tile_cache(RenderBackend* r)
 {
+    canvas_worker_invalidate(r);
     if ( !r->tiles ) { return; }
     CanvasTileCache* cache = r->tiles;
     for ( CanvasTile& tile : cache->entries ) { tile_entry_release(&tile); }
@@ -188,6 +193,9 @@ gpu_clear_tile_cache(RenderBackend* r)
 bool
 gpu_tile_cache_pending(RenderBackend* r)
 {
+    if ( r->canvas_worker ) {
+        return canvas_worker_has_result(r) || (r->tiles && r->tiles->display_fading);
+    }
     return r->tiles && (r->tiles->pending || r->tiles->display_fading);
 }
 
@@ -197,6 +205,29 @@ tile_copy_display_texture(GLuint texture, i32 width, i32 height)
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texture);
     glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
+}
+
+static bool
+gpu_hold_tile_display(RenderBackend* r, u32 now)
+{
+    CanvasTileCache* cache = r->tiles;
+    if ( !cache || !cache->display_valid || cache->display_width != r->width
+         || cache->display_height != r->height ) { return false; }
+    if ( !cache->display_paused ) {
+        cache->display_paused = true;
+        cache->display_paused_at = now;
+    }
+    glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    glBindTexture(GL_TEXTURE_2D, cache->display_history);
+    gpu_fill_with_texture(r);
+#if defined(TESTING)
+    r->tile_builds = r->tile_composites = r->tile_hits = 0;
+#endif
+    return true;
 }
 
 static void
@@ -211,8 +242,15 @@ gpu_present_tile_transition(RenderBackend* r, bool saved_preview, bool preview, 
         cache->display_from = gl::new_color_texture(r->width, r->height);
         cache->display_width = r->width; cache->display_height = r->height;
         cache->display_valid = cache->display_fading = false;
+        cache->display_paused = false;
     }
-    bool immediate = r->tile_working && r->tile_working->num_points > 0;
+    if ( cache->display_paused ) {
+        cache->display_changed_at += (u32)(now - cache->display_paused_at);
+        cache->display_paused = false;
+    }
+    bool immediate = (r->tile_working && r->tile_working->num_points > 0)
+                     || (r->flags & (RenderBackendFlags_CANVAS_TRANSFORMING
+                                    | RenderBackendFlags_HISTORY_CHANGED));
 #if defined(TESTING)
     immediate |= r->disable_display_transitions;
 #endif
@@ -287,6 +325,7 @@ tile_workspace(RenderBackend* r, int size)
         w->fbo = gl::new_fbo(w->canvas_texture, w->stencil_texture, GL_TEXTURE_2D);
         w->tile_paint_texture = gl::new_color_texture(size, size);
         cache->underlay = gl::new_color_texture(size, size);
+        w->allocated_width = w->allocated_height = size;
     } else {
         gl::resize_color_texture(w->tile_paint_texture, size, size);
         gl::resize_color_texture(cache->underlay, size, size);
@@ -300,7 +339,23 @@ tile_workspace(RenderBackend* r, int size)
 static bool
 tile_time_available(CanvasTileCache* cache)
 {
-    return cache->can_build && (!cache->jobs || !cache->deadline || perf_counter() < cache->deadline);
+    if ( !cache->can_build ) { return false; }
+    if ( cache->cancel_generation
+         && SDL_AtomicGet(cache->cancel_generation) != cache->request_generation ) {
+        cache->can_build = false;
+        return false;
+    }
+    if ( cache->deadline && !cache->background_context ) {
+        SDL_PumpEvents();
+        if ( SDL_HasEvents(SDL_KEYDOWN, SDL_TEXTINPUT)
+             || SDL_HasEvents(SDL_MOUSEBUTTONDOWN, SDL_MOUSEWHEEL)
+             || (SDL_GetMouseState(NULL, NULL) && SDL_HasEvent(SDL_MOUSEMOTION))
+             || SDL_HasEvent(SDL_QUIT) ) {
+            cache->can_build = false;
+            return false;
+        }
+    }
+    return !cache->jobs || !cache->deadline || perf_counter() < cache->deadline;
 }
 
 static i64
@@ -607,6 +662,7 @@ gpu_render_tile_cache(RenderBackend* r, i32, i32, i32, i32)
         for ( GLuint& texture : w->opacity_history_cache_textures ) { texture = 0; }
         for ( GLuint& texture : w->blur_brush_textures ) { texture = 0; }
         w->width = w->height = 0;
+        w->allocated_width = w->allocated_height = 0;
         w->cook_deadline = 0;
         glGenFramebuffersEXT(1, &cache->fbo);
         glGenBuffers(1, &cache->quad);
@@ -636,6 +692,9 @@ gpu_render_tile_cache(RenderBackend* r, i32, i32, i32, i32)
         push(&cache->layers, scene);
     }
     cache->jobs = 0; cache->failed = false; cache->pending = false;
+    cache->background_context = r->background_context;
+    cache->cancel_generation = r->cancel_generation;
+    cache->request_generation = r->request_generation;
     cache->can_build = !(r->flags & RenderBackendFlags_NAVIGATION_PREVIEW);
     cache->deadline = perf_counter() + (u64)(0.004 / perf_count_to_sec(1000000) * 1000000);
     if ( r->tile_working->num_points ) { cache->deadline = 0; }

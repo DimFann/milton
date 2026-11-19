@@ -191,8 +191,9 @@ milton_get_brush(Milton const* milton)
 static void
 get_outline_shape(Milton const* milton, i32* shape, f32* aspect, f32* angle)
 {
-    if ( milton->current_mode == MiltonMode::PEN || milton->current_mode == MiltonMode::ERASER ) {
-        Brush const& b = milton->brushes[milton_get_brush_enum(milton)];
+    int brush_enum = milton_get_brush_enum(milton);
+    if ( brush_enum == BrushEnum_PEN || brush_enum == BrushEnum_ERASER ) {
+        Brush const& b = milton->brushes[brush_enum];
         *shape = b.shape;
         *aspect = clamp(b.shape_aspect, 0.05f, 1.0f);
         *angle = brush_effective_angle(b);
@@ -653,6 +654,10 @@ void
 milton_set_brush_size_for_enum(Milton* milton, i32 size, int brush_idx)
 {
     if ( current_mode_is_for_drawing(milton) ) {
+        if ( *pointer_to_brush_size(milton) != size ) {
+            milton->render_settings.brush_resize_pending = true;
+            milton->render_settings.brush_resize_changed_at = SDL_GetTicks();
+        }
         (*pointer_to_brush_size(milton)) = size;
         milton_update_brushes(milton);
     }
@@ -1617,14 +1622,52 @@ transform_tick(Milton* milton, MiltonInput const* input)
 }
 
 static bool
+brush_resize_active(Milton* milton, u32 now)
+{
+    RenderSettings* settings = &milton->render_settings;
+    if ( milton->working_stroke.num_points > 0 ) {
+        settings->brush_resize_pending = false;
+        return false;
+    }
+    if ( milton->current_mode == MiltonMode::DRAG_BRUSH_SIZE
+         || (milton->gui->flags & MiltonGuiFlags_SHOWING_PREVIEW) ) {
+        settings->brush_resize_pending = true;
+        settings->brush_resize_changed_at = now;
+    }
+    if ( settings->brush_resize_pending && (u32)(now - settings->brush_resize_changed_at) < 120 ) {
+        return true;
+    }
+    settings->brush_resize_pending = false;
+    return false;
+}
+
+static bool
+canvas_view_changed(const RenderSettings* settings, const CanvasView& view, i64 scale)
+{
+    const CanvasView& previous = settings->previous_view;
+    return settings->have_previous_view
+           && (previous.scale != scale || previous.pan_center != view.pan_center
+               || previous.zoom_center != view.zoom_center || previous.angle != view.angle
+               || previous.flipped != view.flipped || previous.screen_size != view.screen_size);
+}
+
+static bool
+canvas_transform_active(Milton const* milton, MiltonInput const* input, i64 scale)
+{
+    return milton->platform->is_panning || milton->platform->is_space_down
+           || milton->platform->is_middle_button_down
+           || (input->flags & MiltonInputFlags_PANNING) || input->scale != 0
+           || milton->current_mode == MiltonMode::DRAG_ZOOM
+           || milton->current_mode == MiltonMode::TRANSFORM
+           || milton->current_mode == MiltonMode::PEEK_OUT
+           || canvas_view_changed(&milton->render_settings, *milton->view, scale);
+}
+
+static bool
 update_navigation_preview(RenderSettings* settings, const CanvasView& view, i64 scale,
                           bool navigating, bool drawing, u32 now)
 {
-    const CanvasView& previous = settings->previous_view;
-    bool moved = settings->have_previous_view
-                 && (previous.scale != scale || previous.pan_center != view.pan_center
-                     || previous.zoom_center != view.zoom_center || previous.angle != view.angle
-                     || previous.flipped != view.flipped || previous.screen_size != view.screen_size);
+    bool moved = canvas_view_changed(settings, view, scale);
     bool was_preview = settings->navigation_preview;
     if ( navigating || moved ) { settings->navigation_changed_at = now; }
     settings->navigation_preview = navigating || (!drawing
@@ -1727,6 +1770,7 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
                 if ( h.type == HistoryElement_SELECTION_OP ) {
                     if ( selection_undo_op(milton) ) {
                         push(&milton->canvas->redo_stack, h);
+                        render_flags |= RenderBackendFlags_HISTORY_CHANGED;
                     }
                     break;
                 }
@@ -1740,6 +1784,7 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
                         push(&milton->canvas->stroke_graveyard, stroke);
                         push(&milton->canvas->redo_stack, h);
 
+                        render_flags |= RenderBackendFlags_HISTORY_CHANGED;
                         milton->render_settings.do_full_redraw = true;
                     }
                     break;
@@ -1753,6 +1798,7 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
                 case HistoryElement_SELECTION_OP: {
                     if ( selection_redo_op(milton) ) {
                         push(&milton->canvas->history, h);
+                        render_flags |= RenderBackendFlags_HISTORY_CHANGED;
                     }
                 } break;
                 case HistoryElement_STROKE_ADD: {
@@ -1764,6 +1810,7 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
                             push(&milton->canvas->history, h);
                             selection_auto_redo(milton, milton->canvas->history.count);
 
+                            render_flags |= RenderBackendFlags_HISTORY_CHANGED;
                             milton->render_settings.do_full_redraw = true;
 
                             break;
@@ -2231,14 +2278,15 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
 #endif
 
     b32 has_working_stroke = milton->working_stroke.num_points > 0;
+    if ( brush_resize_active(milton, SDL_GetTicks()) ) {
+        render_flags |= RenderBackendFlags_BRUSH_RESIZING;
+        milton->platform->force_next_frame = true;
+    }
     i64 render_scale = milton_render_scale(milton);
-    bool navigating = milton->platform->is_panning || milton->platform->is_space_down
-                      || milton->platform->is_middle_button_down
-                      || (input->flags & MiltonInputFlags_PANNING) || input->scale != 0
-                      || milton->current_mode == MiltonMode::DRAG_ZOOM
-                      || milton->current_mode == MiltonMode::TRANSFORM
-                      || milton->current_mode == MiltonMode::PEEK_OUT
-                      || selection_is_dragging(milton);
+    bool transforming = canvas_transform_active(milton, input, render_scale);
+    if ( transforming ) { render_flags |= RenderBackendFlags_CANVAS_TRANSFORMING; }
+    bool navigating = transforming || selection_is_dragging(milton)
+                      || (render_flags & RenderBackendFlags_HISTORY_CHANGED);
     if ( update_navigation_preview(&milton->render_settings, *milton->view, render_scale,
                                    navigating, has_working_stroke, SDL_GetTicks()) ) {
         render_flags |= RenderBackendFlags_NAVIGATION_PREVIEW;

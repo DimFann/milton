@@ -17,6 +17,7 @@
 #endif
 
 #define GL_FUNCTIONS_CORE \
+    X(void,     glFinish, void) \
     X(GLenum,   glGetError, void)\
     X(GLint,    glGetAttribLocation,      GLuint program, GLchar* name)                     \
     X(GLint,    glGetUniformLocation,     GLuint program, GLchar *name)                     \
@@ -91,6 +92,7 @@
     X(void,     glViewport,               GLint x, GLint y, GLsizei width, GLsizei height)\
     X(void,     glDetachShader,           GLuint program, GLuint shader)                          \
     X(void,     glDeleteProgram,          GLuint program)                                         \
+    X(void,     glGetAttachedShaders,     GLuint program, GLsizei maxCount, GLsizei* count, GLuint* shaders) \
     X(void,     glDeleteTextures,         GLsizei n, const GLuint *textures)\
     X(void,     glDeleteShader,           GLuint shader)                                          \
     X(void, glPolygonMode,  GLenum face, GLenum mode) \
