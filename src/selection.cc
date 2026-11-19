@@ -124,6 +124,13 @@ selection_transform_active(Milton* milton)
 }
 
 b32
+selection_is_dragging(Milton* milton)
+{
+    Selection* s = milton->selection;
+    return s->state == SelState_MOVE || s->state == SelState_XFORM_DRAG;
+}
+
+b32
 selection_lasso_armed(Milton* milton)
 {
     return milton->selection->armed;

@@ -352,6 +352,26 @@ test_navigation_preview()
     passed = passed && update(true, false, 200);
     passed = passed && update(false, false, 319);
     passed = passed && !update(false, false, 320);
+
+    Selection selection = {};
+    Milton milton = {};
+    milton.selection = &selection;
+    auto selection_preview = [&](u32 now) {
+        return update(selection_is_dragging(&milton), false, now);
+    };
+    selection.armed = true;
+    selection.state = SelState_LASSO;
+    passed = passed && !selection_preview(400);
+    selection.state = SelState_MOVE;
+    passed = passed && selection_preview(500) && selection_preview(5500);
+    selection.state = SelState_IDLE;
+    passed = passed && selection_preview(5619) && !selection_preview(5620);
+    selection.xform_mode = true;
+    passed = passed && !selection_preview(5700);
+    selection.state = SelState_XFORM_DRAG;
+    passed = passed && selection_preview(5800) && selection_preview(10800);
+    selection.state = SelState_IDLE;
+    passed = passed && selection_preview(10919) && !selection_preview(10920);
     fprintf(passed ? stdout : stderr, "Navigation preview held controls, settling, redraw, drawing cancellation and timer wrap: %s\n",
             passed ? "passed" : "FAILED");
     return passed;
@@ -1137,9 +1157,14 @@ test_vram_stats()
 }
 #endif
 
+#include "tile_tests.cc"
+
 extern "C" int
 main(int argc, char** argv)
 {
+    if ( argc == 2 && strcmp(argv[1], "--tile-cache") == 0 ) {
+        return test_tile_cache() ? 0 : 1;
+    }
 #if defined(_WIN32)
     if ( argc == 2 && strcmp(argv[1], "--vram-stats") == 0 ) {
         return test_vram_stats() ? 0 : 1;

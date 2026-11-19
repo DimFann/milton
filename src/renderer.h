@@ -75,8 +75,10 @@ void gpu_reset_stroke(RenderBackend* r, RenderHandle handle);
 void gpu_cook_stroke(Arena* arena, RenderBackend* renderer, Stroke* stroke,
                      CookStrokeOpt cook_option = CookStroke_NEW);
 
-void gpu_free_strokes(RenderBackend* renderer, CanvasState* canvas);
-void gpu_free_strokes(Stroke* strokes, i64 count, RenderBackend* renderer);
+void gpu_free_strokes(RenderBackend* renderer, CanvasState* canvas, bool content_changed = true);
+void gpu_free_strokes(Stroke* strokes, i64 count, RenderBackend* renderer, bool content_changed = true);
+bool gpu_tile_cache_pending(RenderBackend* renderer);
+void gpu_clear_tile_cache(RenderBackend* renderer);
 
 
 // Creates OpenGL objects for strokes that are in view but are not loaded on the GPU. Deletes
@@ -86,6 +88,7 @@ enum ClipFlags
     ClipFlags_UPDATE_GPU_DATA   = 1<<0,  // Free all strokes that are far away.
     ClipFlags_JUST_CLIP         = 1<<1,
     ClipFlags_NAVIGATION_PREVIEW = 1<<2,
+    ClipFlags_TILE_SCENE         = 1<<3,
 };
 void gpu_set_cook_budget(RenderBackend* renderer, float seconds);
 void gpu_get_cook_progress(RenderBackend* renderer, i64* pending, i64* done);

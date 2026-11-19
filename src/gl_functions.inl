@@ -29,6 +29,7 @@
     X(void,     glEnable, GLenum cap )\
     X(void,     glFramebufferTexture2DEXT, GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) \
     X(void,     glGenFramebuffersEXT,     GLsizei n, GLuint* framebuffers)                        \
+    X(void,     glDeleteFramebuffersEXT,  GLsizei n, const GLuint* framebuffers)                  \
     X(void,     glGenTextures,            GLsizei n, GLuint* textures) \
     X(void,     glAttachShader,           GLuint program, GLuint shader)                          \
     X(GLboolean, glIsProgram,             GLuint program)                                         \
@@ -79,6 +80,7 @@
     X(void,     glDrawArrays, GLenum mode, GLint first, GLsizei count)\
     X(void,     glDrawElements,           GLenum mode, GLsizei count, GLenum type, const void *indices)\
     X(void,     glEnableVertexAttribArray, GLuint index)                                          \
+    X(void,     glDisableVertexAttribArray, GLuint index)                                         \
     X(void,     glPixelStorei,            GLenum pname, GLint param)\
     X(void,     glReadPixels,             GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void *pixels)\
     X(void,     glScissor,                GLint x, GLint y, GLsizei width, GLsizei height) \

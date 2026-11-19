@@ -2231,7 +2231,8 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
                       || (input->flags & MiltonInputFlags_PANNING) || input->scale != 0
                       || milton->current_mode == MiltonMode::DRAG_ZOOM
                       || milton->current_mode == MiltonMode::TRANSFORM
-                      || milton->current_mode == MiltonMode::PEEK_OUT;
+                      || milton->current_mode == MiltonMode::PEEK_OUT
+                      || selection_is_dragging(milton);
     if ( update_navigation_preview(&milton->render_settings, *milton->view, render_scale,
                                    navigating, has_working_stroke, SDL_GetTicks()) ) {
         render_flags |= RenderBackendFlags_NAVIGATION_PREVIEW;
@@ -2299,6 +2300,7 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     if ( milton->render_settings.navigation_preview ) {
         clip_flags = (ClipFlags)(clip_flags | ClipFlags_NAVIGATION_PREVIEW);
     }
+    clip_flags = (ClipFlags)(clip_flags | ClipFlags_TILE_SCENE);
     gpu_set_cook_budget(milton->renderer, 0.008f);
 
     gpu_clip_strokes_and_update(&milton->root_arena, milton->renderer, milton->view, render_scale,
@@ -2308,15 +2310,11 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     PROFILE_GRAPH_END(clipping);
 
     if ( milton->render_settings.navigation_preview ) {
-        if ( gpu_needs_navigation_preview(milton->renderer) ) {
-            milton->platform->force_next_frame = true;
-        } else {
-            milton->render_settings.navigation_preview = false;
-            render_flags &= ~RenderBackendFlags_NAVIGATION_PREVIEW;
-        }
+        milton->platform->force_next_frame = true;
     }
     gpu_reset_render_flags(milton->renderer, render_flags);
     gpu_render(milton->renderer, view_x, view_y, view_width, view_height);
+    if ( gpu_tile_cache_pending(milton->renderer) ) { milton->platform->force_next_frame = true; }
 
     ARENA_VALIDATE(&milton->root_arena);
 }

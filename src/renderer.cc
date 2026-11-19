@@ -54,6 +54,7 @@ struct RenderElement
 
     i64     count;
     u64     revision;
+    u64     content_revision;
     Rect    raster_bounds;
 
     union {
@@ -95,8 +96,18 @@ struct ReplayCacheEffect
     int kernel;
 };
 
+struct CanvasTileCache;
+
 struct RenderBackend
 {
+    CanvasTileCache* tiles;
+    Arena* tile_arena;
+    Layer* tile_root;
+    Stroke* tile_working;
+    CanvasView tile_view;
+    bool tile_internal;
+    GLuint tile_paint_texture;
+    GLuint tile_underlay_texture;
     f32 viewport_limits[2];  // OpenGL limits to the framebuffer size.
 
     v2i render_center;
@@ -172,6 +183,10 @@ struct RenderBackend
     int opacity_history_cache_hits;
     bool disable_opacity_regions;
     bool disable_opacity_history_cache;
+    bool tile_cache_unlimited;
+    int tile_builds;
+    int tile_composites;
+    int tile_hits;
 #endif
 
     GLuint fbo;
@@ -958,19 +973,11 @@ relative_to_render_center(RenderBackend* r, v2l point)
     return result;
 }
 
-void
-gpu_update_canvas(RenderBackend* r, CanvasState* canvas, CanvasView* view)
+static void
+gpu_update_view(RenderBackend* r, CanvasView* view)
 {
-    r->replay_valid = false;
     v2i center = view->zoom_center;
     v2l pan = view->pan_center;
-
-    v2i new_render_center = VEC2I(pan / (i64)(1<<RENDER_CHUNK_SIZE_LOG2));
-    if ( new_render_center != r->render_center ) {
-        milton_log("Moving to new render center. %d, %d Clearing render data.\n", new_render_center.x, new_render_center.y);
-        r->render_center = new_render_center;
-        gpu_free_strokes(r, canvas);
-    }
 
     GLuint ps[] = {
         r->stroke_program,
@@ -1002,6 +1009,18 @@ gpu_update_canvas(RenderBackend* r, CanvasState* canvas, CanvasView* view)
     gpu_update_scale(r, view->scale);
     float fscreen[] = { (float)view->screen_size.x, (float)view->screen_size.y };
     set_screen_size(r, fscreen);
+}
+
+void
+gpu_update_canvas(RenderBackend* r, CanvasState* canvas, CanvasView* view)
+{
+    r->replay_valid = false;
+    v2i center = VEC2I(view->pan_center / (i64)(1<<RENDER_CHUNK_SIZE_LOG2));
+    if ( center != r->render_center ) {
+        r->render_center = center;
+        gpu_free_strokes(r, canvas, false);
+    }
+    gpu_update_view(r, view);
 }
 
 void
@@ -1266,6 +1285,7 @@ gpu_cook_stroke(Arena* arena, RenderBackend* r, Stroke* stroke, CookStrokeOpt co
             re->shape_axis_y = stroke->brush.shape_axis_y;
             re->master_alpha = clamp(stroke->brush.alpha, 0.0f, 1.0f);
             re->revision = ++r->stroke_revision;
+            if ( !re->content_revision ) { re->content_revision = 1; }
 
             re->flags = 0;
             if (stroke->flags & StrokeFlag_ERASER) {
@@ -1292,11 +1312,12 @@ gpu_cook_stroke(Arena* arena, RenderBackend* r, Stroke* stroke, CookStrokeOpt co
 }
 
 void
-gpu_free_strokes(Stroke* strokes, i64 count, RenderBackend* r)
+gpu_free_strokes(Stroke* strokes, i64 count, RenderBackend* r, bool content_changed)
 {
     for ( i64 i = 0; i < count; ++i ) {
         Stroke* s = &strokes[i];
         RenderElement* re = get_render_element(s->render_handle);
+        u64 content_revision = re ? re->content_revision + (content_changed ? 1 : 0) : 0;
         if ( re && re->vbo_stroke != 0 ) {
             mlt_assert(re->vbo_pointa != 0);
             mlt_assert(re->vbo_pointb != 0);
@@ -1319,12 +1340,14 @@ gpu_free_strokes(Stroke* strokes, i64 count, RenderBackend* r)
 
             *re = {};
         }
+        if ( re ) { re->content_revision = content_revision; }
     }
 }
 
 void
-gpu_free_strokes(RenderBackend* r, CanvasState* canvas)
+gpu_free_strokes(RenderBackend* r, CanvasState* canvas, bool content_changed)
 {
+    if ( content_changed ) { gpu_clear_tile_cache(r); }
     if ( canvas->root_layer != NULL ) {
         for ( Layer* l = canvas->root_layer;
               l != NULL;
@@ -1335,9 +1358,9 @@ gpu_free_strokes(RenderBackend* r, CanvasState* canvas)
             while ( bucket ) {
                 if ( count >= STROKELIST_BUCKET_COUNT ) {
                     count -= STROKELIST_BUCKET_COUNT;
-                    gpu_free_strokes(bucket->data, STROKELIST_BUCKET_COUNT, r);
+                    gpu_free_strokes(bucket->data, STROKELIST_BUCKET_COUNT, r, content_changed);
                 } else {
-                    gpu_free_strokes(bucket->data, count, r);
+                    gpu_free_strokes(bucket->data, count, r, content_changed);
                 }
                 bucket = bucket->next;
             }
@@ -1390,6 +1413,11 @@ gpu_clip_strokes_and_update(Arena* arena,
                             Layer* root_layer, Stroke* working_stroke,
                             i32 x, i32 y, i32 w, i32 h, ClipFlags flags)
 {
+    r->tile_arena = arena;
+    r->tile_root = root_layer;
+    r->tile_working = working_stroke;
+    r->tile_view = *view;
+    r->tile_view.scale = scale;
     DArray<RenderElement>* clip_array = &r->clip_array;
 
     RenderElement layer_element = {};
@@ -1457,6 +1485,13 @@ gpu_clip_strokes_and_update(Arena* arena,
                             // Area might be 0 if the stroke is smaller than
                             // a pixel. We don't draw it in that case.
                             if ( !stroke_outside && area!=0 ) {
+                                if ( flags & ClipFlags_TILE_SCENE ) {
+                                    RenderElement element = {};
+                                    if ( s->flags & StrokeFlag_BLUR ) { element.flags |= RenderElementFlags_BLUR; }
+                                    if ( s->flags & StrokeFlag_PRESERVE_OPACITY ) { element.flags |= RenderElementFlags_PRESERVE_OPACITY; }
+                                    push(clip_array, element);
+                                    continue;
+                                }
                                 if ( (flags & ClipFlags_NAVIGATION_PREVIEW) && (s->flags & StrokeFlag_BLUR) ) {
                                     // Retain visibility metadata without preparing invisible blur geometry.
                                     RenderElement element = {};
@@ -1484,14 +1519,14 @@ gpu_clip_strokes_and_update(Arena* arena,
                                      || bounds.bottom > y+h + min_number_of_screens*h
                                      || bounds.left   > x+w + min_number_of_screens*w
                                      || bounds.right  < x - min_number_of_screens*w ) {
-                                    gpu_free_strokes(s, 1, r);
+                                    gpu_free_strokes(s, 1, r, false);
                                 }
                             }
                         }
                     }
                 }
                 else {
-                    if ( flags & ClipFlags_UPDATE_GPU_DATA ) { gpu_free_strokes(bucket->data, count, r); }
+                    if ( flags & ClipFlags_UPDATE_GPU_DATA ) { gpu_free_strokes(bucket->data, count, r, false); }
                 }
                 #if MILTON_ENABLE_PROFILING
                 {
@@ -1512,7 +1547,10 @@ gpu_clip_strokes_and_update(Arena* arena,
             if ( working_stroke->layer_id == l->id ) {
                 if ( working_stroke->num_points > 0 && !(working_stroke->flags & StrokeFlag_CUT) ) {
                     RenderElement element = {};
-                    if ( (flags & ClipFlags_NAVIGATION_PREVIEW) && (working_stroke->flags & StrokeFlag_BLUR) ) {
+                    if ( flags & ClipFlags_TILE_SCENE ) {
+                        if ( working_stroke->flags & StrokeFlag_BLUR ) { element.flags |= RenderElementFlags_BLUR; }
+                        if ( working_stroke->flags & StrokeFlag_PRESERVE_OPACITY ) { element.flags |= RenderElementFlags_PRESERVE_OPACITY; }
+                    } else if ( (flags & ClipFlags_NAVIGATION_PREVIEW) && (working_stroke->flags & StrokeFlag_BLUR) ) {
                         element.flags = RenderElementFlags_BLUR;
                     } else {
                         gpu_cook_stroke(arena, r, working_stroke, CookStroke_UPDATE_WORKING_STROKE);
@@ -1637,6 +1675,19 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
     glEnable(GL_BLEND);
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     glDepthFunc(GL_NOTEQUAL);
+
+    if ( r->tile_underlay_texture ) {
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+        glBindTexture(GL_TEXTURE_2D, r->tile_underlay_texture);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
+        gpu_fill_with_texture(r);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->eraser_texture, 0);
+        gpu_fill_with_texture(r);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, layer_texture, 0);
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+    }
 
     DArray<RenderElement>* clip_array = &r->clip_array;
 
@@ -1828,7 +1879,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         }
         cache_has_blur |= (element.flags & RenderElementFlags_BLUR) != 0;
     }
-    bool cacheable = cache_has_blur && !navigation_preview && !r->cook_pending && view_x == 0 && view_y == 0
+    bool cacheable = !r->tile_internal && cache_has_blur && !navigation_preview && !r->cook_pending && view_x == 0 && view_y == 0
                      && view_width == r->width && view_height == r->height;
     auto cache_element = [](const RenderElement& element) {
         u64 effects = 0;
@@ -1992,6 +2043,15 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                 glEnable(GL_DEPTH_TEST);
             }
 
+            if ( r->tile_paint_texture ) {
+                glDisable(GL_DEPTH_TEST);
+                glDisable(GL_BLEND);
+                glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, r->tile_paint_texture, 0);
+                glBindTexture(texture_target, layer_post_effects);
+                gpu_fill_with_texture(r);
+                glEnable(GL_DEPTH_TEST);
+                glEnable(GL_BLEND);
+            }
             // Blit layer contents to canvas_texture
             {
                 glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
@@ -2207,6 +2267,8 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
     POP_GRAPHICS_GROUP();  // render_canvas
 }
 
+#include "tile_renderer.cc"
+
 void
 gpu_render(RenderBackend* r,  i32 view_x, i32 view_y, i32 view_width, i32 view_height)
 {
@@ -2219,8 +2281,17 @@ gpu_render(RenderBackend* r,  i32 view_x, i32 view_y, i32 view_width, i32 view_h
     print_framebuffer_status();
 
     // TODO: Do less work when idling
-    gpu_render_canvas(r, view_x, view_y, view_width, view_height, 1.0f,
-                      (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW) != 0);
+    if ( !gpu_render_tile_cache(r, view_x, view_y, view_width, view_height) ) {
+        view_x = view_y = 0;
+        view_width = r->width;
+        view_height = r->height;
+        gpu_clip_strokes_and_update(r->tile_arena, r, &r->tile_view, r->tile_view.scale, r->tile_root,
+                                    r->tile_working, view_x, view_y, view_width, view_height,
+                                    (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW)
+                                        ? ClipFlags_NAVIGATION_PREVIEW : ClipFlags_JUST_CLIP);
+        gpu_render_canvas(r, view_x, view_y, view_width, view_height, 1.0f,
+                          (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW) != 0);
+    }
 
     GLenum texture_target;
     texture_target = GL_TEXTURE_2D;
@@ -2460,6 +2531,7 @@ gpu_render_to_buffer(Milton* milton, u8* buffer, i32 scale, i32 x, i32 y, i32 w,
 void
 gpu_release_data(RenderBackend* r)
 {
+    gpu_clear_tile_cache(r);
     release(&r->clip_array);
     release(&r->replay_elements);
     release(&r->replay_effects);

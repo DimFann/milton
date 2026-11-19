@@ -1,58 +1,64 @@
-# Renderer TODO: canvas-space tile caching
+# Canvas-space tile renderer
 
-## Goal
+Implemented on `feature/canvas-tile-cache`. Original strokes remain authoritative;
+there is no canvas-format change or permanent flattening.
 
-Reuse completed layer rendering across pan, zoom, and rotation instead of
-replaying the visible stroke history after every transform. Keep saved strokes
-authoritative: this must not permanently flatten artwork or require a new canvas
-file format.
+## Implemented
 
-The current renderer has a view-specific replay checkpoint, bounded per-replay
-color histories, and region-limited opacity passes. These reduce replay costs but
-do not make completed results reusable at arbitrary views.
+- [x] Canvas-space 256-pixel tile cores with sampling gutters and power-of-two
+  resolution levels, including negative coordinates.
+- [x] Per-layer paint tiles and composited-prefix tiles, validated against exact
+  stroke/brush/effect metadata and lower-layer dependencies.
+- [x] Content revisions independent of GPU geometry eviction, so moving the
+  viewport or render origin does not invalidate unchanged paint.
+- [x] Dirty-tile detection and earliest changed history positions for drawing,
+  stroke edits, undo/redo, and layer changes.
+- [x] Chronological Preserve opacity, pressure, eraser, legacy-stroke, and blur
+  replay using the reference stroke renderer.
+- [x] Reverse chronological filter-footprint expansion: dependent blur operations
+  accumulate their required input padding rather than sharing a fixed halo.
+- [x] Cross-layer padded input assembly for erasers followed by blur, preserving
+  the existing lower-layer sampling behavior.
+- [x] Separate paint/composition caching: layer-opacity changes can recomposite
+  retained paint; lower-layer edits invalidate upper paint only where required.
+- [x] Lazy allocation, LRU eviction, canvas-replacement cleanup, and a 128 MiB
+  tile-texture budget. The reusable workspace has a separate 128 MiB limit that
+  includes its possible opacity-history and blur intermediates.
+- [x] Reuse resident coarse and fine levels while navigating. Do not execute
+  reconstruction jobs while navigation controls remain active.
+- [x] Incremental idle reconstruction with an approximately 4 ms cooperative
+  budget between GPU-completed jobs; publish completed tiles, not half-rendered
+  intermediates. Revalidate jobs each frame instead of retaining obsolete view
+  requests. Working strokes finish affected tiles immediately.
+- [x] Full-quality deterministic export through the reference renderer,
+  independent of display tiles and navigation previews.
 
-## Design and implementation
+## Limits and follow-ups
 
-- [ ] Define canvas-space tile coordinates and resolution levels suitable for
-  an effectively unbounded, stroke-based canvas.
-- [ ] Cache per-layer rendered tiles, keyed by resolution, tile coordinates,
-  layer identity, and validated stroke/effect revisions.
-- [ ] Preserve chronological stroke processing and opacity-history semantics,
-  including matching colors, other-color interruptions, erasers, pressure,
-  legacy strokes, and replay checkpoints.
-- [ ] Track dirty tiles and their earliest changed history positions for
-  drawing, stroke edits, undo/redo, and layer changes.
-- [ ] Model blur dependencies across tile boundaries. Render padded regions
-  with sufficient neighboring input for every filter stage; propagate changes
-  through subsequent blur operations rather than assuming one fixed halo is
-  sufficient for an entire stroke history.
-- [ ] Separate cached layer paint from final layer opacity/compositing where
-  possible, so composition-only changes avoid repainting unchanged tiles.
-- [ ] Add a bounded GPU-memory cache with eviction, lazy allocation, and correct
-  cleanup on canvas replacement and graphics-context teardown.
-- [ ] Reuse available resolution levels during transforms, then refine only
-  visible tiles at the required quality. Respect held navigation controls.
-- [ ] Schedule reconstruction within a frame budget, cancel obsolete work after
-  view or artwork changes, and publish only coherent completed results.
-- [ ] Keep export deterministic and full quality, independent of preview state
-  or cached display resolution.
+- [ ] Replace conservative accumulated-padding replay with an operation-level
+  tile dependency graph for extremely long overlapping blur histories. Jobs
+  exceeding the workspace/dependency budget currently log a diagnostic and use
+  full replay for correctness.
+- [ ] Preempt large individual jobs and working-stroke reconstruction. The
+  current frame budget is cooperative, not a hard GPU-time guarantee.
+- [ ] Improve filtering and resolution selection during continuous zoom.
+  Sampling cached raster tiles is not bit-identical to analytic stroke
+  rasterization at arbitrary scales/rotations.
+- [ ] Consider sharing empty tiles and storing reusable intermediate history
+  checkpoints inside heavily edited tiles to reduce cold reconstruction.
+- [ ] Broaden device coverage and benchmark very large canvases, many layers,
+  sustained edits, cache eviction, and low-memory graphics adapters.
 
-## Suggested milestones
+## Validation
 
-1. Add a tile-rendering path alongside the existing renderer and compare output
-   for ordinary paint and multiple layers.
-2. Support Preserve opacity, erasers, and blur with correct cross-tile replay.
-3. Add dirty-region invalidation, bounded caching, and multi-resolution reuse.
-4. Add transform previews and budgeted refinement; retire the existing path only
-   after correctness and performance checks pass.
-
-## Acceptance checks
-
-- [ ] Compare against uncached full replay at the same target resolution.
-- [ ] Test tile seams, transparent backgrounds, large and repeated blurs,
-  pressure/hardness, mixed colors, and erasing.
-- [ ] Test pan, zoom, rotation, flip, viewport resize, and cropped/scaled exports.
-- [ ] Test undo/redo, edits earlier in history, layer visibility/order/opacity/
-  effects, opening another canvas, and reopening saved legacy artwork.
-- [ ] Measure cold reconstruction, warm transforms, local edits, GPU-memory
-  usage, and frame-time spikes on representative complex canvases.
+The `--tile-cache` hidden-window GPU suite compares aligned tile rendering with
+uncached full replay, checks internal boundaries, and reports the measured
+maximum channel difference. Small RGBA8 resampling differences are expected;
+native reference rendering remains available for exports and bounded fallbacks.
+The suite also exercises mixed colors/pressure, repeated blur, erasers, lower
+layer dependencies, transforms, working strokes, edits, undo/redo, layer
+properties/order, save/load, budgeted refinement, and cache eviction.
+Main-render integration checks held navigation without reconstruction, both
+coarser and finer resident-level reuse, and preview-only cache cleanup. Cropped
+2x exports are pixel-identical before and after tile/navigation activity, with
+the view and navigation state preserved.

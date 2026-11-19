@@ -25,6 +25,7 @@ Selection*  selection_create(Arena* arena);
 // Queue a command. It runs on the next update.
 void        selection_command(Milton* milton, SelectionCommand cmd);
 b32         selection_transform_active(Milton* milton);  // Free transform or lasso armed: Esc should cancel it
+b32         selection_is_dragging(Milton* milton);
 
 // Returns true if the selection consumed this frame's pointer input.
 b32         selection_tick(Milton* milton, MiltonInput const* input);
