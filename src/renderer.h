@@ -14,6 +14,7 @@ enum RenderBackendFlags
     RenderBackendFlags_NONE = 0,
 
     RenderBackendFlags_GUI_VISIBLE        = 1<<0,
+    RenderBackendFlags_NAVIGATION_PREVIEW = 1<<1,
 };
 
 typedef u64 RenderHandle;
@@ -61,6 +62,7 @@ void gpu_update_canvas(RenderBackend* renderer, CanvasState* canvas, CanvasView*
 
 void gpu_get_viewport_limits(RenderBackend* renderer, float* out_viewport_limits);
 i32  gpu_get_num_clipped_strokes(Layer* root_layer);
+bool gpu_has_visible_blur(RenderBackend* renderer);
 
 
 enum CookStrokeOpt

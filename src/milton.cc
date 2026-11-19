@@ -1616,6 +1616,26 @@ transform_tick(Milton* milton, MiltonInput const* input)
     }
 }
 
+static bool
+update_navigation_preview(RenderSettings* settings, const CanvasView& view, i64 scale,
+                          bool navigating, bool drawing, u32 now)
+{
+    const CanvasView& previous = settings->previous_view;
+    bool moved = settings->have_previous_view
+                 && (previous.scale != scale || previous.pan_center != view.pan_center
+                     || previous.zoom_center != view.zoom_center || previous.angle != view.angle
+                     || previous.flipped != view.flipped || previous.screen_size != view.screen_size);
+    bool was_preview = settings->navigation_preview;
+    if ( navigating || moved ) { settings->navigation_changed_at = now; }
+    settings->navigation_preview = navigating || (!drawing
+        && (moved || (was_preview && (u32)(now - settings->navigation_changed_at) < 120)));
+    settings->previous_view = view;
+    settings->previous_view.scale = scale;
+    settings->have_previous_view = true;
+    if ( settings->navigation_preview || was_preview ) { settings->do_full_redraw = true; }
+    return settings->navigation_preview;
+}
+
 void
 milton_update_and_render(Milton* milton, MiltonInput const* input)
 {
@@ -2198,8 +2218,6 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     i32 view_width = 0;
     i32 view_height = 0;
 
-    gpu_reset_render_flags(milton->renderer, render_flags);
-
     ClipFlags clip_flags = ClipFlags_JUST_CLIP;
 
 #if REDRAW_EVERY_FRAME
@@ -2207,6 +2225,17 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
 #endif
 
     b32 has_working_stroke = milton->working_stroke.num_points > 0;
+    i64 render_scale = milton_render_scale(milton);
+    bool navigating = milton->platform->is_panning || milton->platform->is_space_down
+                      || milton->platform->is_middle_button_down
+                      || (input->flags & MiltonInputFlags_PANNING) || input->scale != 0
+                      || milton->current_mode == MiltonMode::DRAG_ZOOM
+                      || milton->current_mode == MiltonMode::TRANSFORM
+                      || milton->current_mode == MiltonMode::PEEK_OUT;
+    if ( update_navigation_preview(&milton->render_settings, *milton->view, render_scale,
+                                   navigating, has_working_stroke, SDL_GetTicks()) ) {
+        render_flags |= RenderBackendFlags_NAVIGATION_PREVIEW;
+    }
 
     if (has_working_stroke) {
         b32 has_blur = (milton->working_stroke.flags & StrokeFlag_BLUR) != 0;
@@ -2267,8 +2296,6 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
 
     PROFILE_GRAPH_BEGIN(clipping);
 
-    i64 render_scale = milton_render_scale(milton);
-
     gpu_set_cook_budget(milton->renderer, 0.008f);
 
     gpu_clip_strokes_and_update(&milton->root_arena, milton->renderer, milton->view, render_scale,
@@ -2277,6 +2304,15 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     gpu_set_cook_budget(milton->renderer, 0);
     PROFILE_GRAPH_END(clipping);
 
+    if ( milton->render_settings.navigation_preview ) {
+        if ( gpu_has_visible_blur(milton->renderer) ) {
+            milton->platform->force_next_frame = true;
+        } else {
+            milton->render_settings.navigation_preview = false;
+            render_flags &= ~RenderBackendFlags_NAVIGATION_PREVIEW;
+        }
+    }
+    gpu_reset_render_flags(milton->renderer, render_flags);
     gpu_render(milton->renderer, view_x, view_y, view_width, view_height);
 
     ARENA_VALIDATE(&milton->root_arena);

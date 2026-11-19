@@ -312,7 +312,258 @@ test_blur_tool_ui()
 }
 
 static bool
-test_preserve_opacity(bool blur_tests = false)
+test_navigation_preview()
+{
+    RenderSettings settings = {};
+    CanvasView view = {};
+    view.scale = 512;
+    auto update = [&](bool navigating, bool drawing, u32 now) {
+        return update_navigation_preview(&settings, view, view.scale, navigating, drawing, now);
+    };
+    bool passed = !update(false, false, 0);
+    view.pan_center.x = 100;
+    passed = passed && update(false, false, 100);
+    settings.do_full_redraw = false;
+    passed = passed && update(false, false, 219);
+    passed = passed && !update(false, false, 220)
+             && settings.do_full_redraw;
+    settings.do_full_redraw = false;
+    passed = passed && !update(false, false, 221)
+             && !settings.do_full_redraw;
+    view.scale /= 2;
+    passed = passed && update(false, false, 230);
+    passed = passed && !update(false, true, 231);
+
+    passed = passed && update(true, false, 300);
+    passed = passed && update(true, false, 5300);
+    passed = passed && update(true, true, 10300);
+    passed = passed && update(false, false, 10301);
+    view.angle = 0.05f;
+    passed = passed && update(false, false, 10400);
+    passed = passed && update(false, false, 10519);
+    passed = passed && !update(false, false, 10520);
+    passed = passed && update(true, false, 10600);
+    passed = passed && !update(false, true, 10601);
+
+    view.angle = 0.1f;
+    passed = passed && update(true, false, 0xFFFFFFD0u);
+    passed = passed && update(false, false, 20);
+    passed = passed && !update(false, false, 80);
+    passed = passed && update(true, false, 200);
+    passed = passed && update(false, false, 319);
+    passed = passed && !update(false, false, 320);
+    fprintf(passed ? stdout : stderr, "Navigation preview held controls, settling, redraw, drawing cancellation and timer wrap: %s\n",
+            passed ? "passed" : "FAILED");
+    return passed;
+}
+
+static bool
+test_blur_performance(Milton* milton)
+{
+    const int width = 1920, height = 1080;
+    auto* r = milton->renderer;
+    auto* view = milton->view;
+    view->screen_size = {width, height};
+    view->zoom_center = {width / 2, height / 2};
+    gpu_resize(r, view);
+    gpu_update_canvas(r, milton->canvas, view);
+    glViewport(0, 0, width, height);
+    Layer* layer = milton->canvas->working_layer;
+    auto add = [&](int index, u32 flags) {
+        Stroke stroke = {};
+        stroke.id = milton->canvas->stroke_id_count++;
+        stroke.layer_id = layer->id;
+        stroke.num_points = 2;
+        stroke.points = arena_alloc_array(&milton->canvas->arena, 2, v2l);
+        stroke.pressures = arena_alloc_array(&milton->canvas->arena, 2, f32);
+        int y = 180 + (index % 12) * 55;
+        stroke.points[0] = raster_to_canvas(view, v2l{400, y});
+        stroke.points[1] = raster_to_canvas(view, v2l{1450, y + 100});
+        stroke.pressures[0] = stroke.pressures[1] = 1;
+        stroke.flags = flags;
+        stroke.brush = default_brush();
+        stroke.brush.radius = 64 * view->scale;
+        stroke.brush.alpha = 0.6f;
+        stroke.brush.color = to_premultiplied(v3f{0.2f + 0.04f * index, 0.5f, 0.75f}, 0.6f);
+        stroke.brush.pressure_size = 0;
+        stroke.bounding_rect = bounding_box_for_stroke(&stroke);
+        layer::layer_push_stroke(layer, stroke);
+    };
+    for ( int i = 0; i < 12; ++i ) { add(i, 0); }
+    for ( int i = 0; i < 12; ++i ) { add(i, StrokeFlag_BLUR); }
+    float background_alpha = 0.0f;
+    auto draw = [&](bool uncached = false, bool preview = false) {
+        if ( uncached ) { r->replay_valid = false; }
+        gpu_clip_strokes_and_update(&milton->root_arena, r, view, view->scale, milton->canvas->root_layer,
+                                    &milton->working_stroke, 0, 0, width, height);
+        gpu_render_canvas(r, 0, 0, width, height, background_alpha, preview);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
+        u8 pixel[4];
+        glReadPixels(width / 2, height / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    };
+    auto measure = [&](bool uncached, bool preview = false) {
+        draw(uncached, preview);
+        u64 start = SDL_GetPerformanceCounter();
+        for ( int i = 0; i < 8; ++i ) { draw(uncached, preview); }
+        return 1000.0 * (SDL_GetPerformanceCounter() - start) / (8 * SDL_GetPerformanceFrequency());
+    };
+    double blur_ms = measure(true);
+    double cached_blur_ms = measure(false);
+    for ( int i = 0; i < 12; ++i ) { add(i, StrokeFlag_PRESERVE_OPACITY); }
+    Stroke* working = &milton->working_stroke;
+    working->layer_id = layer->id;
+    working->num_points = 2;
+    working->points[0] = raster_to_canvas(view, v2l{700, 500});
+    working->points[1] = raster_to_canvas(view, v2l{1250, 570});
+    working->pressures[0] = working->pressures[1] = 1;
+    working->flags = StrokeFlag_PRESERVE_OPACITY;
+    working->brush = default_brush();
+    working->brush.radius = 32 * view->scale;
+    working->brush.color = to_premultiplied(v3f{0.2f, 0.5f, 0.75f}, 0.6f);
+    working->bounding_rect = bounding_box_for_stroke(working);
+    double preserving_ms = measure(true);
+    double cached_preserving_ms = measure(false);
+    bool passed = r->replay_cache_hit && r->blur_filter_runs == 0;
+    fprintf(stdout, "1080p blur replay uncached/cached: %.2f / %.2f ms; 12 preserving colors + moving pen: %.2f / %.2f ms\n",
+            blur_ms, cached_blur_ms, preserving_ms, cached_preserving_ms);
+
+    size_t bytes = (size_t)width * height * 4;
+    auto* reference = (u8*)mlt_calloc(bytes, 1, "Blur cache test");
+    auto* cached = (u8*)mlt_calloc(bytes, 1, "Blur cache test");
+    auto read = [&](u8* pixels) { glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels); };
+    auto matches_reference = [&]() {
+        read(cached);
+        draw(true);
+        read(reference);
+        return memcmp(reference, cached, bytes) == 0;
+    };
+    passed = passed && matches_reference();
+    double start_ms = 0, end_ms = 0;
+    for ( int i = 0; i < 3; ++i ) {
+        Stroke committed = {};
+        copy_stroke(&milton->canvas->arena, view, working, &committed);
+        committed.id = milton->canvas->stroke_id_count++;
+        layer::layer_push_stroke(layer, committed);
+        reset_working_stroke(milton);
+        u64 start = SDL_GetPerformanceCounter();
+        draw();
+        end_ms += 1000.0 * (SDL_GetPerformanceCounter() - start) / SDL_GetPerformanceFrequency();
+        passed = passed && r->replay_cache_hit && r->blur_filter_runs == 0 && matches_reference();
+        working->num_points = 2;
+        working->bounding_rect = bounding_box_for_stroke(working);
+        start = SDL_GetPerformanceCounter();
+        draw();
+        start_ms += 1000.0 * (SDL_GetPerformanceCounter() - start) / SDL_GetPerformanceFrequency();
+        passed = passed && r->replay_cache_hit && r->blur_filter_runs == 0 && matches_reference();
+    }
+    fprintf(stdout, "Stroke start / commit average: %.2f / %.2f ms (no old blur passes)\n", start_ms / 3, end_ms / 3);
+
+    read(reference);
+    double preview_ms = measure(true, true);
+    read(cached);
+    passed = passed && r->blur_filter_runs == 0 && memcmp(reference, cached, bytes) != 0;
+    r->flags |= RenderBackendFlags_NAVIGATION_PREVIEW;
+    draw(true);
+    read(cached);
+    passed = passed && r->blur_filter_runs > 0 && memcmp(reference, cached, bytes) == 0;
+    r->flags &= ~RenderBackendFlags_NAVIGATION_PREVIEW;
+    fprintf(stdout, "Navigation preview: %.2f ms; full quality restored pixel-for-pixel\n", preview_ms);
+    working->num_points = 0;
+    draw();
+    draw();
+    passed = passed && r->replay_cache_hit && r->blur_filter_runs == 0 && matches_reference();
+    working->num_points = 2;
+    draw();
+    passed = passed && r->replay_cache_hit && r->blur_filter_runs == 0;
+    working->points[1].y += view->scale * 8;
+    working->bounding_rect = bounding_box_for_stroke(working);
+    draw();
+    passed = passed && r->replay_cache_hit && r->blur_filter_runs == 0 && matches_reference();
+    working->flags = StrokeFlag_BLUR;
+    draw();
+    passed = passed && r->replay_cache_hit && r->blur_filter_runs <= 2 && matches_reference();
+    working->flags = StrokeFlag_PRESERVE_OPACITY;
+    // A different working color reconstructs its history once, then reuses that snapshot.
+    working->brush.color = to_premultiplied(v3f{0.24f, 0.5f, 0.75f}, 0.6f);
+    draw();
+    passed = passed && r->replay_cache_hit && r->blur_filter_runs > 0;
+    draw();
+    passed = passed && r->replay_cache_hit && r->blur_filter_runs == 0 && matches_reference();
+
+    Stroke removed = pop(&layer->strokes);
+    draw();
+    passed = passed && !r->replay_cache_hit && matches_reference();
+    push(&layer->strokes, removed);
+    draw();
+    passed = passed && r->replay_cache_hit && matches_reference();
+    Stroke* changed = get(&layer->strokes, 0);
+    gpu_free_strokes(changed, 1, r);
+    changed->brush.color = to_premultiplied(v3f{0.8f, 0.1f, 0.2f}, 0.6f);
+    draw();
+    passed = passed && !r->replay_cache_hit && matches_reference();
+    view->pan_center.x += 8 * view->scale;
+    view->angle = 0.1f;
+    view->flipped = 1;
+    gpu_update_canvas(r, milton->canvas, view);
+    draw();
+    passed = passed && !r->replay_cache_hit && matches_reference();
+    gpu_update_background(r, v3f{0.5f, 0.4f, 0.3f});
+    draw();
+    passed = passed && !r->replay_cache_hit && matches_reference();
+    layer->flags &= ~LayerFlags_VISIBLE;
+    draw();
+    passed = passed && !r->replay_cache_hit && !gpu_has_visible_blur(r) && matches_reference();
+    layer->flags |= LayerFlags_VISIBLE;
+    draw();
+    passed = passed && gpu_has_visible_blur(r) && matches_reference();
+    background_alpha = 1.0f;
+    draw();
+    passed = passed && !r->replay_cache_hit && matches_reference();
+    gpu_resize(r, view);
+    draw();
+    passed = passed && !r->replay_cache_hit && matches_reference();
+
+    Layer* lower = layer;
+    milton_new_layer(milton);
+    layer = milton->canvas->working_layer;
+    add(2, 0);
+    add(2, StrokeFlag_BLUR);
+    working->layer_id = layer->id;
+    working->flags = StrokeFlag_ERASER;
+    working->brush.alpha = 0.5f;
+    draw();
+    draw();
+    passed = passed && r->replay_cache_hit && matches_reference();
+    lower->alpha = 0.4f;
+    draw();
+    passed = passed && !r->replay_cache_hit && matches_reference();
+    LayerEffect effect = {};
+    effect.type = LayerEffectType_BLUR;
+    effect.enabled = true;
+    effect.blur.original_scale = (i32)view->scale;
+    effect.blur.kernel_size = 3;
+    lower->effects = &effect;
+    draw();
+    passed = passed && !r->replay_cache_hit && matches_reference();
+    effect.blur.kernel_size = 5;
+    draw();
+    passed = passed && !r->replay_cache_hit && matches_reference();
+    // Effects belong to a layer: moving the same effect must invalidate the prefix.
+    lower->effects = nullptr;
+    layer->effects = &effect;
+    draw();
+    passed = passed && !r->replay_cache_hit && matches_reference();
+    layer->effects = nullptr;
+    mlt_free(reference, "Blur cache test");
+    mlt_free(cached, "Blur cache test");
+    passed = passed && glGetError() == GL_NO_ERROR;
+    fprintf(passed ? stdout : stderr, "Blur cache pixels, working pen/eraser, undo/redo, edits, view, background, layers and effects: %s\n",
+            passed ? "passed" : "FAILED");
+    return passed;
+}
+
+static bool
+test_preserve_opacity(bool blur_tests = false, bool benchmark = false)
 {
     if ( SDL_Init(SDL_INIT_VIDEO) != 0 ) {
         fprintf(stderr, "Cannot initialize opacity test video: %s\n", SDL_GetError());
@@ -350,6 +601,16 @@ test_preserve_opacity(bool blur_tests = false)
     gpu_resize(r, view);
     glViewport(0, 0, size, size);
     gpu_update_canvas(r, milton.canvas, view);
+    if ( benchmark ) {
+        bool passed = test_blur_performance(&milton);
+        gpu_free_strokes(r, milton.canvas);
+        gpu_release_data(r);
+        arena_free(&milton.root_arena);
+        SDL_GL_DeleteContext(context);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return passed;
+    }
     Layer* layer = milton.canvas->working_layer;
     v2l line[] = {raster_to_canvas(view, v2l{100, 160}), raster_to_canvas(view, v2l{220, 160})};
     v2l offscreen[] = {raster_to_canvas(view, v2l{400, 160}), raster_to_canvas(view, v2l{460, 160})};
@@ -465,6 +726,7 @@ test_preserve_opacity(bool blur_tests = false)
                 "Blur: base/half/full/repeated edge alpha %d/%d/%d/%d; replay, pressure, transparent red, layers, opacity history: %s (GL 0x%x)\n",
                 outside, weak, full, repeated, passed ? "passed" : "FAILED", error);
         gpu_free_strokes(r, milton.canvas);
+        gpu_release_data(r);
         arena_free(&milton.root_arena);
         SDL_GL_DeleteContext(context);
         SDL_DestroyWindow(window);
@@ -505,6 +767,7 @@ test_preserve_opacity(bool blur_tests = false)
 
     auto clear_strokes = [&]() {
         gpu_free_strokes(r, milton.canvas);
+        gpu_release_data(r);
         reset(&layer->strokes);
     };
     // Soft and square strokes must protect their actual per-pixel coverage, not master alpha.
@@ -744,6 +1007,9 @@ test_preserve_opacity_binding()
 extern "C" int
 main(int argc, char** argv)
 {
+    if ( argc == 2 && strcmp(argv[1], "--blur-performance") == 0 ) {
+        return test_navigation_preview() && test_preserve_opacity(false, true) ? 0 : 1;
+    }
     if ( argc == 2 && strcmp(argv[1], "--blur") == 0 ) {
         bool ui = test_blur_tool_ui();
         bool gpu = test_preserve_opacity(true);

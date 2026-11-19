@@ -177,6 +177,10 @@ struct PeekOut
 struct RenderSettings
 {
     b32 do_full_redraw;
+    CanvasView previous_view;
+    bool have_previous_view;
+    bool navigation_preview;
+    u32 navigation_changed_at;
 };
 
 struct MiltonDragBrush

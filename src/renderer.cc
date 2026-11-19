@@ -35,6 +35,8 @@ enum RenderElementFlags
     RenderElementFlags_ERASER               = 1<<3,
     RenderElementFlags_PRESERVE_OPACITY     = 1<<4,
     RenderElementFlags_BLUR                 = 1<<5,
+    RenderElementFlags_WORKING              = 1<<6,
+    RenderElementFlags_ACTIVE_LAYER         = 1<<7,
 };
 
 struct RenderElement
@@ -48,6 +50,7 @@ struct RenderElement
 #endif
 
     i64     count;
+    u64     revision;
     Rect    raster_bounds;
 
     union {
@@ -71,6 +74,22 @@ struct RenderElement
     };
 
     int     flags;  // RenderElementFlags enum;
+};
+
+struct ReplayCacheElement
+{
+    u64 revision;
+    u64 effect_count;
+    int flags;
+    float layer_alpha;
+};
+
+struct ReplayCacheEffect
+{
+    int type;
+    int enabled;
+    int scale;
+    int kernel;
 };
 
 struct RenderBackend
@@ -132,6 +151,20 @@ struct RenderBackend
     GLuint opacity_stroke_texture;
     GLuint opacity_history_texture;
     GLuint blur_brush_textures[2];
+    GLuint replay_layer_texture;
+    GLuint replay_canvas_texture;
+    GLuint replay_history_texture;
+    DArray<ReplayCacheElement> replay_elements;
+    DArray<ReplayCacheEffect> replay_effects;
+    bool replay_valid;
+    bool replay_have_history;
+    v4f replay_history_color;
+    float replay_background_alpha;
+    u64 stroke_revision;
+#if defined(TESTING)
+    bool replay_cache_hit;
+    int blur_filter_runs;
+#endif
 
     GLuint fbo;
 
@@ -718,6 +751,7 @@ gpu_init(RenderBackend* r, CanvasView* view, ColorPicker* picker)
 void
 gpu_resize(RenderBackend* r, CanvasView* view)
 {
+    r->replay_valid = false;
     r->width = view->screen_size.w;
     r->height = view->screen_size.h;
 
@@ -732,6 +766,11 @@ gpu_resize(RenderBackend* r, CanvasView* view)
     for ( GLuint texture : r->blur_brush_textures ) {
         if ( texture ) { gl::resize_color_texture(texture, r->width, r->height); }
     }
+    if ( r->replay_layer_texture ) {
+        gl::resize_color_texture(r->replay_layer_texture, r->width, r->height);
+        gl::resize_color_texture(r->replay_canvas_texture, r->width, r->height);
+        gl::resize_color_texture(r->replay_history_texture, r->width, r->height);
+    }
     gl::resize_depth_stencil_texture(r->stencil_texture, r->width, r->height);
 }
 
@@ -744,6 +783,7 @@ gpu_reset_render_flags(RenderBackend* r, int flags)
 void
 gpu_update_scale(RenderBackend* r, i32 scale)
 {
+    if ( r->scale != scale ) { r->replay_valid = false; }
     r->scale = scale;
     GLuint ps[] = {
         r->stroke_program,
@@ -844,6 +884,7 @@ gpu_update_export_rect(RenderBackend* r, Exporter* exporter)
 void
 gpu_update_background(RenderBackend* r, v3f background_color)
 {
+    if ( r->background_color != background_color ) { r->replay_valid = false; }
     r->background_color = background_color;
 }
 
@@ -910,6 +951,7 @@ relative_to_render_center(RenderBackend* r, v2l point)
 void
 gpu_update_canvas(RenderBackend* r, CanvasState* canvas, CanvasView* view)
 {
+    r->replay_valid = false;
     v2i center = view->zoom_center;
     v2l pan = view->pan_center;
 
@@ -1213,6 +1255,7 @@ gpu_cook_stroke(Arena* arena, RenderBackend* r, Stroke* stroke, CookStrokeOpt co
             re->shape_axis_x = stroke->brush.shape_axis_x;
             re->shape_axis_y = stroke->brush.shape_axis_y;
             re->master_alpha = clamp(stroke->brush.alpha, 0.0f, 1.0f);
+            re->revision = ++r->stroke_revision;
 
             re->flags = 0;
             if (stroke->flags & StrokeFlag_ERASER) {
@@ -1313,6 +1356,20 @@ same_paint_color(v4f ca, v4f cb)
         if ( fabsf(ca.d[channel] / ca.a - cb.d[channel] / cb.a) > 0.000001f ) { return false; }
     }
     return true;
+}
+
+bool
+gpu_has_visible_blur(RenderBackend* r)
+{
+    for ( const RenderElement& element : r->clip_array ) {
+        if ( element.flags & RenderElementFlags_BLUR ) { return true; }
+        if ( element.flags & RenderElementFlags_LAYER ) {
+            for ( LayerEffect* effect = element.effects; effect; effect = effect->next ) {
+                if ( effect->enabled && effect->type == LayerEffectType_BLUR ) { return true; }
+            }
+        }
+    }
+    return false;
 }
 
 void
@@ -1440,6 +1497,7 @@ gpu_clip_strokes_and_update(Arena* arena,
                     gpu_cook_stroke(arena, r, working_stroke, CookStroke_UPDATE_WORKING_STROKE);
 
                     RenderElement element = *get_render_element(working_stroke->render_handle);
+                    element.flags |= RenderElementFlags_WORKING;
                     if ( element.flags & RenderElementFlags_BLUR ) {
                         element.raster_bounds = canvas_to_raster_bounding_rect(view, bounding_box_for_stroke(working_stroke));
                     }
@@ -1450,6 +1508,7 @@ gpu_clip_strokes_and_update(Arena* arena,
             auto* p = push(clip_array, layer_element);
             p->layer_alpha = l->alpha;
             p->effects = l->effects;
+            if ( l->id == view->working_layer_id ) { p->flags |= RenderElementFlags_ACTIVE_LAYER; }
         }
     }
     if ( r->cook_pending == 0 ) { r->cook_burst_done = 0; }
@@ -1502,9 +1561,14 @@ box_filter_pass(RenderBackend* r, int kernel_size, int direction)
 
 static void
 gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
-                  i32 view_width, i32 view_height, float background_alpha=1.0f)
+                  i32 view_width, i32 view_height, float background_alpha=1.0f,
+                  bool navigation_preview = false)
 {
     PUSH_GRAPHICS_GROUP("render_canvas");
+#if defined(TESTING)
+    r->replay_cache_hit = false;
+    r->blur_filter_runs = 0;
+#endif
 
     // FLip it. GL is bottom-left.
     i32 x = view_x;
@@ -1621,6 +1685,9 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         stroke_pass(&fill, r->stroke_fill_program_pressure);
     };
     auto apply_blur = [&](RenderElement* re, GLuint target) {
+#if defined(TESTING)
+        ++r->blur_filter_runs;
+#endif
         if ( !r->blur_brush_textures[0] ) {
             for ( GLuint& texture : r->blur_brush_textures ) {
                 texture = gl::new_color_texture(r->width, r->height);
@@ -1708,8 +1775,120 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         glEnable(GL_DEPTH_TEST);
     };
 
+    // Keep the checkpoint before the active layer's marker, even between strokes,
+    // so pen-down and pen-up can reuse and extend the same completed prefix.
+    i64 cache_end = clip_array->count;
+    bool cache_has_blur = false;
+    for ( i64 i = 0; i < clip_array->count; ++i ) {
+        const RenderElement& element = clip_array->data[i];
+        if ( element.flags & (RenderElementFlags_WORKING | RenderElementFlags_ACTIVE_LAYER) ) {
+            cache_end = i;
+            break;
+        }
+        cache_has_blur |= (element.flags & RenderElementFlags_BLUR) != 0;
+    }
+    bool cacheable = cache_has_blur && !navigation_preview && !r->cook_pending && view_x == 0 && view_y == 0
+                     && view_width == r->width && view_height == r->height;
+    auto cache_element = [](const RenderElement& element) {
+        u64 effects = 0;
+        if ( element.flags & RenderElementFlags_LAYER ) {
+            for ( LayerEffect* effect = element.effects; effect; effect = effect->next ) { ++effects; }
+        }
+        return ReplayCacheElement{element.revision, effects, element.flags,
+                                  (element.flags & RenderElementFlags_LAYER) ? element.layer_alpha : 0.0f};
+    };
+    auto cache_effect = [](const LayerEffect& effect) {
+        return ReplayCacheEffect{effect.type, effect.enabled, effect.blur.original_scale, effect.blur.kernel_size};
+    };
+    bool cache_matches = cacheable && r->replay_valid && r->replay_elements.count <= cache_end
+                         && r->replay_background_alpha == background_alpha;
+    i64 effect_index = 0;
+    for ( i64 i = 0; cache_matches && i < r->replay_elements.count; ++i ) {
+        const RenderElement& element = clip_array->data[i];
+        ReplayCacheElement key = cache_element(element);
+        cache_matches = memcmp(&key, &r->replay_elements.data[i], sizeof(key)) == 0;
+        if ( element.flags & RenderElementFlags_LAYER ) {
+            for ( LayerEffect* effect = element.effects; cache_matches && effect; effect = effect->next ) {
+                ReplayCacheEffect key = cache_effect(*effect);
+                cache_matches = effect_index < r->replay_effects.count
+                                && memcmp(&key, &r->replay_effects.data[effect_index], sizeof(key)) == 0;
+                ++effect_index;
+            }
+        }
+    }
+    cache_matches = cache_matches && effect_index == r->replay_effects.count;
+    bool cache_complete = cache_matches && r->replay_elements.count == cache_end;
+    auto copy_texture = [&](GLuint source, GLuint target) {
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(texture_target, 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(texture_target, 0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(texture_target, source);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, target, 0);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+        gpu_fill_with_texture(r);
+    };
+    auto resume_layer = [&]() {
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, layer_texture, 0);
+        glBindTexture(texture_target, r->eraser_texture);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendEquation(GL_FUNC_ADD);
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    };
+    auto cache_history = [&]() {
+        r->replay_have_history = have_history;
+        r->replay_history_color = history_color;
+        if ( have_history ) { copy_texture(r->opacity_history_texture, r->replay_history_texture); }
+        resume_layer();
+    };
+    auto save_cache = [&]() {
+        if ( !r->replay_layer_texture ) {
+            r->replay_layer_texture = gl::new_color_texture(r->width, r->height);
+            r->replay_canvas_texture = gl::new_color_texture(r->width, r->height);
+            r->replay_history_texture = gl::new_color_texture(r->width, r->height);
+        }
+        copy_texture(layer_texture, r->replay_layer_texture);
+        copy_texture(r->canvas_texture, r->replay_canvas_texture);
+        cache_history();
+        reset(&r->replay_elements);
+        reset(&r->replay_effects);
+        for ( i64 i = 0; i < cache_end; ++i ) {
+            const RenderElement& element = clip_array->data[i];
+            push(&r->replay_elements, cache_element(element));
+            if ( element.flags & RenderElementFlags_LAYER ) {
+                for ( LayerEffect* effect = element.effects; effect; effect = effect->next ) {
+                    push(&r->replay_effects, cache_effect(*effect));
+                }
+            }
+        }
+        r->replay_background_alpha = background_alpha;
+        r->replay_valid = true;
+    };
+    i64 render_start = 0;
+    if ( cache_matches ) {
+        copy_texture(r->replay_layer_texture, layer_texture);
+        copy_texture(r->replay_canvas_texture, r->canvas_texture);
+        copy_texture(r->replay_canvas_texture, r->eraser_texture);
+        have_history = r->replay_have_history;
+        history_color = r->replay_history_color;
+        if ( have_history ) { copy_texture(r->replay_history_texture, r->opacity_history_texture); }
+        resume_layer();
+        for ( i64 i = 0; i < r->replay_elements.count; ++i ) {
+            if ( clip_array->data[i].flags & RenderElementFlags_LAYER ) { layer_start = i + 1; }
+        }
+        render_start = r->replay_elements.count;
+#if defined(TESTING)
+        r->replay_cache_hit = true;
+#endif
+    }
+
     PUSH_GRAPHICS_GROUP("render elements");
-    for ( i64 i = 0; i < (i64)clip_array->count; i++ ) {
+    for ( i64 i = render_start; i < (i64)clip_array->count; i++ ) {
+        if ( cacheable && !cache_complete && i == cache_end ) { save_cache(); }
         RenderElement* re = &clip_array->data[i];
 
         if ( re->flags & RenderElementFlags_LAYER ) {
@@ -1733,6 +1912,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                 glDisable(GL_DEPTH_TEST);
                 for ( LayerEffect* e = re->effects; e != NULL; e = e->next ) {
                     if ( e->enabled == false ) { continue; }
+                    if ( navigation_preview ) { continue; }
 
                     if ( e->type == LayerEffectType_BLUR ) {
                         glBindTexture(texture_target, in_texture);
@@ -1810,6 +1990,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         else {
             if ( re->count > 0 ) {
                 if ( re->flags & RenderElementFlags_BLUR ) {
+                    if ( navigation_preview ) { continue; }
                     if ( !r->opacity_stroke_texture ) {
                         r->opacity_stroke_texture = gl::new_color_texture(r->width, r->height);
                         r->opacity_history_texture = gl::new_color_texture(r->width, r->height);
@@ -1835,13 +2016,18 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                     for ( i64 previous = layer_start; previous < i; ++previous ) {
                         RenderElement* old = &clip_array->data[previous];
                         if ( old->count > 0 && (old->flags & RenderElementFlags_BLUR) ) {
-                            render_opacity_stroke(old);
-                            apply_blur(old, r->opacity_history_texture);
+                            if ( !navigation_preview ) {
+                                render_opacity_stroke(old);
+                                apply_blur(old, r->opacity_history_texture);
+                            }
                         }
                         else if ( old->count > 0 && ((old->flags & RenderElementFlags_ERASER) || same_paint_color(history_color, old->color)) ) {
                             render_opacity_stroke(old);
                             update_opacity_history(old);
                         }
+                    }
+                    if ( cacheable && i == cache_end && (re->flags & RenderElementFlags_WORKING) ) {
+                        cache_history();
                     }
                 }
                 if ( have_history && (eraser || same_paint_color(history_color, re->color)) ) {
@@ -1941,6 +2127,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
             }
         }
     }
+    if ( cacheable && !cache_complete && cache_end == clip_array->count ) { save_cache(); }
     POP_GRAPHICS_GROUP();  // render elements
     glViewport(0, 0, r->width, r->height);
     glScissor(0, 0, r->width, r->height);
@@ -1960,7 +2147,8 @@ gpu_render(RenderBackend* r,  i32 view_x, i32 view_y, i32 view_width, i32 view_h
     print_framebuffer_status();
 
     // TODO: Do less work when idling
-    gpu_render_canvas(r, view_x, view_y, view_width, view_height);
+    gpu_render_canvas(r, view_x, view_y, view_width, view_height, 1.0f,
+                      (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW) != 0);
 
     GLenum texture_target;
     texture_target = GL_TEXTURE_2D;
@@ -2201,6 +2389,12 @@ void
 gpu_release_data(RenderBackend* r)
 {
     release(&r->clip_array);
+    release(&r->replay_elements);
+    release(&r->replay_effects);
+    GLuint textures[] = {r->replay_layer_texture, r->replay_canvas_texture, r->replay_history_texture};
+    glDeleteTextures(array_count(textures), textures);
+    r->replay_layer_texture = r->replay_canvas_texture = r->replay_history_texture = 0;
+    r->replay_valid = false;
 }
 
 
