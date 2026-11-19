@@ -75,6 +75,7 @@ set_default_bindings(MiltonBindings* bs)
     binding(bs, Modifier_NONE, Binding::UNBOUND, Action_MODE_PRIMITIVE_GRID);
     binding(bs, Modifier_NONE, 'v', Action_FLIP_CANVAS_H);
     binding(bs, Modifier_NONE, 'a', Action_TOGGLE_PRESERVE_OPACITY);
+    binding(bs, Modifier_NONE, 'f', Action_MODE_BLUR);
     binding(bs, Modifier_NONE, Binding::ESC, Action_RESET_ROTATION);
     binding(bs, Modifier_NONE, 's', Action_SELECT_LASSO);
     binding(bs, Modifier_NONE, 'd', Action_SELECT_DELETE);
@@ -224,6 +225,9 @@ binding_dispatch_action(BindableAction a, MiltonInput* input, Milton* milton, v2
         } break;
         case Action_MODE_PEN: {
             input->mode_to_set = MiltonMode::PEN;
+        } break;
+        case Action_MODE_BLUR: {
+            input->mode_to_set = MiltonMode::BLUR;
         } break;
         case Action_MODE_EYEDROPPER: {
             input->mode_to_set = MiltonMode::EYEDROPPER;

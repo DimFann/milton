@@ -218,6 +218,7 @@ main(int argc, char** argv)
         output_shader(outfd, "src/quad.f.glsl");
         output_shader(outfd, "src/postproc.f.glsl", "third_party/Fxaa3_11.f.glsl");
         output_shader(outfd, "src/blur.f.glsl");
+        output_shader(outfd, "src/blur_brush.f.glsl");
 
         fclose(outfd);
     }

@@ -756,6 +756,7 @@ gui_tools_window(MiltonInput* input, Milton* milton)
         const Tool tools[] = {
             { TXT_switch_to_brush,               Action_MODE_PEN,                 MiltonMode::PEN,                 "Brush"  },
             { TXT_switch_to_eraser,              Action_MODE_ERASER,              MiltonMode::ERASER,              "Eraser" },
+            { TXT_Action_MODE_BLUR,              Action_MODE_BLUR,                MiltonMode::BLUR,                "Blur"   },
             { TXT_switch_to_primitive_line,      Action_MODE_PRIMITIVE_LINE,      MiltonMode::PRIMITIVE_LINE,      "Line"   },
             { TXT_switch_to_primitive_rectangle, Action_MODE_PRIMITIVE_RECTANGLE, MiltonMode::PRIMITIVE_RECTANGLE, "Rect"   },
             { TXT_switch_to_primitive_grid,      Action_MODE_PRIMITIVE_GRID,      MiltonMode::PRIMITIVE_GRID,      "Grid"   },
@@ -911,7 +912,8 @@ preset_capture(Milton* milton, BrushPreset* p, int kind)
     p->shape_angle = b.shape_angle;
     p->tilt_angle = b.tilt_angle;
     p->pressure_opacity = (kind == BrushEnum_ERASER) ? milton->eraser_pressure_opacity
-        : (milton->flags_in_eraser_mode ? milton->pen_pressure_opacity_stash
+        : (kind == BrushEnum_BLUR) ? milton->blur_pressure_opacity
+        : ((milton->flags_in_eraser_mode || milton->flags_in_blur_mode) ? milton->pen_pressure_opacity_stash
            : (milton->working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY) != 0);
     p->relative_to_canvas = (milton->working_stroke.flags & StrokeFlag_RELATIVE_TO_CANVAS) ? 1 : 0;
 }
@@ -932,7 +934,8 @@ preset_apply(Milton* milton, const BrushPreset* p)
     b->tilt_angle = p->tilt_angle;
 
     if ( kind == BrushEnum_ERASER ) { milton->eraser_pressure_opacity = p->pressure_opacity != 0; }
-    else if ( milton->flags_in_eraser_mode ) { milton->pen_pressure_opacity_stash = p->pressure_opacity != 0; }
+    else if ( kind == BrushEnum_BLUR ) { milton->blur_pressure_opacity = p->pressure_opacity != 0; }
+    else if ( milton->flags_in_eraser_mode || milton->flags_in_blur_mode ) { milton->pen_pressure_opacity_stash = p->pressure_opacity != 0; }
     else if ( p->pressure_opacity ) { milton->working_stroke.flags |= StrokeFlag_PRESSURE_TO_OPACITY; }
     else { milton->working_stroke.flags &= ~StrokeFlag_PRESSURE_TO_OPACITY; }
 
@@ -943,8 +946,8 @@ preset_apply(Milton* milton, const BrushPreset* p)
     milton_update_brushes(milton);
 }
 
-// ---- Tool options persistence: the pen and eraser options are restored at start-up and saved as they change.
-static BrushPreset g_tool_saved[2];
+// ---- Tool options persistence. The optional third record keeps older pen/eraser files readable.
+static BrushPreset g_tool_saved[3];
 static bool g_tool_loaded = false;
 static u32  g_tool_last_write = 0;
 
@@ -956,6 +959,26 @@ tool_state_path(PATH_CHAR* fname)
     memcpy(fname, tmp, sizeof(tmp));
 }
 
+static bool
+read_tool_state(Milton* milton, FILE* fd)
+{
+    u32 size = 0;
+    BrushPreset in[3] = {};
+    if ( fread(&size, sizeof(size), 1, fd) != 1 || size != sizeof(BrushPreset)
+         || fread(in, sizeof(BrushPreset), 2, fd) != 2
+         || in[0].kind != BrushEnum_PEN || in[1].kind != BrushEnum_ERASER ) {
+        milton_log("Could not read pen/eraser tool options\n");
+        return false;
+    }
+    size_t bytes = fread(&in[2], 1, sizeof(BrushPreset), fd);
+    if ( ferror(fd) || (bytes != 0 && (bytes != sizeof(BrushPreset) || in[2].kind != BrushEnum_BLUR)) ) {
+        milton_log("Could not read blur tool options\n");
+        return false;
+    }
+    for ( int i = 0; i < (bytes ? 3 : 2); ++i ) { preset_apply(milton, &in[i]); }
+    return true;
+}
+
 static void
 tool_state_tick(Milton* milton, bool flush = false)
 {
@@ -965,25 +988,20 @@ tool_state_tick(Milton* milton, bool flush = false)
         g_tool_loaded = true;
         FILE* fd = platform_fopen(fname, TO_PATH_STR("rb"));
         if ( fd ) {
-            u32 sz = 0;
-            BrushPreset in[2];
-            if ( fread(&sz, sizeof(sz), 1, fd) == 1 && sz == sizeof(BrushPreset)
-                 && fread(in, sizeof(BrushPreset), 2, fd) == 2
-                 && in[0].kind == BrushEnum_PEN && in[1].kind == BrushEnum_ERASER ) {
-                preset_apply(milton, &in[0]);
-                preset_apply(milton, &in[1]);
-            }
+            read_tool_state(milton, fd);
             fclose(fd);
         }
         memset(g_tool_saved, 0, sizeof(g_tool_saved));
         preset_capture(milton, &g_tool_saved[0], BrushEnum_PEN);
         preset_capture(milton, &g_tool_saved[1], BrushEnum_ERASER);
+        preset_capture(milton, &g_tool_saved[2], BrushEnum_BLUR);
         return;
     }
-    BrushPreset cur[2];
+    BrushPreset cur[3];
     memset(cur, 0, sizeof(cur));
     preset_capture(milton, &cur[0], BrushEnum_PEN);
     preset_capture(milton, &cur[1], BrushEnum_ERASER);
+    preset_capture(milton, &cur[2], BrushEnum_BLUR);
     if ( memcmp(cur, g_tool_saved, sizeof(cur)) == 0 ) { return; }
     // Writes are throttled while a slider is dragged; the frame is kept alive so the last value is written.
     if ( milton->platform ) { milton->platform->force_next_frame = true; }
@@ -994,7 +1012,7 @@ tool_state_tick(Milton* milton, bool flush = false)
     if ( fd ) {
         u32 sz = sizeof(BrushPreset);
         bool ok = fwrite(&sz, sizeof(sz), 1, fd) == 1
-                  && fwrite(cur, sizeof(BrushPreset), 2, fd) == 2;
+                  && fwrite(cur, sizeof(BrushPreset), 3, fd) == 3;
         if ( fclose(fd) != 0 ) { ok = false; }
         if ( ok ) {
             memcpy(g_tool_saved, cur, sizeof(cur));
@@ -1106,6 +1124,7 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
     switch ( milton->current_mode ) {
         case MiltonMode::PEN:                 title = "Tool Options (Brush)";  break;
         case MiltonMode::ERASER:              title = "Tool Options (Eraser)"; break;
+        case MiltonMode::BLUR:                title = "Tool Options (Blur)";   break;
         case MiltonMode::PRIMITIVE_LINE:      title = "Tool Options (Line)";   break;
         case MiltonMode::PRIMITIVE_RECTANGLE: title = "Tool Options (Rect)";   break;
         case MiltonMode::PRIMITIVE_GRID:      title = "Tool Options (Grid)";   break;
@@ -1145,13 +1164,14 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
         }
         ImGui::PushItemWidth(s*110);
 
+        const bool blur = milton->current_mode == MiltonMode::BLUR;
         const bool cut_eraser = milton->current_mode == MiltonMode::ERASER && milton->settings->eraser_cut;
         if ( !cut_eraser && (milton->current_mode == MiltonMode::PEN || milton->current_mode == MiltonMode::ERASER
-             || mode_is_for_primitives(milton->current_mode)) ) {
+             || blur || mode_is_for_primitives(milton->current_mode)) ) {
             const float pen_alpha = milton_get_brush_alpha(milton);
             mlt_assert(pen_alpha >= 0.0f && pen_alpha <= 1.0f);
             float mut_alpha = pen_alpha*100;
-            ImGui::SliderFloat(loc(TXT_opacity), &mut_alpha, 1, 100, "%.0f%%");
+            ImGui::SliderFloat(blur ? "Strength" : loc(TXT_opacity), &mut_alpha, 1, 100, "%.0f%%");
 
             mut_alpha /= 100.0f;
             if (mut_alpha > 1.0f ) mut_alpha = 1.0f;
@@ -1174,6 +1194,21 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
         if ( mut_size != size ) {
             milton_set_brush_size(milton, mut_size);
             gui->flags |= (i32)MiltonGuiFlags_SHOWING_PREVIEW;
+        }
+        if ( blur ) {
+            ImGui::TextWrapped("Softens paint on the current layer. Repeated strokes increase the blur.");
+            Brush* brush = &milton->brushes[BrushEnum_BLUR];
+            bool size_pressure = brush->pressure_size != 0;
+            if ( ImGui::Checkbox("Size from pressure", &size_pressure) ) {
+                brush->pressure_size = size_pressure;
+            }
+            if ( size_pressure ) {
+                float minimum = brush->pressure_size_min * 100.0f;
+                if ( ImGui::SliderFloat("Min size", &minimum, 0, 100, "%.0f%%") ) {
+                    brush->pressure_size_min = minimum / 100.0f;
+                }
+            }
+            ImGui::Checkbox("Strength from pressure", &milton->blur_pressure_opacity);
         }
 
         if ( milton->current_mode == MiltonMode::PEN || milton->current_mode == MiltonMode::ERASER ) {
@@ -1236,7 +1271,7 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
                 milton->working_stroke.flags &= ~StrokeFlag_DISTANCE_TO_OPACITY;
             }
 
-            if ( !(milton->working_stroke.flags & StrokeFlag_ERASER) ) {
+            if ( !blur && !(milton->working_stroke.flags & StrokeFlag_ERASER) ) {
             ImGui::CheckboxFlags(loc(TXT_opacity_pressure), reinterpret_cast<u32*>(&milton->working_stroke.flags), StrokeFlag_PRESSURE_TO_OPACITY);
             if ( milton->working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY ) {
                 f32* min_opacity = &milton->brushes[brush_enum].pressure_opacity_min;

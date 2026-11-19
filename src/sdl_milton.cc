@@ -1074,6 +1074,7 @@ milton_main(bool is_fullscreen, char* file_to_open)
                     }
                     else if ( milton->current_mode == MiltonMode::PEN ||
                               milton->current_mode == MiltonMode::ERASER ||
+                              milton->current_mode == MiltonMode::BLUR ||
                               mode_is_for_primitives(milton->current_mode) ) {
                         #if MILTON_HARDWARE_BRUSH_CURSOR
                             // The shaped outline already marks the tip; skip the small round cursor.
@@ -1177,7 +1178,8 @@ milton_main(bool is_fullscreen, char* file_to_open)
             static v2l anchor = {};
             static int axis = 0;  // 0 undecided, 1 horizontal, 2 vertical
             b32 shift = (SDL_GetModState() & KMOD_SHIFT) != 0;
-            b32 drawing_mode = milton->current_mode == MiltonMode::PEN || milton->current_mode == MiltonMode::ERASER;
+            b32 drawing_mode = milton->current_mode == MiltonMode::PEN || milton->current_mode == MiltonMode::ERASER
+                               || milton->current_mode == MiltonMode::BLUR;
             for ( i32 pi = 0; pi < platform.num_point_results; ++pi ) {
                 v2l p = milton_input.points[pi];
                 if ( !shift || !drawing_mode ) {

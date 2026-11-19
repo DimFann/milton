@@ -34,6 +34,7 @@ enum RenderElementFlags
     RenderElementFlags_DISTANCE_TO_OPACITY  = 1<<2,
     RenderElementFlags_ERASER               = 1<<3,
     RenderElementFlags_PRESERVE_OPACITY     = 1<<4,
+    RenderElementFlags_BLUR                 = 1<<5,
 };
 
 struct RenderElement
@@ -47,6 +48,7 @@ struct RenderElement
 #endif
 
     i64     count;
+    Rect    raster_bounds;
 
     union {
         struct {  // For when element is a stroke.
@@ -98,6 +100,7 @@ struct RenderBackend
     GLuint texture_fill_program;
     GLuint postproc_program;
     GLuint blur_program;
+    GLuint blur_brush_program;
 #if MILTON_DEBUG
     GLuint simple_program;
 #endif
@@ -128,6 +131,7 @@ struct RenderBackend
     GLuint stroke_info_texture;
     GLuint opacity_stroke_texture;
     GLuint opacity_history_texture;
+    GLuint blur_brush_textures[2];
 
     GLuint fbo;
 
@@ -653,6 +657,15 @@ gpu_init(RenderBackend* r, CanvasView* view, ColorPicker* picker)
         gl::link_program(r->blur_program, objs, array_count(objs));
         gl::set_uniform_i(r->blur_program, "u_canvas", 0);
     }
+    {
+        r->blur_brush_program = glCreateProgram();
+        GLuint objs[] = { gl::compile_shader(g_simple_v, GL_VERTEX_SHADER),
+                          gl::compile_shader(g_blur_brush_f, GL_FRAGMENT_SHADER) };
+        gl::link_program(r->blur_brush_program, objs, array_count(objs));
+        gl::set_uniform_i(r->blur_brush_program, "u_canvas", 0);
+        gl::set_uniform_i(r->blur_brush_program, "u_blurred", 1);
+        gl::set_uniform_i(r->blur_brush_program, "u_mask", 2);
+    }
 #if MILTON_DEBUG
     {  // Simple program
         r->simple_program = glCreateProgram();
@@ -715,6 +728,9 @@ gpu_resize(RenderBackend* r, CanvasView* view)
     if ( r->opacity_stroke_texture ) {
         gl::resize_color_texture(r->opacity_stroke_texture, r->width, r->height);
         gl::resize_color_texture(r->opacity_history_texture, r->width, r->height);
+    }
+    for ( GLuint texture : r->blur_brush_textures ) {
+        if ( texture ) { gl::resize_color_texture(texture, r->width, r->height); }
     }
     gl::resize_depth_stencil_texture(r->stencil_texture, r->width, r->height);
 }
@@ -876,6 +892,7 @@ set_screen_size(RenderBackend* r, float* fscreen)
         r->picker_program,
         r->postproc_program,
         r->blur_program,
+        r->blur_brush_program,
     };
     for ( u64 pi = 0; pi < array_count(programs); ++pi ) {
         gl::set_uniform_vec2(programs[pi], "u_screen_size", 1, fscreen);
@@ -1210,6 +1227,9 @@ gpu_cook_stroke(Arena* arena, RenderBackend* r, Stroke* stroke, CookStrokeOpt co
             if (stroke->flags & StrokeFlag_PRESERVE_OPACITY) {
                 re->flags |= RenderElementFlags_PRESERVE_OPACITY;
             }
+            if (stroke->flags & StrokeFlag_BLUR) {
+                re->flags |= RenderElementFlags_BLUR;
+            }
 
             mlt_assert(re->count > 1);
 
@@ -1376,7 +1396,11 @@ gpu_clip_strokes_and_update(Arena* arena,
                                 }
                                 if ( needs_cook ) { cooked_this_pass++; r->cook_burst_done++; }
                                 gpu_cook_stroke(arena, r, s);
-                                push(clip_array, *get_render_element(s->render_handle));
+                                RenderElement element = *get_render_element(s->render_handle);
+                                if ( element.flags & RenderElementFlags_BLUR ) {
+                                    element.raster_bounds = canvas_to_raster_bounding_rect(view, s->bounding_rect);
+                                }
+                                push(clip_array, element);
                             }
                             else if ( stroke_outside && ( flags & ClipFlags_UPDATE_GPU_DATA ) ) {
                                 // If it is far away, delete.
@@ -1415,7 +1439,11 @@ gpu_clip_strokes_and_update(Arena* arena,
                 if ( working_stroke->num_points > 0 && !(working_stroke->flags & StrokeFlag_CUT) ) {
                     gpu_cook_stroke(arena, r, working_stroke, CookStroke_UPDATE_WORKING_STROKE);
 
-                    push(clip_array, *get_render_element(working_stroke->render_handle));
+                    RenderElement element = *get_render_element(working_stroke->render_handle);
+                    if ( element.flags & RenderElementFlags_BLUR ) {
+                        element.raster_bounds = canvas_to_raster_bounding_rect(view, bounding_box_for_stroke(working_stroke));
+                    }
+                    push(clip_array, element);
                 }
             }
 
@@ -1554,7 +1582,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
     v4f history_color = {};
     i64 layer_start = 0;
     auto render_opacity_stroke = [&](RenderElement* re) {
-        bool eraser = (re->flags & RenderElementFlags_ERASER) != 0;
+        bool eraser = (re->flags & (RenderElementFlags_ERASER | RenderElementFlags_BLUR)) != 0;
         glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, r->opacity_stroke_texture, 0);
         glClearColor(0,0,0,0);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -1591,6 +1619,72 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         RenderElement fill = *re;
         if ( eraser ) { fill.color = {1,1,1,1}; }
         stroke_pass(&fill, r->stroke_fill_program_pressure);
+    };
+    auto apply_blur = [&](RenderElement* re, GLuint target) {
+        if ( !r->blur_brush_textures[0] ) {
+            for ( GLuint& texture : r->blur_brush_textures ) {
+                texture = gl::new_color_texture(r->width, r->height);
+            }
+        }
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+        GLuint program = r->blur_brush_program;
+        gl::use_program(program);
+        float sigma = (float)re->radius / (6.0f * r->scale);
+        int stages = 1;
+        float variance = 1.0f;
+        while ( variance < sigma * sigma ) {
+            variance = 4.0f * variance + 1.0f;
+            ++stages;
+        }
+        float first_step = sigma / sqrtf(variance);
+        gl::vertex_attrib_v2f(program, "a_position", r->vbo_screen_quad);
+        auto scissor_brush = [&](int padding) {
+            int left = max(x, re->raster_bounds.left - padding - 1);
+            int right = min(x + w, re->raster_bounds.right + padding + 1);
+            int top = max(r->height - y - h, re->raster_bounds.top - padding - 1);
+            int bottom = min(r->height - y, re->raster_bounds.bottom + padding + 1);
+            glScissor(left, r->height - bottom, max(0, right - left), max(0, bottom - top));
+        };
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(texture_target, 0);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(texture_target, 0);
+        glActiveTexture(GL_TEXTURE0);
+        // The cascaded filter's support is less than 0.6 brush radii on each axis.
+        scissor_brush((int)ceilf(0.6f * re->radius / r->scale) + 1);
+        for ( int pass = 0; pass < 2 * stages; ++pass ) {
+            glBindTexture(texture_target, pass == 0 ? target : r->blur_brush_textures[(pass - 1) % 2]);
+            glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target,
+                                      r->blur_brush_textures[pass % 2], 0);
+            gl::set_uniform_i(program, "u_pass", pass / stages);
+            gl::set_uniform_f(program, "u_step", ldexpf(first_step, pass % stages));
+            glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+        }
+        scissor_brush(0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(texture_target, r->blur_brush_textures[1]);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(texture_target, r->opacity_stroke_texture);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(texture_target, target);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, r->blur_brush_textures[0], 0);
+        gl::set_uniform_i(program, "u_pass", 2);
+        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(texture_target, 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(texture_target, 0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(texture_target, r->blur_brush_textures[0]);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, target, 0);
+        gpu_fill_with_texture(r);
+        glScissor(x, y, w, h);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendEquation(GL_FUNC_ADD);
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     };
     auto update_opacity_history = [&](RenderElement* re) {
         glActiveTexture(GL_TEXTURE1);
@@ -1715,6 +1809,17 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         // If this render element is not a layer, then it is a stroke.
         else {
             if ( re->count > 0 ) {
+                if ( re->flags & RenderElementFlags_BLUR ) {
+                    if ( !r->opacity_stroke_texture ) {
+                        r->opacity_stroke_texture = gl::new_color_texture(r->width, r->height);
+                        r->opacity_history_texture = gl::new_color_texture(r->width, r->height);
+                    }
+                    render_opacity_stroke(re);
+                    apply_blur(re, layer_texture);
+                    if ( have_history ) { apply_blur(re, r->opacity_history_texture); }
+                    glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, layer_texture, 0);
+                    continue;
+                }
                 bool eraser = (re->flags & RenderElementFlags_ERASER) != 0;
                 bool preserve = !eraser && (re->flags & RenderElementFlags_PRESERVE_OPACITY);
                 if ( preserve && (!have_history || !same_paint_color(history_color, re->color)) ) {
@@ -1729,7 +1834,11 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                     glClear(GL_COLOR_BUFFER_BIT);
                     for ( i64 previous = layer_start; previous < i; ++previous ) {
                         RenderElement* old = &clip_array->data[previous];
-                        if ( old->count > 0 && ((old->flags & RenderElementFlags_ERASER) || same_paint_color(history_color, old->color)) ) {
+                        if ( old->count > 0 && (old->flags & RenderElementFlags_BLUR) ) {
+                            render_opacity_stroke(old);
+                            apply_blur(old, r->opacity_history_texture);
+                        }
+                        else if ( old->count > 0 && ((old->flags & RenderElementFlags_ERASER) || same_paint_color(history_color, old->color)) ) {
                             render_opacity_stroke(old);
                             update_opacity_history(old);
                         }

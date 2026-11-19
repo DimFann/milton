@@ -1,4 +1,6 @@
 #undef main // SDL does things we don't want
+#define IMGUI_DEFINE_MATH_OPERATORS
+#include "imgui_internal.h"
 
 #if defined(_WIN32)
 static POINTER_PEN_INFO test_ink_history[4];
@@ -260,7 +262,57 @@ test_picker_slider_input()
 }
 
 static bool
-test_preserve_opacity()
+test_blur_tool_ui()
+{
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = NULL;
+    io.DisplaySize = ImVec2(1000, 800);
+    io.Fonts->AddFontDefault();
+    io.Fonts->Build();
+    Milton milton = {};
+    milton_init(&milton, 1000, 800, 1, NULL, MiltonInit_FOR_TEST);
+    milton.current_mode = MiltonMode::BLUR;
+    milton.brushes[BrushEnum_BLUR].alpha = 0.9f;
+    MiltonInput input = {};
+    input.mode_to_set = MiltonMode::MODE_COUNT;
+    auto frame = [&](ImVec2 mouse, bool down) {
+        io.MousePos = mouse;
+        io.MouseDown[0] = down;
+        ImGui::NewFrame();
+        gui_brush_window(&input, nullptr, &milton, nullptr, false);
+        ImGui::Render();
+    };
+    frame(ImVec2(900, 700), false);
+    frame(ImVec2(900, 700), false);
+    ImGuiWindow* tools = ImGui::FindWindowByName("Tools");
+    ImGuiWindow* options = ImGui::FindWindowByName("Tool Options (Blur)###brush_options");
+    bool passed = tools && options;
+    if ( passed ) {
+        ImVec2 strength(options->Pos.x + 6 + 55,
+                        options->Pos.y + options->TitleBarHeight() + 4 + ImGui::GetFrameHeight() * 0.5f);
+        frame(strength, true);
+        frame(strength, false);
+        passed = milton.brushes[BrushEnum_BLUR].alpha > 0.4f
+                 && milton.brushes[BrushEnum_BLUR].alpha < 0.6f;
+        ImVec2 blur_button(tools->Pos.x + 34,
+                           tools->Pos.y + 4 + 2 * (30 + ImGui::GetStyle().ItemSpacing.y) + 15);
+        frame(blur_button, true);
+        frame(blur_button, false);
+        passed = passed && input.mode_to_set == MiltonMode::BLUR;
+    }
+    if ( !passed ) {
+        fprintf(stderr, "Blur UI: tools=%p options=%p alpha=%f mode=%d scale=%f\n",
+                tools, options, milton.brushes[BrushEnum_BLUR].alpha, (int)input.mode_to_set, milton.gui->scale);
+    }
+    fprintf(passed ? stdout : stderr, "Blur toolbar, tool-pane title and strength slider: %s\n", passed ? "passed" : "FAILED");
+    arena_free(&milton.root_arena);
+    ImGui::DestroyContext();
+    return passed;
+}
+
+static bool
+test_preserve_opacity(bool blur_tests = false)
 {
     if ( SDL_Init(SDL_INIT_VIDEO) != 0 ) {
         fprintf(stderr, "Cannot initialize opacity test video: %s\n", SDL_GetError());
@@ -332,6 +384,93 @@ test_preserve_opacity()
         glReadPixels(size / 2, size / 2 - offset_y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
         return (int)pixel[3];
     };
+    if ( blur_tests ) {
+        auto sample = [&](int offset_y) {
+            return alpha_at_center(0.0f, offset_y);
+        };
+        auto add_blur = [&](float strength, u32 flags = 0, f32* pressures = nullptr) {
+            Stroke* stroke = add(StrokeFlag_BLUR | flags, strength, line, pressures ? pressures : pressure);
+            stroke->brush.radius = 64 * view->scale;
+            stroke->brush.pressure_size = 0;
+            stroke->bounding_rect = bounding_box_for_stroke(stroke);
+        };
+        add(0, 1.0f, line, pressure, v3f{1, 0, 0});
+        int outside = sample(20);
+        int center = sample(0);
+        add_blur(0.0f);
+        bool passed = sample(20) == outside && sample(0) == center;
+        pop(&layer->strokes);
+        add_blur(1.0f, StrokeFlag_PRESSURE_TO_OPACITY, low_pressure);
+        int weak = sample(20);
+        pop(&layer->strokes);
+        add_blur(1.0f);
+        int full = sample(20);
+        passed = passed && outside == 0 && weak > outside && full > weak
+                 && abs(pixel[0] - pixel[3]) <= 1 && pixel[1] == 0 && pixel[2] == 0
+                 && sample(0) < center && sample(80) == 0;
+        Stroke undone = pop(&layer->strokes);
+        passed = passed && sample(20) == outside;
+        milton.current_mode = MiltonMode::BLUR;
+        milton.brushes[BrushEnum_BLUR].alpha = 0.75f;
+        Brush ramped = milton_get_brush(&milton);
+        add_blur(ramped.alpha);
+        int at_75_percent = sample(20);
+        passed = passed && abs(at_75_percent - full) <= 2;
+        pop(&layer->strokes);
+        fprintf(passed ? stdout : stderr, "Blur strength: new 75%% / legacy 100%% edge alpha %d / %d\n",
+                at_75_percent, full);
+        push(&layer->strokes, undone);
+        passed = passed && sample(20) == full;
+        add_blur(1.0f);
+        int repeated = sample(20);
+        passed = passed && repeated > full;
+        pop(&layer->strokes);
+        i64 original_scale = view->scale;
+        view->scale /= 2;
+        gpu_update_canvas(r, milton.canvas, view);
+        int zoomed = sample(40);
+        passed = passed && abs(zoomed - full) <= 8;
+        view->scale = (i32)original_scale;
+        gpu_update_canvas(r, milton.canvas, view);
+
+        // Reconstruct opacity history through blur, not through its white mask color.
+        add(StrokeFlag_PRESERVE_OPACITY, 0.1f, line, pressure, v3f{1, 0, 0});
+        int protected_center = sample(0);
+        passed = passed && protected_center < center;
+        pop(&layer->strokes);
+        Stroke blur = pop(&layer->strokes);
+        add(StrokeFlag_PRESERVE_OPACITY, 1.0f, line, pressure, v3f{1, 0, 0});
+        push(&layer->strokes, blur);
+        passed = passed && abs(sample(20) - full) <= 1;
+        // Drop the extra preserving stroke but retain blur for the save/load regression.
+        pop(&layer->strokes);
+        pop(&layer->strokes);
+        push(&layer->strokes, blur);
+        milton.persist->mlt_file_path = TO_PATH_STR("TEST_blur.mlt");
+        milton_save(&milton);
+        milton_load(&milton);
+        layer = milton.canvas->working_layer;
+        gpu_update_canvas(r, milton.canvas, view);
+        passed = passed && sample(20) == full
+                 && (get(&layer->strokes, layer->strokes.count - 1)->flags & StrokeFlag_BLUR);
+
+        // A blur on an empty upper layer must not sample the paint below.
+        milton_new_layer(&milton);
+        layer = milton.canvas->working_layer;
+        add_blur(1.0f);
+        passed = passed && sample(20) == full;
+        GLenum error = glGetError();
+        passed = passed && error == GL_NO_ERROR;
+        fprintf(passed ? stdout : stderr,
+                "Blur: base/half/full/repeated edge alpha %d/%d/%d/%d; replay, pressure, transparent red, layers, opacity history: %s (GL 0x%x)\n",
+                outside, weak, full, repeated, passed ? "passed" : "FAILED", error);
+        gpu_free_strokes(r, milton.canvas);
+        arena_free(&milton.root_arena);
+        SDL_GL_DeleteContext(context);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return passed;
+    }
 
     constexpr u32 preserve = StrokeFlag_PRESERVE_OPACITY;
     // The base stroke predates Preserve opacity and carries no new flags.
@@ -471,6 +610,39 @@ test_tool_pressure_persistence()
                      && ((restored.working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY) != 0) == (eraser != 0);
         }
     }
+    source.flags_in_eraser_mode = false;
+    source.flags_in_blur_mode = true;
+    source.pen_pressure_opacity_stash = true;
+    source.blur_pressure_opacity = false;
+    source.working_stroke.flags = StrokeFlag_BLUR;
+    source.brush_sizes[BrushEnum_BLUR] = 73;
+    source.brushes[BrushEnum_BLUR].alpha = 0.37f;
+    BrushPreset pen_options = {}, blur_options = {};
+    preset_capture(&source, &pen_options, BrushEnum_PEN);
+    preset_capture(&source, &blur_options, BrushEnum_BLUR);
+    restored.flags_in_eraser_mode = false;
+    restored.flags_in_blur_mode = false;
+    preset_apply(&restored, &pen_options);
+    preset_apply(&restored, &blur_options);
+    passed = passed && pen_options.pressure_opacity && !blur_options.pressure_opacity
+             && !restored.blur_pressure_opacity && restored.brush_sizes[BrushEnum_BLUR] == 73
+             && restored.brushes[BrushEnum_BLUR].alpha == 0.37f
+             && (restored.working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY);
+    BrushPreset records[3] = {pen_options, {}, blur_options};
+    preset_capture(&source, &records[1], BrushEnum_ERASER);
+    for ( int count = 2; count <= 3; ++count ) {
+        FILE* file = tmpfile();
+        if ( !file ) { passed = false; break; }
+        u32 size = sizeof(BrushPreset);
+        bool written = fwrite(&size, sizeof(size), 1, file) == 1
+                       && fwrite(records, sizeof(BrushPreset), count, file) == count;
+        rewind(file);
+        restored.brush_sizes[BrushEnum_BLUR] = 19;
+        passed = passed && written && read_tool_state(&restored, file)
+                 && restored.brush_sizes[BrushEnum_BLUR] == (count == 3 ? 73 : 19)
+                 && (restored.working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY);
+        fclose(file);
+    }
 
     milton_reset_canvas_and_set_default(&source);
     source.persist->mlt_file_path = TO_PATH_STR("TEST_tool_pressure.mlt");
@@ -498,7 +670,7 @@ test_tool_pressure_persistence()
     }
     arena_free(&source.root_arena);
     arena_free(&restored.root_arena);
-    fprintf(passed ? stdout : stderr, "Pen/eraser pressure-option capture, restore, and canvas loading: %s\n", passed ? "passed" : "FAILED");
+    fprintf(passed ? stdout : stderr, "Pen/eraser/blur pressure options, legacy/current tool files, and canvas loading: %s\n", passed ? "passed" : "FAILED");
     return passed;
 }
 
@@ -512,20 +684,22 @@ test_preserve_opacity_binding()
     saved.position_smoothing = 0.73f;
     binding_with_release(&saved.bindings, Modifier_ALT, 'p', Action_PEEK_OUT, ActionRelease_PEEK_OUT);
 
-    auto round_trip = [](const MiltonSettings& source, bool legacy, MiltonSettings* loaded) {
+    auto round_trip = [](const MiltonSettings& source, int missing, MiltonSettings* loaded) {
         FILE* file = tmpfile();
         if ( !file ) { return false; }
         bool ok = false;
-        if ( legacy ) {
+        if ( missing ) {
             MiltonSettings fixture = source;
-            Binding& release = fixture.bindings.bindings[ActionRelease_PEEK_OUT];
-            release.action = (BindableAction)(ActionRelease_PEEK_OUT - 1);
-            constexpr size_t offset = offsetof(MiltonSettings, bindings) + Action_TOGGLE_PRESERVE_OPACITY * sizeof(Binding);
-            const u16 size = sizeof(fixture) - sizeof(Binding);
+            for ( int i = ActionRelease_PEEK_OUT; i < Action_COUNT_WITH_RELEASE; ++i ) {
+                fixture.bindings.bindings[i].action = (BindableAction)(i - missing);
+            }
+            const int first = missing == 2 ? Action_TOGGLE_PRESERVE_OPACITY : Action_MODE_BLUR;
+            const size_t offset = offsetof(MiltonSettings, bindings) + first * sizeof(Binding);
+            const u16 size = (u16)(sizeof(fixture) - missing * sizeof(Binding));
             const auto* bytes = reinterpret_cast<const u8*>(&fixture);
             ok = fwrite(&size, sizeof(size), 1, file) == 1
                  && fwrite(bytes, 1, offset, file) == offset
-                 && fwrite(bytes + offset + sizeof(Binding), 1, size - offset, file) == size - offset;
+                 && fwrite(bytes + offset + missing * sizeof(Binding), 1, size - offset, file) == size - offset;
         } else {
             const u16 size = sizeof(source);
             ok = fwrite(&size, sizeof(size), 1, file) == 1 && fwrite(&source, size, 1, file) == 1;
@@ -537,7 +711,7 @@ test_preserve_opacity_binding()
     };
 
     MiltonSettings loaded = {};
-    bool passed = round_trip(saved, true, &loaded);
+    bool passed = round_trip(saved, 2, &loaded);
     const Binding& toggle = loaded.bindings.bindings[Action_TOGGLE_PRESERVE_OPACITY];
     const Binding& release = loaded.bindings.bindings[ActionRelease_PEEK_OUT];
     passed = passed && toggle.bound_key == 'a' && !toggle.accepts_repeats
@@ -545,11 +719,24 @@ test_preserve_opacity_binding()
              && release.bound_key == 'p' && release.on_release
              && loaded.preserve_opacity && loaded.position_smoothing == saved.position_smoothing;
     binding(&saved.bindings, Modifier_NONE, 'a', Action_MODE_PEN);
-    passed = passed && round_trip(saved, true, &loaded) && toggle.bound_key == Binding::UNBOUND
+    passed = passed && round_trip(saved, 2, &loaded) && toggle.bound_key == Binding::UNBOUND
              && loaded.bindings.bindings[Action_MODE_PEN].bound_key == 'a';
     binding(&saved.bindings, Modifier_CTRL, 'k', Action_TOGGLE_PRESERVE_OPACITY);
     passed = passed && round_trip(saved, false, &loaded) && toggle.bound_key == 'k'
              && toggle.modifiers == Modifier_CTRL && toggle.action == Action_TOGGLE_PRESERVE_OPACITY;
+    passed = passed && round_trip(saved, 1, &loaded) && toggle.bound_key == 'k'
+             && loaded.bindings.bindings[Action_MODE_BLUR].bound_key == 'f'
+             && release.action == ActionRelease_PEEK_OUT
+             && loaded.preserve_opacity && loaded.position_smoothing == saved.position_smoothing;
+    binding(&saved.bindings, Modifier_NONE, 'f', Action_MODE_PEN);
+    passed = passed && round_trip(saved, 1, &loaded)
+             && loaded.bindings.bindings[Action_MODE_BLUR].bound_key == Binding::UNBOUND;
+    binding(&saved.bindings, Modifier_NONE, 'g', Action_MODE_BLUR);
+    passed = passed && round_trip(saved, 0, &loaded)
+             && loaded.bindings.bindings[Action_MODE_BLUR].bound_key == 'g';
+    MiltonInput input = {};
+    binding_dispatch_action(Action_MODE_BLUR, &input, nullptr, {});
+    passed = passed && input.mode_to_set == MiltonMode::BLUR && mode_is_for_drawing(input.mode_to_set);
     if ( !passed ) { fprintf(stderr, "Preserve opacity shortcut migration or rebinding failed\n"); }
     return passed;
 }
@@ -557,6 +744,11 @@ test_preserve_opacity_binding()
 extern "C" int
 main(int argc, char** argv)
 {
+    if ( argc == 2 && strcmp(argv[1], "--blur") == 0 ) {
+        bool ui = test_blur_tool_ui();
+        bool gpu = test_preserve_opacity(true);
+        return ui && gpu ? 0 : 1;
+    }
     if ( argc == 2 && strcmp(argv[1], "--tool-pressure") == 0 ) {
         return test_tool_pressure_persistence() ? 0 : 1;
     }

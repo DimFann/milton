@@ -22,6 +22,7 @@ This fork adds some quality of life features I've been wanting for years, as wel
 * Variable hardness for brush and eraser + other brush options & tilt support
 * **Preserve opacity** in Pen tool options prevents new strokes from adding opacity over matching-color paint on the same layer, including strokes made before this feature or saved in previous sessions. Existing paint is unchanged; higher-pressure or higher-opacity strokes can raise the maximum. Other colors do not break this behavior, and erasing reduces the protected opacity so you can repaint erased areas. Press **A** to toggle it, or rebind **Toggle Preserve opacity** in Hotkeys. Layer optimization and erased-stroke cleanup remain unavailable on layers containing preserving strokes.
 * Rectangular brushes
+* **Blur brush (F)** softens existing paint on the current layer without adding the selected color. Select Blur in the left toolbar; size, strength, hardness, and pressure controls appear in Tool Options. Strength ramps up quickly: 75% is approximately the original full-strength effect; previously saved strokes retain their appearance. Each stroke is undoable and saved with the canvas; repeated strokes increase the blur. Layer optimization and erased-stroke cleanup are disabled on layers containing blur strokes.
 * Lasso Functions
     * Arm with S
     * D to delete selected strokes

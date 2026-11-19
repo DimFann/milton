@@ -526,10 +526,10 @@ sel_toast(Milton* milton, i32 n)
 }
 
 static bool
-layer_has_preserved_opacity(Layer* layer)
+layer_has_replay_dependencies(Layer* layer)
 {
     for ( i64 i = 0; i < layer->strokes.count; ++i ) {
-        if ( get(&layer->strokes, i)->flags & StrokeFlag_PRESERVE_OPACITY ) { return true; }
+        if ( get(&layer->strokes, i)->flags & (StrokeFlag_PRESERVE_OPACITY | StrokeFlag_BLUR) ) { return true; }
     }
     return false;
 }
@@ -539,8 +539,8 @@ static void
 sel_cleanup_layer(Milton* milton, Layer* l)
 {
     if ( !l || l->strokes.count < 2 ) { sel_toast(milton, 0); return; }
-    if ( layer_has_preserved_opacity(l) ) {
-        platform_dialog("Cleanup could change the appearance of Preserve opacity strokes on this layer.", "Cannot clean up layer");
+    if ( layer_has_replay_dependencies(l) ) {
+        platform_dialog("Cleanup could change the appearance of Preserve opacity or Blur strokes on this layer.", "Cannot clean up layer");
         return;
     }
     i64 count = l->strokes.count;
@@ -586,8 +586,8 @@ selection_auto_cleanup(Milton* milton, Layer* l)
     i64 ei = l->strokes.count - 1;
     Stroke* e = get(&l->strokes, ei);
     if ( !sel_eraser_is_opaque(e) ) { return; }
-    // Keep cleanup conservative around opacity histories used by later preserving strokes.
-    if ( layer_has_preserved_opacity(l) ) { return; }
+    // Later blur and preserving strokes depend on paint that may no longer be visible.
+    if ( layer_has_replay_dependencies(l) ) { return; }
 
     double margin = (double)milton->view->scale * 2.0;
     i32 n = 0, cap = 0;
@@ -802,8 +802,8 @@ optimize_request(Milton* milton)
 {
     if ( g_opt.phase != 0 || !milton->canvas->working_layer ) { return; }
     selection_finish(milton);
-    if ( layer_has_preserved_opacity(milton->canvas->working_layer) ) {
-        platform_dialog("Optimization could change the appearance of Preserve opacity strokes on this layer.", "Cannot optimize layer");
+    if ( layer_has_replay_dependencies(milton->canvas->working_layer) ) {
+        platform_dialog("Optimization could change the appearance of Preserve opacity or Blur strokes on this layer.", "Cannot optimize layer");
         return;
     }
     g_opt.phase = 1;

@@ -41,6 +41,7 @@ enum class MiltonMode
     DRAG_BRUSH_SIZE,
     DRAG_ZOOM,
     TRANSFORM,  // Scale and rotate
+    BLUR,
 
     MODE_COUNT,
 };
@@ -52,6 +53,7 @@ enum BrushEnum
     BrushEnum_PRIMITIVE,
 
     BrushEnum_NOBRUSH,  // Non-painting modes
+    BrushEnum_BLUR,
 
     BrushEnum_COUNT,
 };
@@ -236,6 +238,8 @@ struct Milton
     bool        eraser_pressure_opacity;
     bool        pen_pressure_opacity_stash;
     bool        flags_in_eraser_mode;
+    bool        blur_pressure_opacity;
+    bool        flags_in_blur_mode;
     // ----  // gui->picker.info also stored
 
     // Read only

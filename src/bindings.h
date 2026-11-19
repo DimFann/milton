@@ -58,6 +58,7 @@ enum BindableAction
     #endif
 
     Action_TOGGLE_PRESERVE_OPACITY,
+    Action_MODE_BLUR,
     Action_COUNT,
 
     // Press-and-release actions.

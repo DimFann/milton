@@ -152,6 +152,7 @@ enum Texts
 #endif
 
     TXT_Action_TOGGLE_PRESERVE_OPACITY,
+    TXT_Action_MODE_BLUR,
     TXT_Count,
 };
 

@@ -54,6 +54,9 @@ milton_get_brush_enum(Milton const* milton)
         case MiltonMode::ERASER: {
             brush_enum = BrushEnum_ERASER;
         } break;
+        case MiltonMode::BLUR: {
+            brush_enum = BrushEnum_BLUR;
+        } break;
         case MiltonMode::PRIMITIVE_LINE:
         case MiltonMode::PRIMITIVE_RECTANGLE:
         case MiltonMode::PRIMITIVE_GRID: {
@@ -100,6 +103,9 @@ milton_update_brushes(Milton* milton)
         }
         else if ( i == BrushEnum_ERASER ) {
             // Nothing
+        }
+        else if ( i == BrushEnum_BLUR ) {
+            brush->color = {brush->alpha, brush->alpha, brush->alpha, brush->alpha};
         }
         else if ( i == BrushEnum_PRIMITIVE ) {
             brush->color = to_premultiplied(gui_get_picker_rgb(milton->gui), brush->alpha);
@@ -163,6 +169,11 @@ milton_get_brush(Milton const* milton)
     Brush brush = milton->brushes[brush_enum];
     brush.shape_aspect = clamp(brush.shape_aspect, 0.05f, 1.0f);
     brush.pressure_size_min = clamp(brush.pressure_size_min, 0.0f, 1.0f);
+    if ( brush_enum == BrushEnum_BLUR ) {
+        // Bake the response into new strokes so existing saved blur keeps its appearance.
+        float remaining = 1.0f - clamp(brush.alpha, 0.0f, 1.0f);
+        brush.alpha = 1.0f - remaining * remaining * remaining;
+    }
 
     // The angle is relative to the screen; strokes store the axis in canvas space.
     const float rad = brush_effective_angle(brush) * 3.14159265f / 180.0f;
@@ -208,6 +219,7 @@ mode_is_for_drawing(MiltonMode mode)
 {
     b32 result = mode == MiltonMode::PEN ||
             mode == MiltonMode::ERASER ||
+            mode == MiltonMode::BLUR ||
             mode == MiltonMode::DRAG_BRUSH_SIZE ||
             mode == MiltonMode::DRAG_ZOOM ||
             mode_is_for_primitives(mode);
@@ -887,6 +899,12 @@ milton_init(Milton* milton, i32 width, i32 height, f32 ui_scale, PATH_CHAR* file
             } break;
             case BrushEnum_ERASER: {
                 milton->brush_sizes[i] = 40;
+            } break;
+            case BrushEnum_BLUR: {
+                milton->brush_sizes[i] = 40;
+                milton->brushes[i].alpha = 0.5f;
+                milton->brushes[i].pressure_size = 0;
+                milton->brushes[i].hardness = 8.0f;
             } break;
             case BrushEnum_PRIMITIVE: {
                 milton->brush_sizes[i] = 10;
@@ -1791,6 +1809,11 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
 
     // Mode tick
     if ( milton->working_stroke.num_points == 0 ) {
+        if ( milton->current_mode == MiltonMode::BLUR ) {
+            milton->working_stroke.flags |= StrokeFlag_BLUR;
+        } else {
+            milton->working_stroke.flags &= ~StrokeFlag_BLUR;
+        }
         if ( milton->current_mode == MiltonMode::PEN && milton->settings->preserve_opacity ) {
             milton->working_stroke.flags |= StrokeFlag_PRESERVE_OPACITY;
         } else {
@@ -1802,13 +1825,16 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     } else {
         milton->working_stroke.flags &= ~StrokeFlag_CUT;
     }
-    if (milton->current_mode == MiltonMode::ERASER) {
-        milton->working_stroke.flags |= StrokeFlag_ERASER;
-        if ( !milton->flags_in_eraser_mode ) {
+    if (milton->current_mode == MiltonMode::ERASER || milton->current_mode == MiltonMode::BLUR) {
+        bool eraser = milton->current_mode == MiltonMode::ERASER;
+        if ( eraser ) { milton->working_stroke.flags |= StrokeFlag_ERASER; }
+        else { milton->working_stroke.flags &= ~StrokeFlag_ERASER; }
+        if ( !milton->flags_in_eraser_mode && !milton->flags_in_blur_mode ) {
             milton->pen_pressure_opacity_stash = (milton->working_stroke.flags & StrokeFlag_PRESSURE_TO_OPACITY) != 0;
-            milton->flags_in_eraser_mode = true;
         }
-        if ( milton->eraser_pressure_opacity ) {
+        milton->flags_in_eraser_mode = eraser;
+        milton->flags_in_blur_mode = !eraser;
+        if ( eraser ? milton->eraser_pressure_opacity : milton->blur_pressure_opacity ) {
             milton->working_stroke.flags |= StrokeFlag_PRESSURE_TO_OPACITY;
         } else {
             milton->working_stroke.flags &= ~StrokeFlag_PRESSURE_TO_OPACITY;
@@ -1816,13 +1842,14 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     }
     else {
         milton->working_stroke.flags &= ~StrokeFlag_ERASER;
-        if ( milton->flags_in_eraser_mode ) {
+        if ( milton->flags_in_eraser_mode || milton->flags_in_blur_mode ) {
             if ( milton->pen_pressure_opacity_stash ) {
                 milton->working_stroke.flags |= StrokeFlag_PRESSURE_TO_OPACITY;
             } else {
                 milton->working_stroke.flags &= ~StrokeFlag_PRESSURE_TO_OPACITY;
             }
             milton->flags_in_eraser_mode = false;
+            milton->flags_in_blur_mode = false;
         }
     }
     if ( current_mode_is_for_drawing(milton) ) {
@@ -1979,6 +2006,7 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
 
     MiltonMode current_mode = milton->current_mode;
     if ( input->mode_to_set == MiltonMode::PEN || input->mode_to_set == MiltonMode::ERASER
+         || input->mode_to_set == MiltonMode::BLUR
          || mode_is_for_primitives(input->mode_to_set) ) {
         selection_disarm_lasso(milton);
     }
@@ -2181,11 +2209,14 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     b32 has_working_stroke = milton->working_stroke.num_points > 0;
 
     if (has_working_stroke) {
-        b32 has_blur = false;
+        b32 has_blur = (milton->working_stroke.flags & StrokeFlag_BLUR) != 0;
 
         Layer* layer = milton->canvas->root_layer;
         while (layer) {
             if (layer->flags & LayerFlags_VISIBLE) {
+                for ( i64 i = 0; !has_blur && i < layer->strokes.count; ++i ) {
+                    has_blur = (get(&layer->strokes, i)->flags & StrokeFlag_BLUR) != 0;
+                }
                 LayerEffect* e = layer->effects;
                 while (e) {
                     if (e->enabled && e->type == LayerEffectType_BLUR) {
