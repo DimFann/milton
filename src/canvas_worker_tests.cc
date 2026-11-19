@@ -333,6 +333,30 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
         check(wait(&worker->completed, latest), "stroke committed between frames must finish");
         frame();
         compare(false, "stroke committed between frames");
+        SDL_AtomicSet(&worker->reference_only, 1);
+        for ( int tool = 0; tool < array_count(drawing_flags); ++tool ) {
+            for ( int update = 0; update < 2; ++update ) {
+                working->num_points = 2;
+                working->flags = drawing_flags[tool];
+                working->points[0] = raster_to_canvas(view, v2l{240, 240});
+                working->points[1] = raster_to_canvas(view, v2l{280, 280});
+                working->pressures[0] = 1;
+                working->pressures[1] = 0.8f - update * 0.2f;
+                working->bounding_rect = bounding_box_for_stroke(working);
+                frame();
+                latest = worker->requested_generation;
+                check(wait(&worker->completed, latest), "reference-path drawing must complete");
+                if ( update != 0 ) {
+                    fprintf(stdout, "Canvas worker reference %s: %d replay hits, %d dependent blur passes\n",
+                            drawing_labels[tool], worker->profile.replay_hits, worker->profile.blur_runs);
+                    check(worker->profile.replay_hits == 1,
+                          "same-view worker drawing must reuse its replay prefix");
+                }
+                frame();
+            }
+        }
+        reset_working_stroke(milton);
+        SDL_AtomicSet(&worker->reference_only, 0);
         for ( int tool = 0; tool < array_count(drawing_flags) + 1; ++tool ) {
             Stroke removed = pop(&drawing_layer->strokes);
             gpu_free_strokes(&removed, 1, r);

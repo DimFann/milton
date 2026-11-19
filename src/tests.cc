@@ -1268,6 +1268,7 @@ test_vram_stats()
 #endif
 
 #include "tile_tests.cc"
+#include "canvas_profile_tests.cc"
 
 #if MILTON_HARDWARE_BRUSH_CURSOR
 static bool
@@ -1334,6 +1335,9 @@ test_brush_cursor()
 extern "C" int
 main(int argc, char** argv)
 {
+    if ( argc == 3 && strcmp(argv[1], "--profile-canvas") == 0 ) {
+        return test_profile_canvas(argv[2]) ? 0 : 1;
+    }
 #if MILTON_HARDWARE_BRUSH_CURSOR
     if ( argc == 2 && strcmp(argv[1], "--brush-cursor") == 0 ) {
         return test_brush_cursor() ? 0 : 1;

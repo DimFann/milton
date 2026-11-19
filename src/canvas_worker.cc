@@ -33,6 +33,20 @@ struct CanvasWorkerLayer
     DArray<LayerEffect> effects;
 };
 
+#if defined(TESTING)
+struct CanvasWorkerProfile
+{
+    double install_ms, render_ms, publish_ms;
+    int builds, composites, batches, replay_hits, blur_runs;
+};
+
+static double
+canvas_profile_elapsed(u64 start)
+{
+    return 1000.0 * (SDL_GetPerformanceCounter() - start) / SDL_GetPerformanceFrequency();
+}
+#endif
+
 struct CanvasWorker
 {
     SDL_Window* window;
@@ -55,7 +69,8 @@ struct CanvasWorker
     int front_generation;
     CanvasView initial_view;
 #if defined(TESTING)
-    SDL_atomic_t hold, entered, completed, render_thread, hold_after_completion;
+    SDL_atomic_t hold, entered, completed, render_thread, hold_after_completion, reference_only;
+    CanvasWorkerProfile profile;
 #endif
 };
 
@@ -411,6 +426,8 @@ canvas_worker_thread(void* data)
     SDL_UnlockMutex(worker->mutex);
     DArray<CanvasWorkerLayer*> layers = {};
     CanvasSnapshot* active = NULL;
+    CanvasView installed_view = {};
+    bool view_installed = false;
     Stroke working = {};
     u64 revision = 0;
     for ( ;; ) {
@@ -431,6 +448,10 @@ canvas_worker_thread(void* data)
         while ( SDL_AtomicGet(&worker->hold) && !SDL_AtomicGet(&worker->stop) ) { SDL_Delay(1); }
 #endif
         if ( generation < SDL_AtomicGet(&worker->minimum_generation) ) { canvas_snapshot_release(scene); continue; }
+#if defined(TESTING)
+        CanvasWorkerProfile profile = {};
+        u64 install_started = SDL_GetPerformanceCounter();
+#endif
         CanvasState canvas = {};
         canvas.root_layer = canvas_worker_install(r, &arena, &layers, scene, &working,
                                                    active ? active->working : NULL, &revision);
@@ -438,18 +459,42 @@ canvas_worker_thread(void* data)
         active = scene;
         if ( r->width != view.screen_size.w || r->height != view.screen_size.h ) { gpu_resize(r, &view); }
         gpu_update_background(r, view.background_color);
-        gpu_update_canvas(r, &canvas, &view);
+        if ( !view_installed || memcmp(&installed_view, &view, sizeof(view)) != 0 ) {
+            gpu_update_canvas(r, &canvas, &view);
+            installed_view = view;
+            view_installed = true;
+        }
         r->request_generation = generation;
+#if defined(TESTING)
+        profile.install_ms = canvas_profile_elapsed(install_started);
+#endif
         bool failed = false;
         while ( !SDL_AtomicGet(&worker->stop) && generation >= SDL_AtomicGet(&worker->minimum_generation) ) {
+#if defined(TESTING)
+            u64 render_started = SDL_GetPerformanceCounter();
+            r->replay_cache_hit = false;
+            r->blur_filter_runs = 0;
+#endif
             gpu_clip_strokes_and_update(&arena, r, &view, view.scale, canvas.root_layer, &working,
                                         0, 0, r->width, r->height, ClipFlags_TILE_SCENE);
-            bool tiled = gpu_render_tile_cache(r, 0, 0, r->width, r->height);
+            bool use_tiles = true;
+#if defined(TESTING)
+            use_tiles = SDL_AtomicGet(&worker->reference_only) == 0;
+#endif
+            bool tiled = use_tiles && gpu_render_tile_cache(r, 0, 0, r->width, r->height);
             if ( !tiled ) {
                 gpu_clip_strokes_and_update(&arena, r, &view, view.scale, canvas.root_layer, &working,
                                             0, 0, r->width, r->height, ClipFlags_JUST_CLIP);
                 gpu_render_canvas(r, 0, 0, r->width, r->height, 1, false);
             }
+#if defined(TESTING)
+            profile.render_ms += canvas_profile_elapsed(render_started);
+            profile.builds += r->tile_builds;
+            profile.composites += r->tile_composites;
+            profile.replay_hits += r->replay_cache_hit != 0;
+            profile.blur_runs += r->blur_filter_runs;
+            ++profile.batches;
+#endif
             GLenum error = glGetError();
             if ( error != GL_NO_ERROR ) {
                 milton_log("Background canvas renderer OpenGL error: 0x%x\n", error);
@@ -458,11 +503,17 @@ canvas_worker_thread(void* data)
             if ( generation < SDL_AtomicGet(&worker->minimum_generation) ) { break; }
             bool complete = !tiled || !r->tiles->pending;
             if ( !complete && !r->tiles->display_ready ) { continue; }
+#if defined(TESTING)
+            u64 publish_started = SDL_GetPerformanceCounter();
+#endif
             GLuint texture = gl::new_color_texture(r->width, r->height);
             glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
             glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
             tile_copy_display_texture(texture, r->width, r->height);
             glFinish();  // Publish only after writes are visible to the presentation context.
+#if defined(TESTING)
+            profile.publish_ms += canvas_profile_elapsed(publish_started);
+#endif
             error = glGetError();
             if ( error != GL_NO_ERROR ) {
                 milton_log("Cannot publish background canvas texture: OpenGL error 0x%x\n", error);
@@ -475,6 +526,7 @@ canvas_worker_thread(void* data)
                 worker->result_generation = generation;
                 SDL_AtomicSet(&worker->result_ready, 1);
 #if defined(TESTING)
+                worker->profile = profile;
                 if ( complete ) {
                     SDL_AtomicSet(&worker->completed, generation);
                     if ( SDL_AtomicCAS(&worker->hold_after_completion, 1, 0) ) {

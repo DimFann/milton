@@ -36,6 +36,9 @@ there is no canvas-format change or permanent flattening.
   Let in-flight drawing finish and display intermediate progress while keeping
   only the latest queued update. Navigation/history and incompatible edits still
   invalidate older frames immediately; new ink remains asynchronous.
+- [x] Preserve the worker's full-quality replay prefix across same-view sample
+  updates. Updating scene snapshots must not unconditionally invalidate cached
+  blur/Preserve opacity history; camera changes still update view state.
 
 - [x] Canvas-space 256-pixel tile cores with sampling gutters and power-of-two
   resolution levels, including negative coordinates.
@@ -117,3 +120,16 @@ Drawing checks retain rendered pixels with a blocked worker, display completed
 intermediate samples despite a newer queued update, and compare pen, eraser,
 blur, Preserve opacity, and committed strokes against synchronous tiles. Strokes
 committed entirely between frames also retain rendered paint.
+Worker reference-fallback checks verify that warmed pen, eraser, blur, and
+Preserve opacity samples reuse their replay prefix. Blur after the active layer
+still runs when its result depends on the new ink.
+
+`--profile-canvas <path>` benchmarks a supplied current-version canvas in a
+hidden window at its saved viewport, without saving it or loading user settings.
+It compares direct replay, the foreground tile/fallback path, and the worker
+using growing strokes near the view's center-right. Each tool reports six warmed
+updates after two warmup updates, including worker installation, reconstruction,
+GPU-complete publication, and observed submission-to-display-texture time.
+The worker's output is compared with synchronous rendering within 2 LSB/channel.
+These measurements exclude display refresh/presentation and the initial cold
+rebuild, which can still be expensive after camera or history changes.
