@@ -26,6 +26,12 @@ there is no canvas-format change or permanent flattening.
   includes its possible opacity-history and blur intermediates.
 - [x] Reuse resident coarse and fine levels while navigating. Do not execute
   reconstruction jobs while navigation controls remain active.
+- [x] Cross-fade the whole view over 50 ms toward preview and 100 ms toward
+  rendered quality. Replace interrupted fades rather than queueing them, and
+  hold preview mode throughout active transforms and settling. Hold the preview
+  until cached tiles cover the whole view, including resident resolution
+  fallbacks; do not reveal individually arriving tiles. Bypass fades for drawing.
+  Two viewport-sized RGBA8 snapshots are separate from the tile/workspace budgets.
 - [x] Incremental idle reconstruction with an approximately 4 ms cooperative
   budget between GPU-completed jobs; publish completed tiles, not half-rendered
   intermediates. Revalidate jobs each frame instead of retaining obsolete view
@@ -62,3 +68,5 @@ Main-render integration checks held navigation without reconstruction, both
 coarser and finer resident-level reuse, and preview-only cache cleanup. Cropped
 2x exports are pixel-identical before and after tile/navigation activity, with
 the view and navigation state preserved.
+Whole-view fade checks cover endpoint/intermediate pixels, held previews, reversal,
+timer wrap, immediate drawing, and main-render completion without tile replay.

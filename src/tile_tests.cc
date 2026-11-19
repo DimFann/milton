@@ -50,6 +50,7 @@ test_tile_cache()
     gpu_update_brush_outline(r, -100, -100, 1);
     glViewport(0, 0, size, size);
     r->tile_cache_unlimited = true;
+    r->disable_display_transitions = true;
 
     u8* tiled = (u8*)mlt_calloc(bytes, 1, "Tile cache test");
     u8* reference = (u8*)mlt_calloc(bytes, 1, "Tile cache test");
@@ -154,6 +155,139 @@ test_tile_cache()
               "warm redraw must reuse tiles without rebuilding or recompositing");
         compare("warm redraw");
     }
+    r->disable_display_transitions = false;
+    read(reference);
+    gpu_present_tile_transition(r, false, false, 1000);
+    auto preview_frame = [&]() {
+        clip();
+        gpu_render_canvas(r, 0, 0, size, size, 1, true);
+    };
+    preview_frame();
+    read(before);
+    check(memcmp(before, reference, bytes) != 0, "fade fixture must distinguish preview from full quality");
+    auto check_fade = [&](u32 now, bool preview, float amount, const char* label) {
+        gpu_present_tile_transition(r, false, preview, now);
+        read(tiled);
+        int worst = 0;
+        for ( size_t i = 0; i < bytes; ++i ) {
+            float expected = preview ? reference[i] * (1 - amount) + before[i] * amount
+                                     : before[i] * (1 - amount) + reference[i] * amount;
+            worst = max(worst, abs((int)tiled[i] - (int)floorf(expected + 0.5f)));
+        }
+        check(worst <= 1, label);
+    };
+    check_fade(2000, true, 0, "fade-out must start at the previous full-quality image");
+    check(gpu_tile_cache_pending(r), "fade-out must schedule animation frames");
+    preview_frame();
+    check_fade(2025, true, 0.5f, "fade-out must blend the entire view consistently");
+    preview_frame();
+    check_fade(2050, true, 1, "fade-out must reach the exact preview within 50 ms");
+    check(!gpu_tile_cache_pending(r), "completed fade-out must stop requesting animation frames");
+    preview_frame();
+    check_fade(5000, true, 1, "held preview must not repeatedly restart its fade");
+    clip();
+    check(gpu_render_tile_cache(r, 0, 0, size, size), "fade-in target must render");
+    read(reference);
+    check_fade(6000, false, 0, "fade-in must start at the held preview");
+    check(gpu_tile_cache_pending(r), "fade-in must schedule animation frames");
+    clip();
+    gpu_render_tile_cache(r, 0, 0, size, size);
+    check_fade(6050, false, 0.5f, "fade-in must blend the entire view consistently");
+    clip();
+    gpu_render_tile_cache(r, 0, 0, size, size);
+    check_fade(6100, false, 1, "fade-in must reach exact full quality within 100 ms");
+    check(!gpu_tile_cache_pending(r), "completed fade-in must stop requesting animation frames");
+    preview_frame();
+    gpu_present_tile_transition(r, false, true, 7000);
+    preview_frame();
+    gpu_present_tile_transition(r, false, true, 7025);
+    read(before);
+    clip();
+    gpu_render_tile_cache(r, 0, 0, size, size);
+    gpu_present_tile_transition(r, false, false, 7025);
+    read(tiled);
+    check(memcmp(before, tiled, bytes) == 0, "reversing a fade must start from the displayed blend");
+    clip();
+    gpu_render_tile_cache(r, 0, 0, size, size);
+    gpu_present_tile_transition(r, false, false, 7125);
+    check(!gpu_tile_cache_pending(r), "reversed fade must complete");
+    preview_frame();
+    gpu_present_tile_transition(r, false, true, 0xFFFFFFF0u);
+    preview_frame();
+    gpu_present_tile_transition(r, false, true, 0);
+    check(gpu_tile_cache_pending(r), "fade must survive timer wrap");
+    preview_frame();
+    gpu_present_tile_transition(r, false, true, 34);
+    check(!gpu_tile_cache_pending(r), "wrapped fade must complete after 50 ms");
+    preview_frame();
+    gpu_present_tile_transition(r, false, false, 200);
+    check(gpu_tile_cache_pending(r), "working-stroke test must start during a fade");
+    clip();
+    gpu_render_tile_cache(r, 0, 0, size, size);
+    read(reference);
+    milton.working_stroke.num_points = 1;
+    gpu_present_tile_transition(r, false, false, 210);
+    read(tiled);
+    milton.working_stroke.num_points = 0;
+    check(!gpu_tile_cache_pending(r) && memcmp(reference, tiled, bytes) == 0,
+          "drawing must bypass the fade to keep new ink immediate");
+
+    gpu_clear_tile_cache(r);
+    r->flags |= RenderBackendFlags_NAVIGATION_PREVIEW;
+    clip_scene();
+    gpu_render(r, 0, 0, size, size);
+    read(before);
+    check(r->tile_builds == 0 && r->tiles->display_preview && !r->tiles->display_fading,
+          "cold held navigation must show a stable whole-view preview without reconstruction");
+    r->flags &= ~RenderBackendFlags_NAVIGATION_PREVIEW;
+    clip_scene();
+    gpu_render(r, 0, 0, size, size);
+    read(tiled);
+    check(!r->tiles->pending && r->tiles->display_fading && gpu_tile_cache_pending(r)
+          && memcmp(before, tiled, bytes) == 0,
+          "main render must fade from the held preview only after the whole view is ready");
+    r->flags |= RenderBackendFlags_NAVIGATION_PREVIEW;
+    clip_scene();
+    gpu_render(r, 0, 0, size, size);
+    check(r->tiles->display_preview && r->tiles->display_fading
+          && r->tile_builds == 0 && r->tile_composites == 0,
+          "starting a transform must replace the active fade-in with one fade-out");
+    u32 fade_started_at = r->tiles->display_changed_at;
+    GLuint fade_from = r->tiles->display_from;
+    for ( int i = 0; i < 3; ++i ) {
+        view->pan_center.x = (i + 1) * 8 * view->scale;
+        view->scale = i == 1 ? 512 : 1024;
+        gpu_update_canvas(r, milton.canvas, view);
+        clip_scene();
+        gpu_render(r, 0, 0, size, size);
+        check(r->tiles->display_preview && r->tiles->display_changed_at == fade_started_at
+              && r->tiles->display_from == fade_from
+              && r->tile_builds == 0 && r->tile_composites == 0,
+              "transform updates must not restart, queue or reverse the active preview fade");
+    }
+    SDL_Delay(55);
+    clip_scene();
+    gpu_render(r, 0, 0, size, size);
+    check(r->tiles->display_preview && !r->tiles->display_fading,
+          "held transform must remain in preview after its single fade-out completes");
+    view->pan_center = {0, 0};
+    view->scale = 1024;
+    gpu_update_canvas(r, milton.canvas, view);
+    r->flags &= ~RenderBackendFlags_NAVIGATION_PREVIEW;
+    clip_scene();
+    gpu_render(r, 0, 0, size, size);
+    check(!r->tiles->display_preview && r->tiles->display_fading,
+          "ending the transform must start a single rendered fade-in");
+    SDL_Delay(110);
+    clip_scene();
+    gpu_render(r, 0, 0, size, size);
+    check(!gpu_tile_cache_pending(r) && r->tile_builds == 0 && r->tile_composites == 0,
+          "main-render fade must finish without replaying or recompositing tiles");
+    read(tiled);
+    compare("completed whole-view fade");
+    r->disable_display_transitions = true;
+    fprintf(stdout, "Whole-view preview fades: 50/100 ms endpoints, midpoint, held transform, cancellation, reversal and timer wrap checked\n");
+
     gpu_clear_tile_cache(r);
     auto timed_tile_frame = [&]() {
         clip_scene();
@@ -217,8 +351,8 @@ test_tile_cache()
                 label, r->tile_hits, r->tile_builds, r->tile_composites, (int)gpu_tile_cache_pending(r));
         check(gpu_tile_cache_pending(r) && r->tile_hits > 0 && r->tile_builds == 0
               && r->tile_composites == 0, label);
-        check(memcmp(before, tiled, bytes) != 0,
-              "resident zoom tiles must visibly contribute beyond the cold preview");
+        check(memcmp(before, tiled, bytes) == 0 && r->tiles->display_preview,
+              "active zoom must hold the preview even when cached paint covers the whole view");
         r->flags &= ~RenderBackendFlags_NAVIGATION_PREVIEW;
     };
     zoom_reuse(1024, 512, "coarser resident zoom reuse");

@@ -68,11 +68,13 @@
     X(void,     glBlendEquation,          GLenum mode)                                            \
     X(void,     glBlendEquationSeparate,  GLenum modeRGB, GLenum modeAlpha)                       \
     X(void,     glBlendFunc,              GLenum source, GLenum dest) \
+    X(void,     glBlendColor,             GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) \
     X(void,     glBlitFramebufferEXT,     GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter) \
     X(void,     glClear,                  GLbitfield mask) \
     X(void,     glClearColor, GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha)\
     X(void,     glClearDepth,             GLclampd depth) \
     X(void,     glCopyTexImage2D,         GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border)\
+    X(void,     glCopyTexSubImage2D,      GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height)\
     X(void,     glDeleteBuffers,          GLsizei n, GLuint* buffers)                       \
     X(void,     glDeleteVertexArrays,     GLsizei n, GLuint* arrays)                        \
     X(void,     glDepthFunc,              GLenum func) \

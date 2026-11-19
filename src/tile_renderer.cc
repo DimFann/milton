@@ -54,8 +54,12 @@ struct CanvasTileCache
     DArray<TileLayer> layers;
     GLuint fbo, quad, underlay;
     u64 frame, serial, deadline;
-    bool pending, failed, can_build, logged_limit;
+    bool pending, failed, can_build, logged_limit, display_ready;
     int jobs;
+    GLuint display_history, display_from;
+    i32 display_width, display_height;
+    u32 display_changed_at;
+    bool display_valid, display_preview, display_fading;
 };
 
 struct TileBounds
@@ -176,13 +180,84 @@ gpu_clear_tile_cache(RenderBackend* r)
     GLuint fbos[] = {w->fbo, cache->fbo};
     glDeleteFramebuffersEXT(2, fbos);
     if ( cache->quad ) { glDeleteBuffers(1, &cache->quad); }
+    GLuint display_textures[] = {cache->display_history, cache->display_from};
+    glDeleteTextures(2, display_textures);
     mlt_free(r->tiles, "Canvas tiles");
 }
 
 bool
 gpu_tile_cache_pending(RenderBackend* r)
 {
-    return r->tiles && r->tiles->pending;
+    return r->tiles && (r->tiles->pending || r->tiles->display_fading);
+}
+
+static void
+tile_copy_display_texture(GLuint texture, i32 width, i32 height)
+{
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
+}
+
+static void
+gpu_present_tile_transition(RenderBackend* r, bool saved_preview, bool preview, u32 now)
+{
+    CanvasTileCache* cache = r->tiles;
+    if ( !cache ) { return; }
+    if ( cache->display_width != r->width || cache->display_height != r->height ) {
+        GLuint textures[] = {cache->display_history, cache->display_from};
+        glDeleteTextures(2, textures);
+        cache->display_history = gl::new_color_texture(r->width, r->height);
+        cache->display_from = gl::new_color_texture(r->width, r->height);
+        cache->display_width = r->width; cache->display_height = r->height;
+        cache->display_valid = cache->display_fading = false;
+    }
+    bool immediate = r->tile_working && r->tile_working->num_points > 0;
+#if defined(TESTING)
+    immediate |= r->disable_display_transitions;
+#endif
+    if ( !cache->display_valid || immediate ) {
+        cache->display_fading = false;
+    } else if ( preview != cache->display_preview ) {
+        // Replace the previous fade from the displayed image, never queue it.
+        swap(cache->display_history, cache->display_from);
+        cache->display_changed_at = now;
+        cache->display_fading = true;
+    }
+    cache->display_preview = preview;
+    cache->display_valid = true;
+    float duration = preview ? 50.0f : 100.0f;
+    float t = min(1.0f, (u32)(now - cache->display_changed_at) / duration);
+    if ( t >= 1 ) { cache->display_fading = false; }
+
+    glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
+    glViewport(0, 0, r->width, r->height);
+    glScissor(0, 0, r->width, r->height);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    GLuint target = saved_preview ? r->eraser_texture : r->canvas_texture;
+    if ( cache->display_fading ) {
+        // Keep the new image separate from the canvas being blended into.
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+        tile_copy_display_texture(r->helper_texture, r->width, r->height);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
+        glBindTexture(GL_TEXTURE_2D, cache->display_from);
+        gpu_fill_with_texture(r);
+        glBindTexture(GL_TEXTURE_2D, r->helper_texture);
+        glEnable(GL_BLEND);
+        glBlendEquation(GL_FUNC_ADD);
+        glBlendColor(0, 0, 0, t * t * (3 - 2 * t));
+        glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA);
+        gpu_fill_with_texture(r);
+        glDisable(GL_BLEND);
+    } else if ( target != r->canvas_texture ) {
+        glBindTexture(GL_TEXTURE_2D, target);
+        gpu_fill_with_texture(r);
+    }
+    tile_copy_display_texture(cache->display_history, r->width, r->height);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glBindTexture(GL_TEXTURE_2D, r->canvas_texture);
 }
 
 static bool
@@ -598,12 +673,16 @@ gpu_render_tile_cache(RenderBackend* r, i32, i32, i32, i32)
         return false;
     }
     cache->logged_limit = false;
-    if ( cache->pending ) {
+    if ( cache->pending || (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW) ) {
         gpu_set_cook_budget(r, 0.002f);
         gpu_clip_strokes_and_update(r->tile_arena, r, &r->tile_view, r->tile_view.scale, r->tile_root,
                                     r->tile_working, 0, 0, r->width, r->height, ClipFlags_NAVIGATION_PREVIEW);
         gpu_set_cook_budget(r, 0);
         gpu_render_canvas(r, 0, 0, r->width, r->height, 1, true);
+        // Keep a clean preview for views without complete cached coverage.
+        glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
+        tile_copy_display_texture(r->eraser_texture, r->width, r->height);
     }
     glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
     glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
@@ -613,6 +692,7 @@ gpu_render_tile_cache(RenderBackend* r, i32, i32, i32, i32)
         glClear(GL_COLOR_BUFFER_BIT);
     }
     i64 i = 0;
+    cache->display_ready = true;
     for ( i64 yy = first_y; yy <= last_y; ++yy ) {
         for ( i64 xx = first_x; xx <= last_x; ++xx, ++i ) {
             i64 tile = ready[i];
@@ -637,16 +717,21 @@ gpu_render_tile_cache(RenderBackend* r, i32, i32, i32, i32)
             } else {
                 bool old_build = cache->can_build;
                 cache->can_build = false;
+                bool covered = false;
                 for ( i64 fine = scale / 2; fine > 0 && fine >= max((i64)1, scale / 4); fine /= 2 ) {
                     i64 ratio = scale / fine;
+                    bool level_covered = true;
                     for ( i64 fy = yy * ratio; fy < (yy + 1) * ratio; ++fy ) {
                         for ( i64 fx = xx * ratio; fx < (xx + 1) * ratio; ++fx ) {
                             i64 resident = tile_request(r, top_layer, fx, fy, fine);
                             if ( resident >= 0 ) { tile_draw_view(r, cache->entries[resident], fx, fy, fine); }
+                            else { level_covered = false; }
                         }
                     }
+                    covered |= level_covered;
                     if ( fine == 1 ) { break; }
                 }
+                cache->display_ready &= covered;
                 cache->can_build = old_build;
             }
         }

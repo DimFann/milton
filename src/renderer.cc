@@ -184,6 +184,7 @@ struct RenderBackend
     bool disable_opacity_regions;
     bool disable_opacity_history_cache;
     bool tile_cache_unlimited;
+    bool disable_display_transitions;
     int tile_builds;
     int tile_composites;
     int tile_hits;
@@ -2281,7 +2282,8 @@ gpu_render(RenderBackend* r,  i32 view_x, i32 view_y, i32 view_width, i32 view_h
     print_framebuffer_status();
 
     // TODO: Do less work when idling
-    if ( !gpu_render_tile_cache(r, view_x, view_y, view_width, view_height) ) {
+    bool tiled = gpu_render_tile_cache(r, view_x, view_y, view_width, view_height);
+    if ( !tiled ) {
         view_x = view_y = 0;
         view_width = r->width;
         view_height = r->height;
@@ -2292,6 +2294,9 @@ gpu_render(RenderBackend* r,  i32 view_x, i32 view_y, i32 view_width, i32 view_h
         gpu_render_canvas(r, view_x, view_y, view_width, view_height, 1.0f,
                           (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW) != 0);
     }
+    bool preview = (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW) != 0
+                   || (tiled && !r->tiles->display_ready);
+    gpu_present_tile_transition(r, tiled && preview, preview, SDL_GetTicks());
 
     GLenum texture_target;
     texture_target = GL_TEXTURE_2D;
