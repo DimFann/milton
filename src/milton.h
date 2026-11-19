@@ -14,7 +14,7 @@
 // Geometric middle of [MINIMUM_SCALE, VIEW_SCALE_LIMIT] = [4, 65536], so zoom in/out headroom is equal.
 #define MILTON_DEFAULT_SCALE        (1 << 9)
 #define NO_PRESSURE_INFO            -1.0f
-#define MAX_INPUT_BUFFER_ELEMS      32
+#define MAX_INPUT_BUFFER_ELEMS      256
 #define MILTON_MAX_BRUSH_SIZE       300
 #define MILTON_MAX_GRID_SIZE        32
 #define HOVER_FLASH_THRESHOLD_MS    500  // How long does the hidden brush hover show when it has changed size.

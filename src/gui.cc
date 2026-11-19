@@ -15,9 +15,11 @@
 void settings_init(MiltonSettings* s);  // milton.cc
 static void milton_update_brushes(Milton* milton);
 
-#define NUM_BUTTONS 5
 #define GUI_PANEL_MIN_WIDTH 160
 #define GUI_PANEL_MAX_WIDTH 480
+
+static void picker_update_points(ColorPicker* picker, float angle);
+static void update_button_bounds(ColorPicker* picker, f32 ui_scale);
 
 // Moves `src` to the position `dst` currently occupies in the layer list (as displayed, top first).
 static void
@@ -90,6 +92,111 @@ panel_resize_handle(const char* id, ImVec2 pos, ImVec2 size, ImVec2* delta)
 // Moves `src` to the position `dst` currently occupies in the layer list (as displayed, top first).
 // (layer_reorder is defined above.)
 
+static bool
+gui_picker_slider_row(const char* label, const char* unit, v3f* hsv, int channel, float track_width, float field_width)
+{
+    ImGui::PushID(channel);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine();
+
+    const float limit = channel == 0 ? 360.0f : 100.0f;
+    float value = clamp(hsv->d[channel] * (channel == 0 ? 1.0f : 100.0f), 0.0f, limit);
+    const auto& style = ImGui::GetStyle();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const float height = ImGui::GetFrameHeight();
+    const float half_thumb = min(height * 0.21f, track_width * 0.15f);
+    const float inset = half_thumb;
+    const float left = pos.x + inset;
+    const float right = pos.x + track_width - inset;
+    const float top = pos.y + height * 0.24f;
+    const float bottom = pos.y + height * 0.53f;
+    const int segments = channel == 0 ? 6 : 1;
+    auto gradient_color = [&](float t) {
+        v3f sample = *hsv;
+        if ( channel == 0 ) { sample = v3f{360.0f * t, 1.0f, 1.0f}; }
+        else { sample.d[channel] = t; }
+        v3f rgb = hsv_to_rgb(sample);
+        return ImGui::GetColorU32(ImVec4(rgb.r, rgb.g, rgb.b, 1.0f));
+    };
+    for ( int i = 0; i < segments; ++i ) {
+        float start = (float)i / segments;
+        float end = (float)(i + 1) / segments;
+        ImU32 a = gradient_color(start);
+        ImU32 b = gradient_color(end);
+        draw->AddRectFilledMultiColor(ImVec2(lerp(left, right, start), top),
+                                      ImVec2(lerp(left, right, end), bottom), a, b, b, a);
+    }
+
+    ImGui::InvisibleButton("##track", ImVec2(track_width, height));
+    bool changed = false;
+    if ( ImGui::IsItemActive() && ImGui::IsMouseDown(0) ) {
+        float selected = clamp((ImGui::GetIO().MousePos.x - left) / (right - left), 0.0f, 1.0f) * limit;
+        changed = value != selected;
+        value = selected;
+    }
+
+    ImGui::SameLine();
+    int number = (int)roundf(value);
+    ImGui::PushItemWidth(field_width);
+    if ( ImGui::InputInt("##value", &number, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue) ) {
+        value = (float)clamp(number, 0, (int)limit);
+        changed = true;
+    }
+    ImGui::PopItemWidth();
+    ImGui::SameLine(0.0f, style.ItemInnerSpacing.x);
+    ImGui::TextUnformatted(unit);
+
+    const float x = lerp(left, right, clamp(value / limit, 0.0f, 1.0f));
+    draw->AddTriangleFilled(ImVec2(x, bottom + 1.0f),
+                            ImVec2(x - half_thumb, pos.y + height * 0.94f),
+                            ImVec2(x + half_thumb, pos.y + height * 0.94f),
+                            ImGui::GetColorU32(ImGuiCol_Text));
+    if ( changed ) {
+        hsv->d[channel] = clamp(value, 0.0f, limit) / (channel == 0 ? 1.0f : 100.0f);
+    }
+    ImGui::PopID();
+    return changed;
+}
+
+static void
+gui_picker_sliders(MiltonInput* input, Milton* milton)
+{
+    ColorPicker* picker = &milton->gui->picker;
+    Rect bounds = picker_get_bounds(picker);
+    ImGui::SetNextWindowPos(ImVec2((f32)bounds.left, (f32)bounds.bottom));
+    ImGui::SetNextWindowSize(ImVec2((f32)(bounds.right - bounds.left), (f32)picker->controls_height));
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove
+                                   | ImGuiWindowFlags_NoSavedSettings;
+    if ( ImGui::Begin("##picker_hsv", NULL, flags) ) {
+        v3f hsv = picker->data.hsv;
+        const auto& style = ImGui::GetStyle();
+        const char* labels[] = {"H", "S", "V"};
+        const char* units[] = {"\xC2\xB0", "%", "%"};
+        const float row_x = ImGui::GetCursorPosX();
+        const float label_width = max(ImGui::CalcTextSize("H").x,
+                                      max(ImGui::CalcTextSize("S").x, ImGui::CalcTextSize("V").x));
+        const float field_width = ImGui::CalcTextSize("000").x + 2.0f * style.FramePadding.x + 2.0f;
+        const float track_width = max(1.0f, ImGui::GetContentRegionAvail().x - label_width - field_width
+            - max(ImGui::CalcTextSize(units[0]).x, ImGui::CalcTextSize("%").x)
+            - 2.0f * style.ItemSpacing.x - style.ItemInnerSpacing.x);
+        bool changed = false;
+        for ( int i = 0; i < 3; ++i ) {
+            ImGui::SetCursorPosX(row_x + label_width - ImGui::CalcTextSize(labels[i]).x);
+            changed |= gui_picker_slider_row(labels[i], units[i], &hsv, i, track_width, field_width);
+        }
+        if ( changed ) {
+            picker_update_points(picker, hsv.h * kPi / 180.0f);
+            picker->data.hsv = hsv;
+            milton_update_brushes(milton);
+            gpu_update_picker(milton->renderer, picker);
+            input->flags |= MiltonInputFlags_FULL_REFRESH;
+        }
+    }
+    ImGui::End();
+}
+
 // The layers panel sits directly under the color picker, with the same width. The left edge of the
 // panel resizes it horizontally and the bottom edge of the layers panel resizes it vertically.
 void
@@ -115,6 +222,13 @@ gui_layer_window(MiltonInput* input, PlatformState* platform, Milton* milton, f3
         gpu_update_picker(milton->renderer, &gui->picker);
     }
 
+    i32 controls_height = (i32)ceilf(2 * ImGui::GetStyle().WindowPadding.y + ImGui::GetFrameHeight()
+                                     + 2 * ImGui::GetFrameHeightWithSpacing());
+    if ( gui->picker.controls_height != controls_height ) {
+        gui->picker.controls_height = controls_height;
+        update_button_bounds(&gui->picker, ui_scale);
+        gpu_update_picker(milton->renderer, &gui->picker);
+    }
     Rect pbounds = get_bounds_for_picker_and_colors(&gui->picker);
     const f32 min_height = ui_scale*140;
     const f32 layers_top = (f32)pbounds.bottom;
@@ -153,6 +267,7 @@ gui_layer_window(MiltonInput* input, PlatformState* platform, Milton* milton, f3
     prefs->layer_window_width = (i32)gui->panel_width;
     prefs->layer_window_height = (i32)gui->layers_height;
 
+    gui_picker_sliders(input, milton);
     ImGui::SetNextWindowPos(ImVec2((f32)pbounds.left, (f32)(pbounds.bottom)));
     ImGui::SetNextWindowSize(ImVec2(width, height));
 
@@ -339,7 +454,8 @@ gui_layer_window(MiltonInput* input, PlatformState* platform, Milton* milton, f3
         else {
             const f32 bw = ImGui::GetFrameHeight() * 1.5f;
             const ImGuiStyle& st = ImGui::GetStyle();
-            {
+            constexpr bool show_merge_down = false;
+            if ( show_merge_down ) {
                 const bool can_merge = milton->canvas->working_layer->prev != NULL;
                 if ( !can_merge ) { ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.4f); }
                 if ( ImGui::Button("Merge Down") && can_merge ) {
@@ -2269,12 +2385,6 @@ picker_deactivate(ColorPicker* picker)
     picker->flags = ColorPickerFlags_NOTHING;
 }
 
-static b32
-is_inside_picker_rect(ColorPicker* picker, v2i point)
-{
-    return is_inside_rect(picker->bounds, point);
-}
-
 static Rect
 picker_color_buttons_bounds(const ColorPicker* picker)
 {
@@ -2291,21 +2401,10 @@ picker_color_buttons_bounds(const ColorPicker* picker)
     return bounds;
 }
 
-static b32
-is_inside_picker_button_area(ColorPicker* picker, v2i point)
-{
-    Rect button_rect = picker_color_buttons_bounds(picker);
-    b32 is_inside = is_inside_rect(button_rect, point);
-    return is_inside;
-}
-
 b32
 gui_point_hovers(MiltonGui* gui, v2i point)
 {
-    b32 hovers = gui->visible &&
-                    (is_inside_picker_rect(&gui->picker, point) ||
-                     is_inside_picker_button_area(&gui->picker, point));
-    return hovers;
+    return gui->visible && is_inside_rect(get_bounds_for_picker_and_colors(&gui->picker), point);
 }
 
 void
@@ -2320,19 +2419,17 @@ gui_picker_from_rgb(ColorPicker* picker, v3f rgb)
 static void
 update_button_bounds(ColorPicker* picker, f32 ui_scale)
 {
-    i32 bounds_radius_px = picker->bounds_radius_px;
-
-    i32 spacing = 4*ui_scale;
-    i32 num_buttons = NUM_BUTTONS;
-
-    i32 button_size = (2*bounds_radius_px - (num_buttons - 1) * spacing) / num_buttons;
-    i32 current_x = picker->center.x - bounds_radius_px;
+    i32 width = picker->bounds.right - picker->bounds.left;
+    i32 spacing = clamp((i32)(2 * ui_scale), 0, width / (2 * PICKER_HISTORY_COUNT));
+    i32 button_size = (width - (PICKER_HISTORY_COUNT - 1) * spacing) / PICKER_HISTORY_COUNT;
+    i32 row_width = PICKER_HISTORY_COUNT * button_size + (PICKER_HISTORY_COUNT - 1) * spacing;
+    i32 current_x = picker->bounds.left + (width - row_width) / 2;
 
     for ( ColorButton* cur_button = picker->color_buttons;
           cur_button != NULL;
           cur_button = cur_button->next ) {
         cur_button->x = current_x;
-        cur_button->y = picker->center.y + bounds_radius_px + spacing;
+        cur_button->y = picker->bounds.bottom + picker->controls_height + spacing;
         cur_button->w = button_size;
         cur_button->h = button_size;
 
@@ -2633,9 +2730,8 @@ gui_init(Arena* root_arena, MiltonGui* gui, f32 ui_scale)
     gui->picker.color_buttons = arena_alloc_elem(root_arena, ColorButton);
     gui->original_settings = arena_alloc_elem(root_arena, MiltonSettings);
 
-    i32 num_buttons = NUM_BUTTONS;
     auto* cur_button = gui->picker.color_buttons;
-    for ( i64 i = 0; i != (num_buttons - 1); ++i ) {
+    for ( int i = 1; i < PICKER_HISTORY_COUNT; ++i ) {
         cur_button->next = arena_alloc_elem(root_arena, ColorButton);
         cur_button = cur_button->next;
     }

@@ -14,6 +14,8 @@ This fork adds some quality of life features I've been wanting for years, as wel
 * Reorganized UI, with dark mode
 * Pressure response tuning, pressure and position smoothing
 * From 8 to 16 bit color values for smoother stroke appearances
+* The triangle color picker keeps the selected hue fully saturated along the edge from pure hue to black.
+* Below the color wheel, H/S/V sliders preview the colors they produce. Type a hue in degrees or saturation and value as percentages, then press Enter. Ten recent color swatches sit below the sliders.
 * Better precision for stroke placement
 * Allow for deeper zoom, start canvas zoom further out for more in/out by default.
 * Variable hardness for brush and eraser + other brush options & tilt support
@@ -33,11 +35,15 @@ This fork adds some quality of life features I've been wanting for years, as wel
 ### Current Issues
 * Layer optimizer function doesn't catch all stray/orphaned strokes
 * Cut eraser doesn't always cut strokes out
-* Merge down function
+* Merge Down is temporarily hidden from the Layers panel; the implementation is retained.
     * Eraser strokes get applied to the layer below, or don't get cut out precisely if using stroke conversion feature.
 * Untested with Wacom/Huion/XP-Pen manufacturer-provided drivers
 * Wintab may not work yet, untested
 * Only tested with OpenTabletDriver, using WindowsInk plugin by Kuuuube (Absolute).
+
+Milton reads Windows Ink pen position and pressure history before each native message expires. A
+lower display refresh rate can delay the on-screen preview, but it no longer discards the pen samples
+that Windows groups into a single message.
 
 ### Notes, caution, from DimFann
 * I'm not committed to actively maintaining this fork.

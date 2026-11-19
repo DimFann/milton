@@ -115,6 +115,11 @@ void    platform_cursor_set_position(PlatformState* platform, v2i pos);
 v2i     platform_cursor_get_position(PlatformState* platform);
 
 EasyTabResult platform_handle_sysevent(PlatformState* platform, SDL_SysWMEvent* sysevent);
+#if defined(_WIN32)
+bool          platform_is_ink_event(const SDL_Event& event);
+EasyTabResult platform_handle_ink_event(const SDL_Event& event, v2i* position);
+bool          platform_ink_in_proximity();
+#endif
 void          platform_event_tick();
 
 void*   platform_allocate(size_t size);

@@ -15,6 +15,9 @@
 
 #define MILTON_MAGIC_NUMBER 0X11DECAF3
 
+static constexpr i32 LEGACY_PICKER_HISTORY_COUNT = 5;
+static constexpr u32 PICKER_HISTORY_FOOTER_MAGIC = 0x31545348;  // "HST1"
+
 static u64 g_bytes_written = 0;
 
 void save_debug_log(char* message, ...)
@@ -333,10 +336,16 @@ milton_load(Milton* milton)
             btn = gui->picker.color_buttons;
 
             READ(&button_count, sizeof(i32), 1, fd);
-            for ( i32 i = 0;
-                  btn!=NULL && i < button_count;
-                  ++i, btn=btn->next ) {
-                READ(&btn->rgba, sizeof(v4f), 1, fd);
+            for ( i32 i = 0; i < button_count; ++i ) {
+                v4f rgba;
+                READ(&rgba, sizeof(rgba), 1, fd);
+                if ( btn ) {
+                    btn->rgba = rgba;
+                    btn = btn->next;
+                }
+            }
+            for ( ColorButton* clear = btn; clear; clear = clear->next ) {
+                clear->rgba = {};
             }
         }
 
@@ -405,6 +414,21 @@ milton_load(Milton* milton)
         if ( milton_binary_version >= 10 ) {
           READ(&milton->grid_rows, sizeof(milton->grid_rows), 1, fd);
           READ(&milton->grid_columns, sizeof(milton->grid_columns), 1, fd);
+        }
+
+        // Keep the five original swatches in place so older builds can still open the canvas.
+        {
+            u32 magic = 0;
+            size_t read = fread(&magic, 1, sizeof(magic), fd);
+            if ( read == sizeof(magic) && magic == PICKER_HISTORY_FOOTER_MAGIC ) {
+                ColorButton* extra = milton->gui->picker.color_buttons;
+                for ( i32 i = 0; i < LEGACY_PICKER_HISTORY_COUNT; ++i ) { extra = extra->next; }
+                for ( ; extra; extra = extra->next ) {
+                    READ(&extra->rgba, sizeof(v4f), 1, fd);
+                }
+            } else if ( ferror(fd) ) {
+                ok = false;
+            }
         }
 
         err = fclose(fd);
@@ -597,18 +621,13 @@ milton_save(Milton* milton)
                     b32 could_write_buttons = true;
 
                     if ( could_write_picker ) {
-                        i32 button_count = 0;
+                        i32 button_count = LEGACY_PICKER_HISTORY_COUNT;
                         MiltonGui* gui = milton->gui;
-                        // Count buttons
-                        for (ColorButton* b = gui->picker.color_buttons; b!= NULL; b = b->next, button_count++) { }
                         // Write
                         could_write_buttons = write_data(&button_count, sizeof(i32), 1, fd);
-                        if ( could_write_buttons ) {
-                            for ( ColorButton* b = gui->picker.color_buttons;
-                                  could_write_buttons && b!= NULL;
-                                  b = b->next ) {
-                                could_write_buttons = write_data(&b->rgba, sizeof(v4f), 1, fd);
-                            }
+                        ColorButton* b = gui->picker.color_buttons;
+                        for ( i32 i = 0; could_write_buttons && i < button_count; ++i, b = b->next ) {
+                            could_write_buttons = write_data(&b->rgba, sizeof(v4f), 1, fd);
                         }
                     }
                     else {
@@ -682,7 +701,14 @@ milton_save(Milton* milton)
                                   // Done.
                                   //
                                   if ( could_write_grid_sizes ) {
-                                    could_write_milton_state = true;
+                                    u32 magic = PICKER_HISTORY_FOOTER_MAGIC;
+                                    bool wrote_history = write_data(&magic, sizeof(magic), 1, fd);
+                                    ColorButton* extra = milton->gui->picker.color_buttons;
+                                    for ( i32 i = 0; i < LEGACY_PICKER_HISTORY_COUNT; ++i ) { extra = extra->next; }
+                                    for ( ; wrote_history && extra; extra = extra->next ) {
+                                        wrote_history = write_data(&extra->rgba, sizeof(v4f), 1, fd);
+                                    }
+                                    could_write_milton_state = wrote_history;
                                   }
                                 }
                             }

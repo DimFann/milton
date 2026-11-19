@@ -23,12 +23,14 @@ enum ColorPickerFlags
 
 struct PickerData
 {
-    v2f a;  // Corresponds to value = 0      (black)
-    v2f b;  // Corresponds to saturation = 0 (white)
+    v2f a;  // White (saturation = 0, value = 1).
+    v2f b;  // Black (value = 0).
     v2f c;  // Points to chosen hue.         (full color)
 
     v3f  hsv;
 };
+
+constexpr int PICKER_HISTORY_COUNT = 10;
 
 struct ColorButton
 {
@@ -47,6 +49,7 @@ struct ColorPicker
     v2i     center;  // In screen pixel coordinates.
     i32     bounds_radius_px;
     Rect    bounds;
+    i32     controls_height;
     float   wheel_radius;
     float   wheel_half_width;
     v4f     bg_color;        // Picker panel background, follows the UI theme.

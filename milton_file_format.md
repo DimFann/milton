@@ -9,4 +9,8 @@ The files src/persist.(c|h), functions `milton_save` and `milton_load` serve as
 documentation for the file format. If this is not enough, please contact me at
 bigmonachus@gmail.com
 
+The color history keeps five swatches in the main file body for older readers.
+Newer saves append an optional `HST1` footer (four-byte tag, followed by five
+RGBA `float32` swatches) for the additional colors.
+
 

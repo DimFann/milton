@@ -281,14 +281,17 @@ gpu_update_picker(RenderBackend* r, ColorPicker* picker)
         point = transform(point);
         gl::set_uniform_vec2(r->picker_program, "u_triangle_point", 1, point.d);
     }
-    v4f colors[5] = {};
+    v4f colors[PICKER_HISTORY_COUNT] = {};
     ColorButton* button = picker->color_buttons;
-    colors[0] = button->rgba; button = button->next;
-    colors[1] = button->rgba; button = button->next;
-    colors[2] = button->rgba; button = button->next;
-    colors[3] = button->rgba; button = button->next;
-    colors[4] = button->rgba; button = button->next;
-    gl::set_uniform_vec4(r->picker_program, "u_colors", 5, (float*)colors);
+    v2f history_start = transform(v2f{(f32)button->x, (f32)button->y});
+    v4f history_layout = {history_start.x, history_start.y, 2.0f * button->w / w,
+                         2.0f * (button->next->x - button->x) / w};
+    gl::set_uniform_vec4(r->picker_program, "u_history_layout", 1, history_layout.d);
+    gl::set_uniform_f(r->picker_program, "u_history_border", 2.0f / w);
+    for ( int i = 0; i < PICKER_HISTORY_COUNT; ++i, button = button->next ) {
+        colors[i] = button->rgba;
+    }
+    gl::set_uniform_vec4(r->picker_program, "u_colors", PICKER_HISTORY_COUNT, colors[0].d);
 
     // Update VBO for picker
     {

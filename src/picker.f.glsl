@@ -13,7 +13,10 @@ uniform float u_angle;
 
 uniform vec2 u_triangle_point;
 
-uniform vec4 u_colors[5]; // Colors for picker buttons.
+#define PICKER_HISTORY_COUNT 10
+uniform vec4 u_colors[PICKER_HISTORY_COUNT];
+uniform vec4 u_history_layout; // Left, top, square size, and horizontal stride.
+uniform float u_history_border;
 
 uniform vec2 u_screen_size;
 
@@ -159,34 +162,25 @@ main()
         // Triangle
         else if ( is_inside_triangle(v_norm) ) {
             float area = orientation(u_pointa, u_pointb, u_pointc);
-            float v = 1 - (orientation(v_norm, u_pointc, u_pointa) / area);
-            float s = orientation(u_pointb, v_norm, u_pointa) * v / area;
+            // White and pure hue are the two non-black barycentric contributions.
+            float white_weight = orientation(u_pointb, u_pointc, v_norm) / area;
+            float hue_weight = orientation(u_pointa, u_pointb, v_norm) / area;
             vec3 pure_color = hsv_to_rgb(vec3(u_angle,1.0,1.0));
-            color = vec4((1.0-(1.0-pure_color)*s)*v,1.0);
+            color = vec4(vec3(white_weight) + hue_weight * pure_color, 1.0);
         }
     }
 #endif
-    // Render buttons
-    else if ( v_norm.y >= 1 ) {
-        // Get the color for the rects
-        int rect_i = int(((v_norm.x+1)/4) * 10);
-        vec4 rect_color = u_colors[rect_i];
-        color = rect_color;
-
-        // Black outlines
-        float h = ((v_norm.x+1)/4)*10;
-        float epsilon = 0.01;
-        float epsilon2 = 0.015;
-        if ( v_norm.y > 1.4-epsilon
-             || v_norm.y < 1+epsilon
-             || (h <     epsilon2 && h >   - epsilon2)
-             || (h < 1 + epsilon2 && h > 1 - epsilon2)
-             || (h < 2 + epsilon2 && h > 2 - epsilon2)
-             || (h < 3 + epsilon2 && h > 3 - epsilon2)
-             || (h < 4 + epsilon2 && h > 4 - epsilon2)
-             || (h < 5 + epsilon2 && h > 5 - epsilon2)
-             || (h < 6 + epsilon2 && h > 6 - epsilon2) ) {
-            color = vec4(0,0,0,1);
+    else if ( u_history_layout.z > 0.0 ) {
+        vec2 p = v_norm - u_history_layout.xy;
+        float size = u_history_layout.z;
+        float stride = u_history_layout.w;
+        if ( p.y >= 0.0 && p.y < size && p.x >= 0.0 && p.x < stride * float(PICKER_HISTORY_COUNT) ) {
+            int index = int(p.x / stride);
+            float x = p.x - float(index) * stride;
+            if ( x < size ) {
+                float edge = min(min(x, size - x), min(p.y, size - p.y));
+                color = edge < u_history_border ? vec4(0,0,0,1) : mix(u_bg_color, u_colors[index], u_colors[index].a);
+            }
         }
     }
 

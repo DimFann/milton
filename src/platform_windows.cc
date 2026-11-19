@@ -5,6 +5,7 @@
 #include "platform.h"
 
 #include "memory.h"
+#include <SDL_system.h>
 #include <dxgi1_4.h>
 #include <pdh.h>
 #include <pdhmsg.h>
@@ -14,7 +15,8 @@ extern "C" {
 
 static FILE* g_win32_logfile;
 static bool wintab_active = false;
-static void ink_init();
+static void ink_init(HWND hwnd);
+static void ink_deinit();
 
 struct PlatformSpecific
 {
@@ -82,13 +84,14 @@ platform_init(PlatformState* platform, SDL_SysWMinfo* sysinfo)
     if (easytab_res != EASYTAB_OK) {
         milton_log("EasyTab failed to load. Code %d\n", easytab_res);
     }
-    ink_init();
+    ink_init(hwnd);
 
 }
 
 void
 platform_deinit(PlatformState* platform)
 {
+    ink_deinit();
     EasyTab_Unload();
 }
 
@@ -231,33 +234,52 @@ platform_setup_cursor(Arena* arena, PlatformState* platform)
 #endif  // MILTON_HARDWARE_BRUSH_CURSOR
 }
 
-// Windows Ink (WM_POINTER) support. Drivers like OpenTabletDriver don't provide Wintab; they emit
-// Windows Ink pen input, which only arrives as WM_POINTER* messages. We translate those into the
-// same EasyTab state that Wintab fills in.
+// Windows Ink (WM_POINTER) feeds the same EasyTab state as Wintab.
 typedef BOOL (WINAPI GetPointerTypeProc)(UINT32, POINTER_INPUT_TYPE*);
 typedef BOOL (WINAPI GetPointerPenInfoProc)(UINT32, POINTER_PEN_INFO*);
+typedef BOOL (WINAPI GetPointerPenInfoHistoryProc)(UINT32, UINT32*, POINTER_PEN_INFO*);
 
-static GetPointerTypeProc*    ink_GetPointerType    = NULL;
-static GetPointerPenInfoProc* ink_GetPointerPenInfo = NULL;
-static void
-ink_init()
+static GetPointerTypeProc*           ink_GetPointerType = NULL;
+static GetPointerPenInfoProc*        ink_GetPointerPenInfo = NULL;
+static GetPointerPenInfoHistoryProc* ink_GetPointerPenInfoHistory = NULL;
+static Uint32 ink_event_type = (Uint32)-1;
+
+struct InkEvent
 {
-    HMODULE user32 = GetModuleHandleA("user32.dll");
-    if ( user32 ) {
-        ink_GetPointerType    = (GetPointerTypeProc*)GetProcAddress(user32, "GetPointerType");
-        ink_GetPointerPenInfo = (GetPointerPenInfoProc*)GetProcAddress(user32, "GetPointerPenInfo");
-    }
-    // Wintab may have failed to load (no Wacom driver). Ink still needs the shared state.
-    if ( EasyTab == NULL && ink_GetPointerPenInfo ) {
-        EasyTab = (EasyTabInfo*)calloc(1, sizeof(EasyTabInfo));
+    UINT message;
+    POINTER_PEN_INFO latest;
+    v2i position;
+    int count;
+    struct {
+        POINT position;
+        f32 pressure;
+    } samples[EASYTAB_PACKETQUEUE_SIZE];
+};
+
+static void
+ink_collect_samples(InkEvent* batch, HWND hwnd, const POINTER_PEN_INFO* history, UINT32 count)
+{
+    // Windows returns newest first. Only in-contact samples belong to the stroke,
+    // including any moves coalesced with the pen-up message.
+    while ( count > 0 ) {
+        const POINTER_PEN_INFO& pen = history[--count];
+        if ( !(pen.pointerInfo.pointerFlags & POINTER_FLAG_INCONTACT)
+             || (pen.penFlags & PEN_FLAG_BARREL) ) {
+            continue;
+        }
+        POINT p = pen.pointerInfo.ptPixelLocation;
+        ScreenToClient(hwnd, &p);
+        auto& sample = batch->samples[batch->count++];
+        sample.position = p;
+        sample.pressure = (pen.penMask & PEN_MASK_PRESSURE) ? (f32)pen.pressure / 1024.0f : 1.0f;
     }
 }
 
-static EasyTabResult
-ink_handle_event(HWND hwnd, UINT msg, WPARAM wparam)
+static void SDLCALL
+ink_capture_message(void* userdata, void* window, unsigned int msg, Uint64 wparam, Sint64)
 {
-    if ( !EasyTab || !ink_GetPointerType || !ink_GetPointerPenInfo ) {
-        return EASYTAB_EVENT_NOT_HANDLED;
+    if ( window != userdata || wintab_active ) {
+        return;
     }
     switch ( msg ) {
         case WM_POINTERENTER:
@@ -265,20 +287,124 @@ ink_handle_event(HWND hwnd, UINT msg, WPARAM wparam)
         case WM_POINTERDOWN:
         case WM_POINTERUP:
         case WM_POINTERUPDATE: break;
-        default: return EASYTAB_EVENT_NOT_HANDLED;
+        default: return;
     }
 
     UINT32 id = GET_POINTERID_WPARAM(wparam);
     POINTER_INPUT_TYPE type = PT_POINTER;
     if ( !ink_GetPointerType(id, &type) || type != PT_PEN ) {
-        return EASYTAB_EVENT_NOT_HANDLED;
+        return;
     }
     POINTER_PEN_INFO pen = {};
     if ( !ink_GetPointerPenInfo(id, &pen) ) {
+        milton_log("GetPointerPenInfo failed: %lu\n", GetLastError());
+        return;
+    }
+
+    InkEvent* batch = (InkEvent*)malloc(sizeof(InkEvent));
+    if ( !batch ) {
+        milton_log("Could not allocate Windows Ink event\n");
+        return;
+    }
+    HWND hwnd = (HWND)window;
+    batch->message = msg;
+    batch->latest = pen;
+    batch->count = 0;
+    POINT p = pen.pointerInfo.ptPixelLocation;
+    ScreenToClient(hwnd, &p);
+    batch->position = v2i{p.x, p.y};
+
+    // The history is tied to the native message, not the later SDL_SYSWMEVENT.
+    // Capture it before SDL retrieves another Windows message.
+    POINTER_PEN_INFO history[EASYTAB_PACKETQUEUE_SIZE];
+    UINT32 count = EASYTAB_PACKETQUEUE_SIZE;
+    bool have_history = false;
+    if ( (msg == WM_POINTERUPDATE || msg == WM_POINTERUP) && pen.pointerInfo.historyCount > 1
+         && ink_GetPointerPenInfoHistory ) {
+        have_history = ink_GetPointerPenInfoHistory(id, &count, history);
+        if ( have_history ) {
+            ink_collect_samples(batch, hwnd, history, min(count, (UINT32)EASYTAB_PACKETQUEUE_SIZE));
+        } else {
+            milton_log("GetPointerPenInfoHistory failed: %lu\n", GetLastError());
+        }
+    }
+    if ( !have_history && msg != WM_POINTERUP && msg != WM_POINTERLEAVE ) {
+        ink_collect_samples(batch, hwnd, &pen, 1);
+    }
+
+    SDL_Event event = {};
+    event.type = ink_event_type;
+    event.user.data1 = batch;
+    if ( SDL_PushEvent(&event) != 1 ) {
+        milton_log("Could not queue Windows Ink event: %s\n", SDL_GetError());
+        free(batch);
+    }
+}
+
+static void
+ink_init(HWND hwnd)
+{
+    HMODULE user32 = GetModuleHandleA("user32.dll");
+    if ( user32 ) {
+        ink_GetPointerType = (GetPointerTypeProc*)GetProcAddress(user32, "GetPointerType");
+        ink_GetPointerPenInfo = (GetPointerPenInfoProc*)GetProcAddress(user32, "GetPointerPenInfo");
+        ink_GetPointerPenInfoHistory = (GetPointerPenInfoHistoryProc*)GetProcAddress(user32, "GetPointerPenInfoHistory");
+    }
+    if ( !ink_GetPointerType || !ink_GetPointerPenInfo ) {
+        return;
+    }
+    ink_event_type = SDL_RegisterEvents(1);
+    if ( ink_event_type == (Uint32)-1 ) {
+        milton_log("Could not register Windows Ink events: %s\n", SDL_GetError());
+        return;
+    }
+    // Wintab may not have loaded; Ink still needs the shared state.
+    if ( !EasyTab ) {
+        EasyTab = (EasyTabInfo*)calloc(1, sizeof(EasyTabInfo));
+    }
+    if ( EasyTab ) {
+        SDL_SetWindowsMessageHook(ink_capture_message, hwnd);
+    } else {
+        milton_log("Could not allocate Windows Ink state\n");
+    }
+}
+
+static void
+ink_deinit()
+{
+    SDL_SetWindowsMessageHook(NULL, NULL);
+    if ( ink_event_type != (Uint32)-1 ) {
+        SDL_Event event;
+        while ( SDL_PeepEvents(&event, 1, SDL_GETEVENT, ink_event_type, ink_event_type) == 1 ) {
+            free(event.user.data1);
+        }
+        ink_event_type = (Uint32)-1;
+    }
+}
+
+bool
+platform_is_ink_event(const SDL_Event& event)
+{
+    return event.type == ink_event_type;
+}
+
+bool
+platform_ink_in_proximity()
+{
+    return !wintab_active && EasyTab && EasyTab->PenInProximity;
+}
+
+EasyTabResult
+platform_handle_ink_event(const SDL_Event& event, v2i* position)
+{
+    InkEvent* batch = (InkEvent*)event.user.data1;
+    if ( wintab_active ) {
+        free(batch);
         return EASYTAB_EVENT_NOT_HANDLED;
     }
 
-    EasyTab->NumPackets = 0;
+    const POINTER_PEN_INFO& pen = batch->latest;
+    UINT msg = batch->message;
 
     POINTER_FLAGS flags = pen.pointerInfo.pointerFlags;
     b32 in_range = (flags & POINTER_FLAG_INRANGE) != 0 && msg != WM_POINTERLEAVE;
@@ -301,19 +427,14 @@ ink_handle_event(HWND hwnd, UINT msg, WPARAM wparam)
     }
     if ( pen.penMask & PEN_MASK_ROTATION ) { EasyTab->Orientation.Twist = (int32_t)pen.rotation; }
 
-    if ( in_range && msg != WM_POINTERLEAVE ) {
-        POINT p = pen.pointerInfo.ptPixelLocation;
-        ScreenToClient(hwnd, &p);
-        EasyTab->PosX[0] = p.x;
-        EasyTab->PosY[0] = p.y;
-        if ( pen.penMask & PEN_MASK_PRESSURE ) {
-            EasyTab->Pressure[0] = (f32)pen.pressure / 1024.0f;
-        }
-        else {
-            EasyTab->Pressure[0] = 1.0f;
-        }
-        EasyTab->NumPackets = 1;
+    *position = batch->position;
+    EasyTab->NumPackets = batch->count;
+    for ( int i = 0; i < batch->count; ++i ) {
+        EasyTab->PosX[i] = batch->samples[i].position.x;
+        EasyTab->PosY[i] = batch->samples[i].position.y;
+        EasyTab->Pressure[i] = batch->samples[i].pressure;
     }
+    free(batch);
     return EASYTAB_OK;
 }
 
@@ -324,14 +445,6 @@ platform_handle_sysevent(PlatformState* platform, SDL_SysWMEvent* sysevent)
     mlt_assert(sysevent->msg->subsystem == SDL_SYSWM_WINDOWS);
     if ( !EasyTab ) {
         return res;
-    }
-    if ( !wintab_active ) {
-        res = ink_handle_event(sysevent->msg->msg.win.hwnd,
-                               sysevent->msg->msg.win.msg,
-                               sysevent->msg->msg.win.wParam);
-        if ( res == EASYTAB_OK ) {
-            return res;
-        }
     }
     // Wintab handler dereferences its function table, so only call it with it loaded.
     if ( EasyTab->Dll == NULL ) {

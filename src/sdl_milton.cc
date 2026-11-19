@@ -278,6 +278,7 @@ sdl_event_loop(Milton* milton, PlatformState* platform)
     milton_input.mode_to_set = MiltonMode::MODE_COUNT;
 
     b32 pointer_up = false;
+    b32 ink_stroke_ended = false;
 
     v2i input_point = {};
 
@@ -289,6 +290,12 @@ sdl_event_loop(Milton* milton, PlatformState* platform)
     while ( SDL_PollEvent(&event) ) {
         ImGui_ImplSDL2_ProcessEvent(&event);
 
+        Uint32 event_type = event.type;
+        bool ink_event = false;
+#if defined(_WIN32)
+        ink_event = platform_is_ink_event(event);
+        if ( ink_event ) { event_type = SDL_SYSWMEVENT; }
+#endif
         SDL_Keymod keymod = SDL_GetModState();
 
 #if 0
@@ -303,20 +310,30 @@ sdl_event_loop(Milton* milton, PlatformState* platform)
 #pragma warning (push)
 #pragma warning (disable : 4061)
 #endif
-        switch ( event.type ) {
+        switch ( event_type ) {
             case SDL_QUIT: {
                 platform_cursor_show();
                 milton_try_quit(milton);
             } break;
             case SDL_SYSWMEVENT: {
-                f32 pressure = NO_PRESSURE_INFO;
-                SDL_SysWMEvent sysevent = event.syswm;
                 EasyTabResult er = EASYTAB_EVENT_NOT_HANDLED;
                 if (!EasyTab) { break; }
 
                 i32 bit_touch_old = (EasyTab->Buttons & EasyTab_Buttons_Pen_Touch);
 
-                er = platform_handle_sysevent(platform, &sysevent);
+#if defined(_WIN32)
+                if ( ink_event ) {
+                    v2i position = {};
+                    er = platform_handle_ink_event(event, &position);
+                    if ( er == EASYTAB_OK ) {
+                        platform_point_to_pixel_i(platform, &position);
+                        platform->pointer = position;
+                    }
+                } else
+#endif
+                {
+                    er = platform_handle_sysevent(platform, &event.syswm);
+                }
 
                 if ( er == EASYTAB_OK ) {
                     i32 bit_touch = (EasyTab->Buttons & EasyTab_Buttons_Pen_Touch);
@@ -330,25 +347,24 @@ sdl_event_loop(Milton* milton, PlatformState* platform)
                                            && !( bit_upper || bit_lower )
                                            && !scrub_chord;
 
-                    b32 pen_alt_pick = false;
-                    if ( bit_touch && !bit_touch_old && (SDL_GetModState() & KMOD_ALT) && !scrub_chord
-                         && current_mode_is_for_drawing(milton) ) {
-                        pen_alt_pick = true;
+                    b32 pen_alt_pick = bit_touch && !bit_touch_old && (keymod & KMOD_ALT)
+                                       && !scrub_chord && current_mode_is_for_drawing(milton);
+                    if ( pen_alt_pick ) {
                         milton_input.mode_to_set = MiltonMode::EYEDROPPER;
-                        if ( EasyTab->NumPackets > 0 ) {
+                        if ( !ink_event && EasyTab->NumPackets > 0 ) {
                             v2i p = { EasyTab->PosX[EasyTab->NumPackets-1], EasyTab->PosY[EasyTab->NumPackets-1] };
                             platform_point_to_pixel_i(platform, &p);
                             platform->pointer = p;
                         }
-                    }
+                    } else if ( milton->current_mode != MiltonMode::EYEDROPPER ) {
+                        if ( taking_pen_input ) {
+                            platform->is_pointer_down = true;
+                        }
 
-                    if ( pen_alt_pick ) {
-                        // Eyedropper sampling uses platform->pointer; no stroke input.
-                    }
-                    else if ( taking_pen_input && milton->current_mode != MiltonMode::EYEDROPPER ) {
-                        platform->is_pointer_down = true;
-
-                        for ( int pi = 0; pi < EasyTab->NumPackets; ++pi ) {
+                        // Ink release can still carry in-contact samples from before lift-off.
+                        bool append_packets = taking_pen_input ||
+                            (ink_event && !bit_touch && bit_touch_old && platform->is_pointer_down && !scrub_chord);
+                        for ( int pi = 0; append_packets && pi < EasyTab->NumPackets; ++pi ) {
                             v2l point = { EasyTab->PosX[pi], EasyTab->PosY[pi] };
 
                             platform_point_to_pixel(platform, &point);
@@ -370,10 +386,11 @@ sdl_event_loop(Milton* milton, PlatformState* platform)
                         }
                         pointer_up = true;  // Wacom does not seem to send button-up messages after
                                             // using stylus buttons while stroking.
+                        ink_stroke_ended = ink_event;
                     }
 
 
-                    if ( EasyTab->NumPackets > 0 ) {
+                    if ( !ink_event && EasyTab->NumPackets > 0 ) {
                         v2i point = { EasyTab->PosX[EasyTab->NumPackets-1], EasyTab->PosY[EasyTab->NumPackets-1] };
 
                         platform_point_to_pixel_i(platform, &point);
@@ -390,6 +407,12 @@ sdl_event_loop(Milton* milton, PlatformState* platform)
                 if ( event.button.windowID != platform->window_id ) {
                     break;
                 }
+#if defined(_WIN32)
+                // Ink handles the pen tip release. Do not finalize again on its mouse alias.
+                if ( event.button.button == SDL_BUTTON_LEFT && platform_ink_in_proximity() ) {
+                    break;
+                }
+#endif
                 if ( event.button.button == SDL_BUTTON_RIGHT ) {
                     platform->is_right_button_down = true;
                 }
@@ -570,26 +593,27 @@ sdl_event_loop(Milton* milton, PlatformState* platform)
 #if defined(_MSC_VER)
 #pragma warning (pop)
 #endif
-        if ( platform->should_quit ) {
+        if ( platform->should_quit || ink_stroke_ended ) {
             break;
         }
+#if defined(_WIN32)
+        // Leave enough room for the next native pen batch, or process it next frame.
+        static_assert(MAX_INPUT_BUFFER_ELEMS >= EASYTAB_PACKETQUEUE_SIZE, "Input buffer must fit a pen batch");
+        if ( platform->num_point_results > MAX_INPUT_BUFFER_ELEMS - EASYTAB_PACKETQUEUE_SIZE ) {
+            break;
+        }
+#endif
     }  // ---- End of SDL event loop
 
     if ( pointer_up ) {
-        // Add final point
         if ( !platform->is_panning && platform->is_pointer_down ) {
             milton_input.flags |= MiltonInputFlags_END_STROKE;
-            input_point = { event.button.x, event.button.y };
-
-            platform_point_to_pixel_i(platform, &input_point);
-
-            if ( platform->num_point_results < MAX_INPUT_BUFFER_ELEMS ) {
-                milton_input.points[platform->num_point_results++] = VEC2L(input_point);
-            }
         }
         platform->is_pointer_down = false;
 
-        platform->num_point_results = 0;
+        if ( !ink_stroke_ended ) {
+            platform->num_point_results = 0;
+        }
     }
 
     return milton_input;
