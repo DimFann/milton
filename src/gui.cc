@@ -1146,6 +1146,13 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
                 gui->flags |= (i32)MiltonGuiFlags_SHOWING_PREVIEW;
             }
         }
+        if ( milton->current_mode == MiltonMode::PEN ) {
+            bool preserve = milton->settings->preserve_opacity != 0;
+            if ( ImGui::Checkbox(loc(TXT_preserve_opacity), &preserve) ) {
+                milton->settings->preserve_opacity = preserve;
+                milton_settings_save(milton->settings);
+            }
+        }
 
         const auto size = milton_get_brush_radius(milton);
         auto mut_size = size;

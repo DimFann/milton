@@ -131,6 +131,7 @@ struct MiltonSettings
     u8    vsync_off;               // 1 = swap interval 0 (relies on the Max FPS cap).
     u8    max_fps;                 // Frame rate cap; 0 = monitor refresh rate.
     u8    auto_cleanup_erased;     // Drop strokes that an opaque eraser stroke fully covers (default off).
+    u8    preserve_opacity;
 };
 #pragma pack(pop)
 

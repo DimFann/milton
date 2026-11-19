@@ -259,9 +259,107 @@ test_picker_slider_input()
     return passed;
 }
 
-extern "C" int
-main()
+static bool
+test_preserve_opacity()
 {
+    if ( SDL_Init(SDL_INIT_VIDEO) != 0 ) {
+        fprintf(stderr, "Cannot initialize opacity test video: %s\n", SDL_GetError());
+        return false;
+    }
+#if USE_GL_3_2
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+#endif
+    const int size = 320;
+    SDL_Window* window = SDL_CreateWindow("Opacity test", 0, 0, size, size, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+    SDL_GLContext context = window ? SDL_GL_CreateContext(window) : NULL;
+    if ( !context || !gl::load() ) {
+        fprintf(stderr, "Cannot initialize opacity test OpenGL: %s\n", SDL_GetError());
+        if ( context ) { SDL_GL_DeleteContext(context); }
+        if ( window ) { SDL_DestroyWindow(window); }
+        SDL_Quit();
+        return false;
+    }
+    Milton milton = {};
+    milton_init(&milton, size, size, 1, NULL, MiltonInit_FOR_TEST);
+    milton_reset_canvas_and_set_default(&milton);
+    auto* r = milton.renderer;
+    CanvasView* view = milton.view;
+    view->screen_size = {size, size};
+    gui_anchor_picker_top_right(milton.gui, size);
+    if ( !gpu_init(r, view, &milton.gui->picker) ) {
+        fprintf(stderr, "Cannot initialize opacity test renderer\n");
+        SDL_GL_DeleteContext(context);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return false;
+    }
+    gpu_resize(r, view);
+    glViewport(0, 0, size, size);
+    gpu_update_canvas(r, milton.canvas, view);
+    Layer* layer = milton.canvas->working_layer;
+    v2l line[] = {raster_to_canvas(view, v2l{100, 160}), raster_to_canvas(view, v2l{220, 160})};
+    v2l offscreen[] = {raster_to_canvas(view, v2l{400, 160}), raster_to_canvas(view, v2l{460, 160})};
+    f32 pressure[] = {1, 1};
+    f32 low_pressure[] = {0.5f, 0.5f};
+    auto add = [&](u32 flags, f32 alpha, v2l* points, f32* pressures) {
+        Stroke stroke = {};
+        stroke.flags = flags;
+        stroke.points = points;
+        stroke.pressures = pressures;
+        stroke.num_points = 2;
+        stroke.brush = default_brush();
+        stroke.brush.radius = 16 * view->scale;
+        stroke.brush.alpha = alpha;
+        stroke.brush.pressure_opacity_min = 0.0f;
+        stroke.brush.color = to_premultiplied(v3f{0.25f, 0.5f, 0.75f}, alpha);
+        stroke.bounding_rect = bounding_box_for_stroke(&stroke);
+        layer::layer_push_stroke(layer, stroke);
+    };
+    auto alpha_at_center = [&]() {
+        gpu_clip_strokes_and_update(&milton.root_arena, r, view, view->scale, layer,
+                                    &milton.working_stroke, 0, 0, size, size);
+        gpu_render_canvas(r, 0, 0, size, size, 0.0f);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
+        u8 rgba[4] = {};
+        glReadPixels(size / 2, size / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        return (int)rgba[3];
+    };
+
+    constexpr u32 preserve = StrokeFlag_PRESERVE_OPACITY;
+    add(preserve, 0.5f, line, pressure);
+    int single = alpha_at_center();
+    add(preserve, 0.5f, line, pressure);
+    int repeated = alpha_at_center();
+    add(preserve | StrokeFlag_PRESSURE_TO_OPACITY, 1.0f, line, low_pressure);
+    int same_pressure_opacity = alpha_at_center();
+    add(preserve | StrokeFlag_PRESSURE_TO_OPACITY, 0.75f, line, pressure);
+    int stronger = alpha_at_center();
+    add(StrokeFlag_ERASER, 1.0f, offscreen, pressure);
+    add(preserve, 0.5f, line, pressure);
+    int separated = alpha_at_center();
+    add(0, 0.5f, line, pressure);
+    int ordinary = alpha_at_center();
+    bool passed = abs(single - 128) <= 1 && abs(repeated - single) <= 1
+                  && abs(same_pressure_opacity - single) <= 1 && abs(stronger - 191) <= 1
+                  && abs(separated - 223) <= 1 && abs(ordinary - 239) <= 1;
+    fprintf(passed ? stdout : stderr, "Opacity readback (single, repeat, pressure, stronger, separated, ordinary): %d %d %d %d %d %d\n",
+            single, repeated, same_pressure_opacity, stronger, separated, ordinary);
+    gpu_free_strokes(r, milton.canvas);
+    arena_free(&milton.root_arena);
+    SDL_GL_DeleteContext(context);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return passed;
+}
+
+extern "C" int
+main(int argc, char** argv)
+{
+    if ( argc == 2 && strcmp(argv[1], "--preserve-opacity") == 0 ) {
+        return test_preserve_opacity() ? 0 : 1;
+    }
 #if defined(_WIN32)
     if ( !test_windows_ink() ) { return 1; }
 #endif

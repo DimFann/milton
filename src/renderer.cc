@@ -68,6 +68,7 @@ struct RenderElement
     };
 
     int     flags;  // RenderElementFlags enum;
+    i64     opacity_group;  // Zero for ordinary strokes and layer boundaries.
 };
 
 struct RenderBackend
@@ -125,6 +126,7 @@ struct RenderBackend
     GLuint helper_texture;  // Used for various effects..
     GLuint stencil_texture;
     GLuint stroke_info_texture;
+    GLuint opacity_group_texture;
 
     GLuint fbo;
 
@@ -709,6 +711,9 @@ gpu_resize(RenderBackend* r, CanvasView* view)
     gl::resize_color_texture(r->canvas_texture, r->width, r->height);
     gl::resize_color_texture(r->helper_texture, r->width, r->height);
     gl::resize_color_texture(r->stroke_info_texture, r->width, r->height);
+    if ( r->opacity_group_texture ) {
+        gl::resize_color_texture(r->opacity_group_texture, r->width, r->height);
+    }
     gl::resize_depth_stencil_texture(r->stencil_texture, r->width, r->height);
 }
 
@@ -1275,6 +1280,24 @@ gpu_get_cook_progress(RenderBackend* r, i64* pending, i64* done)
     *done = r->cook_burst_done;
 }
 
+static bool
+stroke_preserves_opacity(const Stroke* s)
+{
+    return s && (s->flags & (StrokeFlag_PRESERVE_OPACITY | StrokeFlag_ERASER)) == StrokeFlag_PRESERVE_OPACITY;
+}
+
+static bool
+same_opacity_group(const Stroke* a, const Stroke* b)
+{
+    if ( !stroke_preserves_opacity(a) || !stroke_preserves_opacity(b) ) { return false; }
+    const v4f ca = a->brush.color, cb = b->brush.color;
+    if ( ca.a <= 0.0f || cb.a <= 0.0f ) { return false; }
+    for ( int channel = 0; channel < 3; ++channel ) {
+        if ( fabsf(ca.d[channel] / ca.a - cb.d[channel] / cb.a) > 0.000001f ) { return false; }
+    }
+    return true;
+}
+
 void
 gpu_clip_strokes_and_update(Arena* arena,
                             RenderBackend* r,
@@ -1293,6 +1316,7 @@ gpu_clip_strokes_and_update(Arena* arena,
     reset(clip_array);
     r->cook_pending = 0;
     i64 cooked_this_pass = 0;
+    i64 opacity_group = 0;
 
     if (screen_bounds.left != screen_bounds.right &&
         screen_bounds.top != screen_bounds.bottom) {
@@ -1311,6 +1335,13 @@ gpu_clip_strokes_and_update(Arena* arena,
 
             StrokeBucket* bucket = &l->strokes.root;
             i64 bucket_i = 0;
+            const Stroke* previous = NULL;
+            auto track_group = [&](const Stroke* s) -> i64 {
+                bool preserve = stroke_preserves_opacity(s);
+                if ( preserve && !same_opacity_group(previous, s) ) { ++opacity_group; }
+                previous = s;
+                return preserve ? opacity_group : 0;
+            };
 
             while ( bucket ) {
                 i64 count = 0;
@@ -1337,6 +1368,7 @@ gpu_clip_strokes_and_update(Arena* arena,
                         Stroke* s = &bucket->data[i];
 
                         if ( s != NULL ) {
+                            i64 group = track_group(s);
                             Rect bounds = s->bounding_rect;
 
                             b32 stroke_outside =   screen_bounds.left   > bounds.right
@@ -1356,7 +1388,7 @@ gpu_clip_strokes_and_update(Arena* arena,
                                 }
                                 if ( needs_cook ) { cooked_this_pass++; r->cook_burst_done++; }
                                 gpu_cook_stroke(arena, r, s);
-                                push(clip_array, *get_render_element(s->render_handle));
+                                push(clip_array, *get_render_element(s->render_handle))->opacity_group = group;
                             }
                             else if ( stroke_outside && ( flags & ClipFlags_UPDATE_GPU_DATA ) ) {
                                 // If it is far away, delete.
@@ -1372,8 +1404,12 @@ gpu_clip_strokes_and_update(Arena* arena,
                         }
                     }
                 }
-                else if ( flags & ClipFlags_UPDATE_GPU_DATA ) {
-                    gpu_free_strokes(bucket->data, count, r);
+                else {
+                    // A clipped stroke can still break a run between two visible strokes.
+                    if ( stroke_preserves_opacity(previous) ) {
+                        for ( i64 i = 0; i < count; ++i ) { track_group(&bucket->data[i]); }
+                    }
+                    if ( flags & ClipFlags_UPDATE_GPU_DATA ) { gpu_free_strokes(bucket->data, count, r); }
                 }
                 #if MILTON_ENABLE_PROFILING
                 {
@@ -1395,7 +1431,8 @@ gpu_clip_strokes_and_update(Arena* arena,
                 if ( working_stroke->num_points > 0 && !(working_stroke->flags & StrokeFlag_CUT) ) {
                     gpu_cook_stroke(arena, r, working_stroke, CookStroke_UPDATE_WORKING_STROKE);
 
-                    push(clip_array, *get_render_element(working_stroke->render_handle));
+                    push(clip_array, *get_render_element(working_stroke->render_handle))->opacity_group =
+                        track_group(working_stroke);
                 }
             }
 
@@ -1506,8 +1543,32 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
     DArray<RenderElement>* clip_array = &r->clip_array;
 
     PUSH_GRAPHICS_GROUP("render elements");
+    i64 active_group = 0;
     for ( i64 i = 0; i < (i64)clip_array->count; i++ ) {
         RenderElement* re = &clip_array->data[i];
+        if ( re->opacity_group != active_group ) {
+            if ( active_group ) {
+                glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, layer_texture, 0);
+                glBindTexture(texture_target, r->opacity_group_texture);
+                glBlendEquation(GL_FUNC_ADD);
+                glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+                glDisable(GL_DEPTH_TEST);
+                gpu_fill_with_texture(r);
+                glEnable(GL_DEPTH_TEST);
+            }
+            active_group = re->opacity_group;
+            if ( active_group ) {
+                if ( !r->opacity_group_texture ) {
+                    r->opacity_group_texture = gl::new_color_texture(r->width, r->height);
+                }
+                glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                          texture_target, r->opacity_group_texture, 0);
+                glClearColor(0,0,0,0);
+                glClear(GL_COLOR_BUFFER_BIT);
+                // For the same straight RGB, max premultiplied RGBA keeps the strongest coverage.
+                glBlendEquation(GL_MAX);
+            }
+        }
 
         if ( re->flags & RenderElementFlags_LAYER ) {
 
@@ -1688,12 +1749,12 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                     gl::set_uniform_f(r->stroke_info_program, "u_hardness", re->hardness);
                     stroke_pass(re, r->stroke_info_program);
 
-                    glBlendEquation(GL_FUNC_ADD);
+                    glBlendEquation(active_group ? GL_MAX : GL_FUNC_ADD);
                     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
                     glEnable(GL_DEPTH_TEST);
                     glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                              texture_target, layer_texture, 0);
+                                              texture_target, active_group ? r->opacity_group_texture : layer_texture, 0);
                     glBindTexture(texture_target, r->stroke_info_texture);
 
                     stroke_pass(re, r->stroke_fill_program_pressure);

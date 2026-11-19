@@ -19,6 +19,7 @@ This fork adds some quality of life features I've been wanting for years, as wel
 * Better precision for stroke placement
 * Allow for deeper zoom, start canvas zoom further out for more in/out by default.
 * Variable hardness for brush and eraser + other brush options & tilt support
+* **Preserve opacity** in Pen tool options uses the strongest opacity at each pixel across consecutive enabled strokes of the same color on one layer. Different colors, regular strokes, and pixel erasers break the group. Layer optimization and erased-stroke cleanup are unavailable on layers containing these strokes so they don't accidentally join separate groups.
 * Rectangular brushes
 * Lasso Functions
     * Arm with S

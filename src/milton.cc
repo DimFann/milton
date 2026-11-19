@@ -716,6 +716,7 @@ settings_init(MiltonSettings* s)
     s->show_perf_stats = 1;
     s->eraser_cut = 0;
     s->auto_cleanup_erased = 0;
+    s->preserve_opacity = 0;
     s->max_fps = 0;
     s->vsync_off = 0;
     s->lasso_whole = 0;
@@ -1789,6 +1790,13 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     }
 
     // Mode tick
+    if ( milton->working_stroke.num_points == 0 ) {
+        if ( milton->current_mode == MiltonMode::PEN && milton->settings->preserve_opacity ) {
+            milton->working_stroke.flags |= StrokeFlag_PRESERVE_OPACITY;
+        } else {
+            milton->working_stroke.flags &= ~StrokeFlag_PRESERVE_OPACITY;
+        }
+    }
     if ( milton->current_mode == MiltonMode::ERASER && milton->settings->eraser_cut ) {
         milton->working_stroke.flags |= StrokeFlag_CUT;
     } else {

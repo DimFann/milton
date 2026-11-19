@@ -102,6 +102,7 @@ init_localization()
         EN(TXT_could_not_delete_default_canvas, "Could not delete default canvas. Contents will be still there when you create a new canvas.");
         EN(TXT_peek_out_increment_percent, "Peek-out increment percentage");
         EN(TXT_opacity_pressure, "Use pressure for opacity");
+        EN(TXT_preserve_opacity, "Preserve opacity");
         EN(TXT_soft_brush, "Soft brush");
         EN(TXT_minimum, "Minimum");
         EN(TXT_hardness, "Hardness");
