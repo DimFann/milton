@@ -164,6 +164,7 @@ struct RenderBackend
 #if defined(TESTING)
     bool replay_cache_hit;
     int blur_filter_runs;
+    int opacity_stroke_runs;
 #endif
 
     GLuint fbo;
@@ -1359,10 +1360,10 @@ same_paint_color(v4f ca, v4f cb)
 }
 
 bool
-gpu_has_visible_blur(RenderBackend* r)
+gpu_needs_navigation_preview(RenderBackend* r)
 {
     for ( const RenderElement& element : r->clip_array ) {
-        if ( element.flags & RenderElementFlags_BLUR ) { return true; }
+        if ( element.flags & (RenderElementFlags_BLUR | RenderElementFlags_PRESERVE_OPACITY) ) { return true; }
         if ( element.flags & RenderElementFlags_LAYER ) {
             for ( LayerEffect* effect = element.effects; effect; effect = effect->next ) {
                 if ( effect->enabled && effect->type == LayerEffectType_BLUR ) { return true; }
@@ -1445,6 +1446,13 @@ gpu_clip_strokes_and_update(Arena* arena,
                             // Area might be 0 if the stroke is smaller than
                             // a pixel. We don't draw it in that case.
                             if ( !stroke_outside && area!=0 ) {
+                                if ( (flags & ClipFlags_NAVIGATION_PREVIEW) && (s->flags & StrokeFlag_BLUR) ) {
+                                    // Retain visibility metadata without preparing invisible blur geometry.
+                                    RenderElement element = {};
+                                    element.flags = RenderElementFlags_BLUR;
+                                    push(clip_array, element);
+                                    continue;
+                                }
                                 RenderElement* existing = (RenderElement*)s->render_handle;
                                 b32 needs_cook = existing == NULL || existing->vbo_stroke == 0;
                                 if ( needs_cook && r->cook_deadline != 0 && cooked_this_pass > 0 && perf_counter() > r->cook_deadline ) {
@@ -1494,9 +1502,13 @@ gpu_clip_strokes_and_update(Arena* arena,
             // Add the working stroke on the current layer.
             if ( working_stroke->layer_id == l->id ) {
                 if ( working_stroke->num_points > 0 && !(working_stroke->flags & StrokeFlag_CUT) ) {
-                    gpu_cook_stroke(arena, r, working_stroke, CookStroke_UPDATE_WORKING_STROKE);
-
-                    RenderElement element = *get_render_element(working_stroke->render_handle);
+                    RenderElement element = {};
+                    if ( (flags & ClipFlags_NAVIGATION_PREVIEW) && (working_stroke->flags & StrokeFlag_BLUR) ) {
+                        element.flags = RenderElementFlags_BLUR;
+                    } else {
+                        gpu_cook_stroke(arena, r, working_stroke, CookStroke_UPDATE_WORKING_STROKE);
+                        element = *get_render_element(working_stroke->render_handle);
+                    }
                     element.flags |= RenderElementFlags_WORKING;
                     if ( element.flags & RenderElementFlags_BLUR ) {
                         element.raster_bounds = canvas_to_raster_bounding_rect(view, bounding_box_for_stroke(working_stroke));
@@ -1568,6 +1580,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
 #if defined(TESTING)
     r->replay_cache_hit = false;
     r->blur_filter_runs = 0;
+    r->opacity_stroke_runs = 0;
 #endif
 
     // FLip it. GL is bottom-left.
@@ -1646,6 +1659,9 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
     v4f history_color = {};
     i64 layer_start = 0;
     auto render_opacity_stroke = [&](RenderElement* re) {
+#if defined(TESTING)
+        ++r->opacity_stroke_runs;
+#endif
         bool eraser = (re->flags & (RenderElementFlags_ERASER | RenderElementFlags_BLUR)) != 0;
         glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, r->opacity_stroke_texture, 0);
         glClearColor(0,0,0,0);
@@ -1988,9 +2004,9 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         }
         // If this render element is not a layer, then it is a stroke.
         else {
+            if ( navigation_preview && (re->flags & RenderElementFlags_BLUR) ) { continue; }
             if ( re->count > 0 ) {
                 if ( re->flags & RenderElementFlags_BLUR ) {
-                    if ( navigation_preview ) { continue; }
                     if ( !r->opacity_stroke_texture ) {
                         r->opacity_stroke_texture = gl::new_color_texture(r->width, r->height);
                         r->opacity_history_texture = gl::new_color_texture(r->width, r->height);
@@ -2002,7 +2018,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                     continue;
                 }
                 bool eraser = (re->flags & RenderElementFlags_ERASER) != 0;
-                bool preserve = !eraser && (re->flags & RenderElementFlags_PRESERVE_OPACITY);
+                bool preserve = !navigation_preview && !eraser && (re->flags & RenderElementFlags_PRESERVE_OPACITY);
                 if ( preserve && (!have_history || !same_paint_color(history_color, re->color)) ) {
                     if ( !r->opacity_stroke_texture ) {
                         r->opacity_stroke_texture = gl::new_color_texture(r->width, r->height);

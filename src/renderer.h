@@ -62,7 +62,7 @@ void gpu_update_canvas(RenderBackend* renderer, CanvasState* canvas, CanvasView*
 
 void gpu_get_viewport_limits(RenderBackend* renderer, float* out_viewport_limits);
 i32  gpu_get_num_clipped_strokes(Layer* root_layer);
-bool gpu_has_visible_blur(RenderBackend* renderer);
+bool gpu_needs_navigation_preview(RenderBackend* renderer);
 
 
 enum CookStrokeOpt
@@ -85,6 +85,7 @@ enum ClipFlags
 {
     ClipFlags_UPDATE_GPU_DATA   = 1<<0,  // Free all strokes that are far away.
     ClipFlags_JUST_CLIP         = 1<<1,
+    ClipFlags_NAVIGATION_PREVIEW = 1<<2,
 };
 void gpu_set_cook_budget(RenderBackend* renderer, float seconds);
 void gpu_get_cook_progress(RenderBackend* renderer, i64* pending, i64* done);

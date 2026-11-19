@@ -2296,6 +2296,9 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
 
     PROFILE_GRAPH_BEGIN(clipping);
 
+    if ( milton->render_settings.navigation_preview ) {
+        clip_flags = (ClipFlags)(clip_flags | ClipFlags_NAVIGATION_PREVIEW);
+    }
     gpu_set_cook_budget(milton->renderer, 0.008f);
 
     gpu_clip_strokes_and_update(&milton->root_arena, milton->renderer, milton->view, render_scale,
@@ -2305,7 +2308,7 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     PROFILE_GRAPH_END(clipping);
 
     if ( milton->render_settings.navigation_preview ) {
-        if ( gpu_has_visible_blur(milton->renderer) ) {
+        if ( gpu_needs_navigation_preview(milton->renderer) ) {
             milton->platform->force_next_frame = true;
         } else {
             milton->render_settings.navigation_preview = false;

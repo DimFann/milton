@@ -395,7 +395,8 @@ test_blur_performance(Milton* milton)
     auto draw = [&](bool uncached = false, bool preview = false) {
         if ( uncached ) { r->replay_valid = false; }
         gpu_clip_strokes_and_update(&milton->root_arena, r, view, view->scale, milton->canvas->root_layer,
-                                    &milton->working_stroke, 0, 0, width, height);
+                                    &milton->working_stroke, 0, 0, width, height,
+                                    preview ? ClipFlags_NAVIGATION_PREVIEW : ClipFlags_JUST_CLIP);
         gpu_render_canvas(r, 0, 0, width, height, background_alpha, preview);
         glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
         u8 pixel[4];
@@ -459,15 +460,28 @@ test_blur_performance(Milton* milton)
     fprintf(stdout, "Stroke start / commit average: %.2f / %.2f ms (no old blur passes)\n", start_ms / 3, end_ms / 3);
 
     read(reference);
+    Stroke* hidden_blur = get(&layer->strokes, 12);
+    gpu_free_strokes(hidden_blur, 1, r);
     double preview_ms = measure(true, true);
     read(cached);
-    passed = passed && r->blur_filter_runs == 0 && memcmp(reference, cached, bytes) != 0;
+    passed = passed && r->blur_filter_runs == 0 && r->opacity_stroke_runs == 0
+             && get_render_element(hidden_blur->render_handle)->vbo_stroke == 0
+             && r->cook_pending == 0 && gpu_needs_navigation_preview(r)
+             && memcmp(reference, cached, bytes) != 0;
+    working->flags = StrokeFlag_BLUR;
+    u64 working_revision = get_render_element(working->render_handle)->revision;
+    draw(true, true);
+    passed = passed && get_render_element(working->render_handle)->revision == working_revision
+             && r->blur_filter_runs == 0 && r->opacity_stroke_runs == 0;
+    working->flags = StrokeFlag_PRESERVE_OPACITY;
     r->flags |= RenderBackendFlags_NAVIGATION_PREVIEW;
     draw(true);
     read(cached);
-    passed = passed && r->blur_filter_runs > 0 && memcmp(reference, cached, bytes) == 0;
+    passed = passed && r->blur_filter_runs > 0 && r->opacity_stroke_runs > 0
+             && get_render_element(hidden_blur->render_handle)->vbo_stroke != 0
+             && memcmp(reference, cached, bytes) == 0;
     r->flags &= ~RenderBackendFlags_NAVIGATION_PREVIEW;
-    fprintf(stdout, "Navigation preview: %.2f ms; full quality restored pixel-for-pixel\n", preview_ms);
+    fprintf(stdout, "Navigation preview: %.2f ms; no opacity history or hidden blur uploads; full quality restored pixel-for-pixel\n", preview_ms);
     working->num_points = 0;
     draw();
     draw();
@@ -512,10 +526,10 @@ test_blur_performance(Milton* milton)
     passed = passed && !r->replay_cache_hit && matches_reference();
     layer->flags &= ~LayerFlags_VISIBLE;
     draw();
-    passed = passed && !r->replay_cache_hit && !gpu_has_visible_blur(r) && matches_reference();
+    passed = passed && !r->replay_cache_hit && !gpu_needs_navigation_preview(r) && matches_reference();
     layer->flags |= LayerFlags_VISIBLE;
     draw();
-    passed = passed && gpu_has_visible_blur(r) && matches_reference();
+    passed = passed && gpu_needs_navigation_preview(r) && matches_reference();
     background_alpha = 1.0f;
     draw();
     passed = passed && !r->replay_cache_hit && matches_reference();
@@ -554,6 +568,23 @@ test_blur_performance(Milton* milton)
     draw();
     passed = passed && !r->replay_cache_hit && matches_reference();
     layer->effects = nullptr;
+
+    lower->flags &= ~LayerFlags_VISIBLE;
+    layer->flags &= ~LayerFlags_VISIBLE;
+    milton_new_layer(milton);
+    layer = milton->canvas->working_layer;
+    add(0, StrokeFlag_PRESERVE_OPACITY);
+    add(0, StrokeFlag_PRESERVE_OPACITY);
+    draw(true);
+    read(reference);
+    draw(true, true);
+    read(cached);
+    passed = passed && gpu_needs_navigation_preview(r) && r->opacity_stroke_runs == 0
+             && memcmp(reference, cached, bytes) != 0;
+    draw(true);
+    read(cached);
+    passed = passed && r->opacity_stroke_runs > 0 && memcmp(reference, cached, bytes) == 0;
+
     mlt_free(reference, "Blur cache test");
     mlt_free(cached, "Blur cache test");
     passed = passed && glGetError() == GL_NO_ERROR;
