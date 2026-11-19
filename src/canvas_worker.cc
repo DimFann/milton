@@ -33,6 +33,14 @@ struct CanvasWorkerLayer
     DArray<LayerEffect> effects;
 };
 
+struct CanvasRasterPreview
+{
+    GLuint texture;
+    CanvasView view;
+    u64 touched;
+    bool preview, selected;
+};
+
 #if defined(TESTING)
 struct CanvasWorkerProfile
 {
@@ -60,10 +68,12 @@ struct CanvasWorker
     CanvasView pending_view;
     int pending_generation;
     bool pending_preview;
+    u64 pending_scene;
     GLuint result;
     int result_generation;
     CanvasView result_view;
     bool result_preview;
+    u64 result_scene;
     CanvasSnapshot* scene;           // Main-thread-owned reference and request state.
     CanvasView requested_view;
     int requested_generation;
@@ -73,12 +83,156 @@ struct CanvasWorker
     int front_generation;
     GLuint preview;
     CanvasView preview_view;
+    CanvasView front_view;
+    u64 scene_revision, front_scene, preview_scene;
+    DArray<CanvasRasterPreview> history;
+    DArray<u8> coverage;
+    u64 history_bytes, history_clock;
     CanvasView initial_view;
 #if defined(TESTING)
     SDL_atomic_t hold, entered, completed, render_thread, hold_after_completion, reference_only;
     CanvasWorkerProfile profile;
 #endif
 };
+
+static u64
+canvas_raster_bytes(const CanvasView& view)
+{
+    return (u64)view.screen_size.w * view.screen_size.h * 4;
+}
+
+static void
+canvas_raster_remove(CanvasWorker* worker, i64 index)
+{
+    CanvasRasterPreview& frame = worker->history[index];
+    worker->history_bytes -= canvas_raster_bytes(frame.view);
+    glDeleteTextures(1, &frame.texture);
+    for ( i64 i = index + 1; i < worker->history.count; ++i ) {
+        worker->history[i - 1] = worker->history[i];
+    }
+    --worker->history.count;
+}
+
+static void
+canvas_raster_trim(CanvasWorker* worker, u64 budget)
+{
+    while ( worker->history_bytes > budget ) {
+        i64 oldest = 0;
+        for ( i64 i = 1; i < worker->history.count; ++i ) {
+            if ( worker->history[i].touched < worker->history[oldest].touched ) { oldest = i; }
+        }
+        canvas_raster_remove(worker, oldest);
+    }
+}
+
+static void
+canvas_raster_retain(RenderBackend* r, GLuint* texture, const CanvasView& view, bool preview, u64 scene)
+{
+    CanvasWorker* worker = r->canvas_worker;
+    u64 bytes = canvas_raster_bytes(view);
+    if ( !*texture ) { return; }
+    if ( scene != worker->scene_revision || bytes > r->navigation_cache_budget ) {
+        glDeleteTextures(1, texture);
+    } else {
+        for ( i64 i = worker->history.count; i-- > 0; ) {
+            if ( memcmp(&worker->history[i].view, &view, sizeof(view)) == 0 ) {
+                if ( preview && !worker->history[i].preview ) {
+                    glDeleteTextures(1, texture); *texture = 0;
+                    return;
+                }
+                canvas_raster_remove(worker, i);
+            }
+        }
+        canvas_raster_trim(worker, r->navigation_cache_budget - bytes);
+        CanvasRasterPreview frame = {*texture, view, ++worker->history_clock, preview, false};
+        push(&worker->history, frame);
+        worker->history_bytes += bytes;
+    }
+    *texture = 0;
+}
+
+void
+gpu_set_navigation_cache_budget(RenderBackend* r, u64 bytes)
+{
+    r->navigation_cache_budget = bytes;
+    if ( r->canvas_worker ) { canvas_raster_trim(r->canvas_worker, bytes); }
+}
+
+// Fully covered screen blocks need no older textures. Test pixel centers so
+// rotated/mirrored edges never claim pixels outside their actual raster.
+static bool
+canvas_raster_cover(RenderBackend* r, const CanvasView& view, int columns, int* remaining)
+{
+    if ( !*remaining ) { return false; }
+    CanvasWorker* worker = r->canvas_worker;
+    float vertices[16];
+    gpu_view_texture_vertices(r, view, vertices);
+    v2f points[4];
+    float left = (float)r->width, right = 0, bottom = (float)r->height, top = 0;
+    for ( int i = 0; i < 4; ++i ) {
+        points[i] = {(vertices[4 * i] + 1) * r->width / 2,
+                     (vertices[4 * i + 1] + 1) * r->height / 2};
+        left = min(left, points[i].x); right = max(right, points[i].x);
+        bottom = min(bottom, points[i].y); top = max(top, points[i].y);
+    }
+    if ( right <= 0 || left >= r->width || top <= 0 || bottom >= r->height ) { return false; }
+    const int block = 32;
+    int x0 = (int)(max(0.0f, left) / block);
+    int x1 = (int)(min((float)r->width - 1, right) / block);
+    int y0 = (int)(max(0.0f, bottom) / block);
+    int y1 = (int)(min((float)r->height - 1, top) / block);
+    bool needed = false;
+    for ( int y = y0; y <= y1; ++y ) {
+        for ( int x = x0; x <= x1; ++x ) {
+            if ( worker->coverage[y * columns + x] ) { continue; }
+            needed = true;
+            bool inside = true;
+            for ( int corner = 0; corner < 4 && inside; ++corner ) {
+                v2f p = {corner & 1 ? min((x + 1) * block, r->width) - 0.5f : x * block + 0.5f,
+                         corner & 2 ? min((y + 1) * block, r->height) - 0.5f : y * block + 0.5f};
+                bool positive = false, negative = false;
+                for ( int edge = 0; edge < 4; ++edge ) {
+                    v2f a = points[edge], b = points[(edge + 1) % 4];
+                    float cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+                    positive |= cross > 0; negative |= cross < 0;
+                }
+                inside = !(positive && negative);
+            }
+            if ( inside ) { worker->coverage[y * columns + x] = 1; --*remaining; }
+        }
+    }
+    return needed;
+}
+
+static void
+canvas_raster_present(RenderBackend* r)
+{
+    CanvasWorker* worker = r->canvas_worker;
+    CanvasTileCache* cache = r->tiles;
+    int columns = (r->width + 31) / 32, rows = (r->height + 31) / 32;
+    reset(&worker->coverage);
+    for ( int i = 0; i < columns * rows; ++i ) { push(&worker->coverage, (u8)0); }
+    int remaining = columns * rows;
+    ++worker->history_clock;
+    if ( cache->navigation_valid ) { canvas_raster_cover(r, cache->navigation_view, columns, &remaining); }
+    for ( i64 i = worker->history.count; i-- > 0; ) {
+        CanvasRasterPreview& frame = worker->history[i];
+        frame.selected = !frame.preview && canvas_raster_cover(r, frame.view, columns, &remaining);
+    }
+    bool preview = worker->preview && canvas_raster_cover(r, worker->preview_view, columns, &remaining);
+    for ( i64 i = worker->history.count; i-- > 0; ) {
+        CanvasRasterPreview& frame = worker->history[i];
+        if ( frame.preview ) { frame.selected = canvas_raster_cover(r, frame.view, columns, &remaining); }
+        if ( frame.selected ) { frame.touched = worker->history_clock; }
+    }
+    for ( int quality = 0; quality < 2; ++quality ) {
+        for ( CanvasRasterPreview& frame : worker->history ) {
+            if ( frame.selected && frame.preview == (quality == 0) ) { gpu_draw_view_texture(r, frame.texture, frame.view); }
+        }
+        if ( quality == 0 && preview ) { gpu_draw_view_texture(r, worker->preview, worker->preview_view); }
+    }
+    if ( cache->navigation_valid ) { gpu_draw_view_texture(r, cache->navigation_texture, cache->navigation_view); }
+}
 
 static void
 canvas_snapshot_stroke_release(CanvasSnapshotStroke* stroke)
@@ -267,6 +421,8 @@ canvas_worker_invalidate(RenderBackend* r)
     if ( !r->canvas_worker ) { return; }
     CanvasWorker* worker = r->canvas_worker;
     canvas_worker_cancel(worker);
+    ++worker->scene_revision;
+    canvas_raster_trim(worker, 0);
     canvas_snapshot_release(worker->scene);
     worker->scene = NULL;
 }
@@ -446,6 +602,7 @@ canvas_worker_thread(void* data)
         CanvasView view = worker->pending_view;
         int generation = worker->pending_generation;
         bool preview = worker->pending_preview;
+        u64 scene_revision = worker->pending_scene;
         worker->pending = NULL;
         SDL_UnlockMutex(worker->mutex);
         if ( SDL_AtomicGet(&worker->stop) ) { canvas_snapshot_release(scene); break; }
@@ -541,6 +698,7 @@ canvas_worker_thread(void* data)
                 worker->result_generation = generation;
                 worker->result_view = view;
                 worker->result_preview = preview;
+                worker->result_scene = scene_revision;
                 SDL_AtomicSet(&worker->result_ready, 1);
 #if defined(TESTING)
                 worker->profile = profile;
@@ -593,6 +751,9 @@ gpu_stop_canvas_worker(RenderBackend* r)
     canvas_snapshot_release(worker->scene);
     GLuint textures[] = {worker->result, worker->front, worker->preview};
     glDeleteTextures(array_count(textures), textures);
+    canvas_raster_trim(worker, 0);
+    release(&worker->history);
+    release(&worker->coverage);
     SDL_GL_DeleteContext(worker->context);
     SDL_DestroyCond(worker->condition);
     SDL_DestroyMutex(worker->mutex);
@@ -670,8 +831,11 @@ canvas_worker_render(RenderBackend* r)
 #endif
     bool navigating = (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW) != 0;
     bool scene_control = (r->flags & (RenderBackendFlags_HISTORY_CHANGED
-                                     | RenderBackendFlags_SELECTION_TRANSFORMING)) != 0;
+                                     | RenderBackendFlags_SELECTION_TRANSFORMING)) != 0
+                         || (worker->requested && r->tile_view.background_color != worker->requested_view.background_color);
     if ( scene_control ) {
+        ++worker->scene_revision;
+        canvas_raster_trim(worker, 0);
         cache->navigation_valid = false;
         if ( worker->preview ) { glDeleteTextures(1, &worker->preview); worker->preview = 0; }
     }
@@ -684,6 +848,8 @@ canvas_worker_render(RenderBackend* r)
         bool changed = !canvas_snapshot_matches(worker->scene, r);
         bool continuing = false;
         if ( changed ) {
+            ++worker->scene_revision;
+            canvas_raster_trim(worker, 0);
             CanvasSnapshot* scene = canvas_snapshot_create(r, worker->scene);
             continuing = canvas_snapshot_continues_drawing(worker->scene, scene);
             canvas_snapshot_release(worker->scene);
@@ -714,6 +880,7 @@ canvas_worker_render(RenderBackend* r)
             worker->pending_view = r->tile_view;
             worker->pending_generation = worker->requested_generation;
             worker->pending_preview = camera_preview;
+            worker->pending_scene = worker->scene_revision;
             SDL_CondSignal(worker->condition);
             SDL_UnlockMutex(worker->mutex);
             canvas_snapshot_release(obsolete);
@@ -724,18 +891,22 @@ canvas_worker_render(RenderBackend* r)
     int generation = worker->result_generation;
     CanvasView result_view = worker->result_view;
     bool result_preview = worker->result_preview;
+    u64 result_scene = worker->result_scene;
     worker->result = 0;
     SDL_AtomicSet(&worker->result_ready, 0);
     SDL_UnlockMutex(worker->mutex);
     if ( result ) {
         if ( worker->requested && generation >= SDL_AtomicGet(&worker->minimum_generation) ) {
             if ( result_preview ) {
-                if ( worker->preview ) { glDeleteTextures(1, &worker->preview); }
+                canvas_raster_retain(r, &worker->preview, worker->preview_view, true, worker->preview_scene);
                 worker->preview = result;
                 worker->preview_view = result_view;
+                worker->preview_scene = result_scene;
             } else {
-                if ( worker->front ) { glDeleteTextures(1, &worker->front); }
+                canvas_raster_retain(r, &worker->front, worker->front_view, false, worker->front_scene);
                 worker->front = result; worker->front_generation = generation;
+                worker->front_view = result_view;
+                worker->front_scene = result_scene;
             }
         } else { glDeleteTextures(1, &result); }
     }
@@ -744,7 +915,7 @@ canvas_worker_render(RenderBackend* r)
     cache->capture_ready = ready;
     if ( ready ) {
         cache->navigation_valid = false;
-        if ( worker->preview ) { glDeleteTextures(1, &worker->preview); worker->preview = 0; }
+        canvas_raster_retain(r, &worker->preview, worker->preview_view, true, worker->preview_scene);
         glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
         glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
         glActiveTexture(GL_TEXTURE0);
@@ -759,8 +930,7 @@ canvas_worker_render(RenderBackend* r)
         glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST);
         glClearColor(r->background_color.r, r->background_color.g, r->background_color.b, 1);
         glClear(GL_COLOR_BUFFER_BIT);
-        if ( worker->preview ) { gpu_draw_view_texture(r, worker->preview, worker->preview_view); }
-        if ( cache->navigation_valid ) { gpu_draw_view_texture(r, cache->navigation_texture, cache->navigation_view); }
+        canvas_raster_present(r);
     } else {
         gpu_set_cook_budget(r, 0.002f);
         gpu_clip_strokes_and_update(r->tile_arena, r, &r->tile_view, r->tile_view.scale, r->tile_root,

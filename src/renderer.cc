@@ -211,6 +211,7 @@ struct RenderBackend
     i32 height;
     i32 allocated_width;
     i32 allocated_height;
+    u64 navigation_cache_budget;
 
     v3f background_color;
     i32 scale;  // zoom
@@ -318,6 +319,7 @@ RenderBackend*
 gpu_allocate_render_backend(Arena* arena)
 {
     RenderBackend* p = arena_alloc_elem(arena, RenderBackend);
+    p->navigation_cache_budget = 512ULL * 1024 * 1024;
     return p;
 }
 

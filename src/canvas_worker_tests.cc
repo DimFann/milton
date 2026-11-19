@@ -10,6 +10,7 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
     bool saved_visible = milton->mode_gui_visibility[Milton::GuiVisibleCategory_DRAWING];
     bool saved_transitions = r->disable_display_transitions;
     int saved_render_flags = r->flags;
+    u64 saved_navigation_budget = r->navigation_cache_budget;
     SDL_GLContext foreground = SDL_GL_GetCurrentContext();
     size_t capacity = (size_t)r->width * r->height * 4;
     u8* actual = (u8*)calloc(capacity, 1);
@@ -294,6 +295,7 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
         frame();
         compare(false, "rapid camera requests");
 
+        gpu_set_navigation_cache_budget(r, 0);
         frame();
         CanvasView navigation_start = *view;
         SDL_AtomicSet(&worker->hold, 1);
@@ -353,6 +355,129 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
         frame();
         latest = worker->requested_generation;
         check(wait(&worker->completed, latest), "original view must refine after navigation tests");
+        frame();
+
+        CanvasView cached_view = *view;
+        read(expected);
+        u64 frame_bytes = canvas_raster_bytes(cached_view);
+        gpu_set_navigation_cache_budget(r, 3 * frame_bytes);
+        view->pan_center.x += 2 * view->screen_size.w * view->scale;
+        gpu_update_canvas(r, milton->canvas, view);
+        frame();
+        latest = worker->requested_generation;
+        check(wait(&worker->completed, latest), "another region must finish before cache revisit");
+        frame();
+        check(worker->history.count > 0 && worker->history_bytes <= r->navigation_cache_budget,
+              "previous full-quality regions must remain in the bounded raster cache");
+        SDL_AtomicSet(&worker->hold, 1);
+        *view = cached_view;
+        gpu_update_canvas(r, milton->canvas, view);
+        r->flags = RenderBackendFlags_NAVIGATION_PREVIEW | RenderBackendFlags_CANVAS_TRANSFORMING;
+        frame();
+        read(actual);
+        int revisit_worst = 0;
+        for ( size_t i = 0; i < frame_bytes; ++i ) {
+            revisit_worst = max(revisit_worst, abs((int)actual[i] - (int)expected[i]));
+        }
+        check(revisit_worst <= 2 && r->clip_array.count == 0,
+              "revisiting an uncovered region must restore cached pixels while the worker is blocked");
+        fprintf(stdout, "Canvas raster cache blocked-worker revisit: %d LSB\n", revisit_worst);
+        latest = worker->requested_generation;
+        SDL_AtomicSet(&worker->hold, 0);
+        check(wait(&worker->completed, latest), "revisit gap preview must finish");
+        frame();
+        GLuint old_preview = worker->preview;
+        view->pan_center.x += 4 * view->screen_size.w * view->scale;
+        gpu_update_canvas(r, milton->canvas, view);
+        frame();
+        latest = worker->requested_generation;
+        check(wait(&worker->completed, latest), "new gap preview must finish");
+        frame();
+        bool retained_preview = false;
+        for ( CanvasRasterPreview& raster : worker->history ) {
+            retained_preview |= raster.texture == old_preview && raster.preview;
+        }
+        check(old_preview && retained_preview, "replaced low-resolution coverage must be retained too");
+        GLuint gap_cached = worker->preview;
+        CanvasView gap_texture_view = worker->preview_view, gap_camera = *view;
+        view->pan_center.x += 2 * view->screen_size.w * view->scale;
+        gpu_update_canvas(r, milton->canvas, view);
+        frame();
+        latest = worker->requested_generation;
+        check(wait(&worker->completed, latest), "another gap preview must finish before revisit");
+        frame();
+        SDL_AtomicSet(&worker->hold, 1);
+        *view = gap_camera;
+        gpu_update_canvas(r, milton->canvas, view);
+        frame();
+        compare_view_texture(gap_cached, gap_texture_view, "retained gap coverage while worker blocked");
+        for ( int transform = 0; transform < 3; ++transform ) {
+            *view = cached_view;
+            view->pan_center.x += view->scale * view->screen_size.w / 2;
+            if ( transform == 0 ) { view->angle += 0.37f; }
+            if ( transform == 1 ) { view->flipped = !view->flipped; }
+            if ( transform == 2 ) { view->scale *= 2; }
+            gpu_update_canvas(r, milton->canvas, view);
+            frame();
+            read(actual);
+            glClearColor(r->background_color.r, r->background_color.g, r->background_color.b, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            for ( int quality = 0; quality < 2; ++quality ) {
+                for ( CanvasRasterPreview& raster : worker->history ) {
+                    if ( raster.preview == (quality == 0) ) { gpu_draw_view_texture(r, raster.texture, raster.view); }
+                }
+                if ( quality == 0 && worker->preview ) { gpu_draw_view_texture(r, worker->preview, worker->preview_view); }
+            }
+            gpu_draw_view_texture(r, r->tiles->navigation_texture, r->tiles->navigation_view);
+            read(expected);
+            check(memcmp(actual, expected, frame_bytes) == 0,
+                  "coverage culling must match drawing all cached rasters across rotation, flip, and zoom");
+        }
+        u64 smaller_budget = worker->history_bytes - 1;
+        i64 old_count = worker->history.count;
+        i64 oldest = 0;
+        for ( i64 i = 1; i < old_count; ++i ) {
+            if ( worker->history[i].touched < worker->history[oldest].touched ) { oldest = i; }
+        }
+        GLuint evicted = worker->history[oldest].texture;
+        gpu_set_navigation_cache_budget(r, smaller_budget);
+        check(worker->history_bytes <= smaller_budget && worker->history.count < old_count && !glIsTexture(evicted),
+              "lowering the VRAM target must immediately free the least-recently-used retained texture");
+        check(worker->history.count > 0, "edit invalidation must start with populated raster history");
+        float cache_alpha = milton->canvas->root_layer->alpha;
+        milton->canvas->root_layer->alpha *= 0.5f;
+        frame();
+        check(worker->history.count == 0 && worker->history_bytes == 0,
+              "artwork edits must discard all flattened raster history");
+        SDL_AtomicSet(&worker->hold, 0);
+        milton->canvas->root_layer->alpha = cache_alpha;
+        *view = cached_view;
+        r->flags = RenderBackendFlags_NONE;
+        gpu_update_canvas(r, milton->canvas, view);
+        frame();
+        latest = worker->requested_generation;
+        check(wait(&worker->completed, latest), "accurate drawing view must resume after cache tests");
+        frame();
+        view->pan_center.x += 2 * view->screen_size.w * view->scale;
+        gpu_update_canvas(r, milton->canvas, view);
+        frame();
+        latest = worker->requested_generation;
+        check(wait(&worker->completed, latest), "background invalidation must start with another rendered region");
+        frame();
+        check(worker->history.count > 0, "background invalidation must start with populated raster history");
+        view->background_color = {0.12f, 0.23f, 0.34f};
+        gpu_update_background(r, view->background_color);
+        r->flags = RenderBackendFlags_NAVIGATION_PREVIEW | RenderBackendFlags_CANVAS_TRANSFORMING;
+        frame();
+        check(worker->history.count == 0 && !r->tiles->navigation_valid,
+              "changing the canvas background must invalidate opaque raster snapshots");
+        *view = cached_view;
+        gpu_update_background(r, view->background_color);
+        gpu_update_canvas(r, milton->canvas, view);
+        r->flags = RenderBackendFlags_NONE;
+        frame();
+        latest = worker->requested_generation;
+        check(wait(&worker->completed, latest), "full quality must resume after changing the background");
         frame();
 
         Stroke* working = &milton->working_stroke;
@@ -493,6 +618,7 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
     }
     r->flags = saved_render_flags;
     r->disable_display_transitions = saved_transitions;
+    gpu_set_navigation_cache_budget(r, saved_navigation_budget);
     free(expected); free(actual);
     fprintf(passed ? stdout : stderr, "Isolated canvas worker: %s\n", passed ? "passed" : "FAILED");
     return passed;

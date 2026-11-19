@@ -956,7 +956,8 @@ read_milton_settings(MiltonSettings* settings, FILE* fd)
     u16 struct_size = 0;
     if ( fread(&struct_size, sizeof(struct_size), 1, fd) != 1 ) { return false; }
 
-    constexpr size_t pre_blur_max_size = sizeof(MiltonSettings) - sizeof(Binding);
+    // Historical binding-layout cutoffs must not grow with appended settings.
+    constexpr size_t pre_blur_max_size = offsetof(MiltonSettings, navigation_cache_mb) - sizeof(Binding);
     constexpr size_t legacy_max_size = pre_blur_max_size - sizeof(Binding);
     constexpr size_t bindings_end = offsetof(MiltonSettings, pressure_smoothing);
     const int missing = struct_size <= legacy_max_size ? 2 : struct_size <= pre_blur_max_size ? 1 : 0;

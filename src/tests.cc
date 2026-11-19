@@ -1169,7 +1169,7 @@ test_preserve_opacity_binding()
     saved.position_smoothing = 0.73f;
     binding_with_release(&saved.bindings, Modifier_ALT, 'p', Action_PEEK_OUT, ActionRelease_PEEK_OUT);
 
-    auto round_trip = [](const MiltonSettings& source, int missing, MiltonSettings* loaded) {
+    auto round_trip = [](const MiltonSettings& source, int missing, MiltonSettings* loaded, bool legacy_tail = false) {
         FILE* file = tmpfile();
         if ( !file ) { return false; }
         bool ok = false;
@@ -1180,13 +1180,13 @@ test_preserve_opacity_binding()
             }
             const int first = missing == 2 ? Action_TOGGLE_PRESERVE_OPACITY : Action_MODE_BLUR;
             const size_t offset = offsetof(MiltonSettings, bindings) + first * sizeof(Binding);
-            const u16 size = (u16)(sizeof(fixture) - missing * sizeof(Binding));
+            const u16 size = (u16)(offsetof(MiltonSettings, navigation_cache_mb) - missing * sizeof(Binding));
             const auto* bytes = reinterpret_cast<const u8*>(&fixture);
             ok = fwrite(&size, sizeof(size), 1, file) == 1
                  && fwrite(bytes, 1, offset, file) == offset
                  && fwrite(bytes + offset + missing * sizeof(Binding), 1, size - offset, file) == size - offset;
         } else {
-            const u16 size = sizeof(source);
+            const u16 size = legacy_tail ? (u16)offsetof(MiltonSettings, navigation_cache_mb) : sizeof(source);
             ok = fwrite(&size, sizeof(size), 1, file) == 1 && fwrite(&source, size, 1, file) == 1;
         }
         rewind(file);
@@ -1219,10 +1219,17 @@ test_preserve_opacity_binding()
     binding(&saved.bindings, Modifier_NONE, 'g', Action_MODE_BLUR);
     passed = passed && round_trip(saved, 0, &loaded)
              && loaded.bindings.bindings[Action_MODE_BLUR].bound_key == 'g';
+    settings_init(&loaded);
+    passed = passed && round_trip(saved, 0, &loaded, true)
+             && loaded.navigation_cache_mb == 512
+             && loaded.bindings.bindings[Action_MODE_BLUR].bound_key == 'g'
+             && toggle.bound_key == 'k' && toggle.modifiers == Modifier_CTRL;
+    saved.navigation_cache_mb = 1536;
+    passed = passed && round_trip(saved, 0, &loaded) && loaded.navigation_cache_mb == 1536;
     MiltonInput input = {};
     binding_dispatch_action(Action_MODE_BLUR, &input, nullptr, {});
     passed = passed && input.mode_to_set == MiltonMode::BLUR && mode_is_for_drawing(input.mode_to_set);
-    if ( !passed ) { fprintf(stderr, "Preserve opacity shortcut migration or rebinding failed\n"); }
+    if ( !passed ) { fprintf(stderr, "Settings compatibility, cache budget persistence, or shortcut rebinding failed\n"); }
     return passed;
 }
 

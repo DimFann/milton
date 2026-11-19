@@ -67,6 +67,7 @@ void gpu_update_scale(RenderBackend* renderer, i32 scale);
 void gpu_update_export_rect(RenderBackend* renderer, Exporter* exporter);
 void gpu_update_background(RenderBackend* renderer, v3f background_color);
 void gpu_update_canvas(RenderBackend* renderer, CanvasState* canvas, CanvasView* view);
+void gpu_set_navigation_cache_budget(RenderBackend* renderer, u64 bytes);
 
 void gpu_get_viewport_limits(RenderBackend* renderer, float* out_viewport_limits);
 i32  gpu_get_num_clipped_strokes(Layer* root_layer);

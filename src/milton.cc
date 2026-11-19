@@ -737,6 +737,7 @@ settings_init(MiltonSettings* s)
     s->max_fps = 0;
     s->vsync_off = 0;
     s->lasso_whole = 0;
+    s->navigation_cache_mb = 512;
 }
 
 void
@@ -2371,6 +2372,8 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
         milton->platform->force_next_frame = true;
     }
     gpu_reset_render_flags(milton->renderer, render_flags);
+    gpu_set_navigation_cache_budget(milton->renderer,
+                                    (u64)clamp(milton->settings->navigation_cache_mb, 64, 2048) * 1024 * 1024);
     gpu_render(milton->renderer, view_x, view_y, view_width, view_height);
     if ( gpu_tile_cache_pending(milton->renderer) ) { milton->platform->force_next_frame = true; }
 

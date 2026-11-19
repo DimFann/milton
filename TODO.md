@@ -52,6 +52,16 @@ there is no canvas-format change or permanent flattening.
   navigation and settling, then fade to accurate completed paint.
 - [x] Invalidate camera snapshots for history, selection transforms, and
   incompatible scene edits. Never pin placeholder background as artwork.
+- [x] Retain full-quality views and asynchronous gap previews across camera
+  gestures, with scene-revision checks, LRU texture eviction, and conservative
+  screen-coverage culling. Clear flattened history for artwork/background edits.
+- [x] Add a persistent Settings navigation-cache target (64–2048 MiB, default
+  512 MiB), applied live and allocated on demand. This is additional to render
+  buffers, the tile pool, and workspace, not a total-process VRAM cap. Preserve
+  older settings and binding migrations when appending the new field.
+- [x] Verify full/low-resolution revisits with the worker blocked, transformed
+  coverage culling against unculled composition, actual GL texture deletion on
+  budget reduction, edit/background invalidation, and old/new settings loading.
 
 - [x] Canvas-space 256-pixel tile cores with sampling gutters and power-of-two
   resolution levels, including negative coordinates.

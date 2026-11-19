@@ -94,6 +94,7 @@
     X(void,     glDeleteProgram,          GLuint program)                                         \
     X(void,     glGetAttachedShaders,     GLuint program, GLsizei maxCount, GLsizei* count, GLuint* shaders) \
     X(void,     glDeleteTextures,         GLsizei n, const GLuint *textures)\
+    X(GLboolean,glIsTexture,              GLuint texture)\
     X(void,     glDeleteShader,           GLuint shader)                                          \
     X(void, glPolygonMode,  GLenum face, GLenum mode) \
 

@@ -253,10 +253,9 @@ gpu_capture_navigation(RenderBackend* r)
 }
 
 static void
-gpu_draw_view_texture(RenderBackend* r, GLuint texture, const CanvasView& source)
+gpu_view_texture_vertices(RenderBackend* r, const CanvasView& source, float* vertices)
 {
     CanvasView& target = r->tile_view;
-    float vertices[16];
     double cs = cos(source.angle), ss = sin(source.angle), fs = source.flipped ? -1 : 1;
     double ct = cos(target.angle), st = sin(target.angle), ft = target.flipped ? -1 : 1;
     const int xx[] = {0, 0, 1, 1}, yy[] = {0, 1, 1, 0};
@@ -274,6 +273,13 @@ gpu_draw_view_texture(RenderBackend* r, GLuint texture, const CanvasView& source
         vertices[4 * i + 2] = (float)xx[i];
         vertices[4 * i + 3] = (float)(1 - yy[i]);
     }
+}
+
+static void
+gpu_draw_view_texture(RenderBackend* r, GLuint texture, const CanvasView& source)
+{
+    float vertices[16];
+    gpu_view_texture_vertices(r, source, vertices);
     if ( !r->tiles->quad ) { glGenBuffers(1, &r->tiles->quad); }
     gl::use_program(r->quad_program);
     gl::set_uniform_i(r->quad_program, "u_canvas", 0);

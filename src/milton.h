@@ -134,6 +134,7 @@ struct MiltonSettings
     u8    max_fps;                 // Frame rate cap; 0 = monitor refresh rate.
     u8    auto_cleanup_erased;     // Drop strokes that an opaque eraser stroke fully covers (default off).
     u8    preserve_opacity;
+    i32   navigation_cache_mb;
 };
 #pragma pack(pop)
 

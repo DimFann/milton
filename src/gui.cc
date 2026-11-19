@@ -2074,6 +2074,17 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
                             milton->settings->max_fps = (u8)fps;
                         }
                     }
+                    {
+                        int mb = clamp(milton->settings->navigation_cache_mb, 64, 2048);
+                        if ( ImGui::SliderInt("Navigation cache", &mb, 64, 2048, "%d MiB") ) {
+                            milton->settings->navigation_cache_mb = mb;
+                        }
+                        if ( ImGui::IsItemHovered() ) {
+                            ImGui::SetTooltip("VRAM target for previously rendered navigation previews.\n"
+                                              "Allocated on demand; rendering buffers and tile caches are additional.\n"
+                                              "Higher values retain more visited canvas regions.");
+                        }
+                    }
                     bool auto_clean = milton->settings->auto_cleanup_erased != 0;
                     if ( ImGui::Checkbox("Auto-remove fully erased strokes", &auto_clean) ) {
                         milton->settings->auto_cleanup_erased = auto_clean ? 1 : 0;
