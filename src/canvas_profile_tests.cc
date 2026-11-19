@@ -199,6 +199,45 @@ test_profile_canvas(const char* path)
                 if ( !passed ) { fprintf(stderr, "Profiled worker output differs from synchronous rendering\n"); }
             }
         }
+        if ( passed && mode == 2 ) {
+            reset_working_stroke(&milton);
+            clip(ClipFlags_TILE_SCENE);
+            gpu_render(r, 0, 0, width, height);
+            passed = wait(r->canvas_worker->requested_generation);
+            gpu_render(r, 0, 0, width, height);
+            CanvasView base_view = *view;
+            SDL_AtomicSet(&r->canvas_worker->hold, 1);
+            const char* controls[] = {"pan", "zoom", "rotate"};
+            for ( int control = 0; passed && control < 3; ++control ) {
+                for ( int raster = 0; raster < 3; ++raster ) {
+                    SDL_AtomicSet(&r->canvas_worker->hold, raster == 2 ? 0 : 1);
+                    double total = 0, maximum = 0;
+                    for ( int frame = 0; frame < 32; ++frame ) {
+                        *view = base_view;
+                        if ( control == 0 ) { view->pan_center.x += frame * 4 * view->scale; }
+                        if ( control == 1 ) { view->scale = max((i64)1, base_view.scale - frame); }
+                        if ( control == 2 ) { view->angle += frame * 0.005f; }
+                        u64 started = SDL_GetPerformanceCounter();
+                        gpu_update_canvas(r, milton.canvas, view);
+                        if ( raster ) {
+                            r->flags = RenderBackendFlags_NAVIGATION_PREVIEW | RenderBackendFlags_CANVAS_TRANSFORMING;
+                            clip(ClipFlags_TILE_SCENE);
+                            gpu_render(r, 0, 0, width, height);
+                        } else {
+                            clip(ClipFlags_NAVIGATION_PREVIEW);
+                            gpu_render_canvas(r, 0, 0, width, height, 1, true);
+                        }
+                        glFinish();
+                        double elapsed = canvas_profile_elapsed(started);
+                        if ( frame >= 2 ) { total += elapsed; maximum = max(maximum, elapsed); }
+                        if ( raster == 2 ) { SDL_Delay(8); }
+                    }
+                    fprintf(stdout, "navigation %s %s: avg %.2f ms max %.2f (GPU-complete foreground)\n",
+                            controls[control], raster == 2 ? "snapshot-live-coverage" : raster ? "snapshot-held-worker" : "raw",
+                            total / 30, maximum);
+                }
+            }
+        }
         gpu_stop_canvas_worker(r);
     }
     gpu_free_strokes(r, milton.canvas);

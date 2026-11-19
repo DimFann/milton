@@ -18,6 +18,7 @@ enum RenderBackendFlags
     RenderBackendFlags_BRUSH_RESIZING     = 1<<2,
     RenderBackendFlags_CANVAS_TRANSFORMING = 1<<3,
     RenderBackendFlags_HISTORY_CHANGED    = 1<<4,
+    RenderBackendFlags_SELECTION_TRANSFORMING = 1<<5,
 };
 
 typedef u64 RenderHandle;

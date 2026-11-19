@@ -985,6 +985,7 @@ milton_resize_and_pan(Milton* milton, v2l pan_delta, v2i new_screen_size)
     }
 
     if ( new_screen_size.w < milton->max_width && new_screen_size.h < milton->max_height ) {
+        bool resized = milton->view->screen_size != new_screen_size;
         milton->view->screen_size = new_screen_size;
         gui_anchor_picker_top_right(milton->gui, new_screen_size.w);
 
@@ -1000,7 +1001,8 @@ milton_resize_and_pan(Milton* milton, v2l pan_delta, v2i new_screen_size)
 
         milton->view->pan_center = pan_center;
 
-        upload_gui(milton);
+        if ( resized ) { upload_gui(milton); }
+        else if ( milton->gl ) { gpu_update_canvas(milton->renderer, milton->canvas, milton->view); }
     } else {
         milton_die_gracefully("Fatal error. Screen size is more than Milton can handle.");
     }
@@ -2285,7 +2287,9 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     i64 render_scale = milton_render_scale(milton);
     bool transforming = canvas_transform_active(milton, input, render_scale);
     if ( transforming ) { render_flags |= RenderBackendFlags_CANVAS_TRANSFORMING; }
-    bool navigating = transforming || selection_is_dragging(milton)
+    bool selection_transforming = selection_is_dragging(milton);
+    if ( selection_transforming ) { render_flags |= RenderBackendFlags_SELECTION_TRANSFORMING; }
+    bool navigating = transforming || selection_transforming
                       || (render_flags & RenderBackendFlags_HISTORY_CHANGED);
     if ( update_navigation_preview(&milton->render_settings, *milton->view, render_scale,
                                    navigating, has_working_stroke, SDL_GetTicks()) ) {

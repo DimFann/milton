@@ -62,6 +62,9 @@ struct CanvasTileCache
     bool display_valid, display_preview, display_fading;
     bool display_paused;
     u32 display_paused_at;
+    CanvasView display_view, navigation_view;
+    GLuint navigation_texture;
+    bool navigation_valid, capture_ready;
     bool background_context;
     SDL_atomic_t* cancel_generation;
     int request_generation;
@@ -185,8 +188,8 @@ gpu_clear_tile_cache(RenderBackend* r)
     GLuint fbos[] = {w->fbo, cache->fbo};
     glDeleteFramebuffersEXT(2, fbos);
     if ( cache->quad ) { glDeleteBuffers(1, &cache->quad); }
-    GLuint display_textures[] = {cache->display_history, cache->display_from};
-    glDeleteTextures(2, display_textures);
+    GLuint display_textures[] = {cache->display_history, cache->display_from, cache->navigation_texture};
+    glDeleteTextures(array_count(display_textures), display_textures);
     mlt_free(r->tiles, "Canvas tiles");
 }
 
@@ -228,6 +231,63 @@ gpu_hold_tile_display(RenderBackend* r, u32 now)
     r->tile_builds = r->tile_composites = r->tile_hits = 0;
 #endif
     return true;
+}
+
+static void
+gpu_capture_navigation(RenderBackend* r)
+{
+    CanvasTileCache* cache = r->tiles;
+    if ( cache->navigation_valid || !cache->display_valid || !cache->capture_ready ) { return; }
+    if ( !cache->navigation_texture
+         || cache->navigation_view.screen_size != cache->display_view.screen_size ) {
+        if ( cache->navigation_texture ) { glDeleteTextures(1, &cache->navigation_texture); }
+        cache->navigation_texture = gl::new_color_texture(cache->display_width, cache->display_height);
+    }
+    if ( !cache->fbo ) { glGenFramebuffersEXT(1, &cache->fbo); }
+    glBindFramebufferEXT(GL_FRAMEBUFFER, cache->fbo);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, cache->display_history, 0);
+    tile_copy_display_texture(cache->navigation_texture, cache->display_width, cache->display_height);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+    cache->navigation_view = cache->display_view;
+    cache->navigation_valid = true;
+}
+
+static void
+gpu_draw_view_texture(RenderBackend* r, GLuint texture, const CanvasView& source)
+{
+    CanvasView& target = r->tile_view;
+    float vertices[16];
+    double cs = cos(source.angle), ss = sin(source.angle), fs = source.flipped ? -1 : 1;
+    double ct = cos(target.angle), st = sin(target.angle), ft = target.flipped ? -1 : 1;
+    const int xx[] = {0, 0, 1, 1}, yy[] = {0, 1, 1, 0};
+    for ( int i = 0; i < 4; ++i ) {
+        double x = xx[i] * source.screen_size.w - source.zoom_center.x;
+        double y = yy[i] * source.screen_size.h - source.zoom_center.y;
+        double dx = ((double)(source.pan_center.x - target.pan_center.x)
+                     + source.scale * (cs * fs * x - ss * y)) / target.scale;
+        double dy = ((double)(source.pan_center.y - target.pan_center.y)
+                     + source.scale * (ss * fs * x + cs * y)) / target.scale;
+        double px = ft * (ct * dx + st * dy) + target.zoom_center.x;
+        double py = -st * dx + ct * dy + target.zoom_center.y;
+        vertices[4 * i] = (float)(2 * px / r->width - 1);
+        vertices[4 * i + 1] = (float)(1 - 2 * py / r->height);
+        vertices[4 * i + 2] = (float)xx[i];
+        vertices[4 * i + 3] = (float)(1 - yy[i]);
+    }
+    if ( !r->tiles->quad ) { glGenBuffers(1, &r->tiles->quad); }
+    gl::use_program(r->quad_program);
+    gl::set_uniform_i(r->quad_program, "u_canvas", 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glBindBuffer(GL_ARRAY_BUFFER, r->tiles->quad);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_DYNAMIC_DRAW);
+    GLint point = glGetAttribLocation(r->quad_program, "a_point");
+    GLint uv = glGetAttribLocation(r->quad_program, "a_uv");
+    glEnableVertexAttribArray(point); glEnableVertexAttribArray(uv);
+    glVertexAttribPointer(point, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), 0);
+    glVertexAttribPointer(uv, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glDisableVertexAttribArray(point); glDisableVertexAttribArray(uv);
 }
 
 static void
@@ -294,6 +354,7 @@ gpu_present_tile_transition(RenderBackend* r, bool saved_preview, bool preview, 
         gpu_fill_with_texture(r);
     }
     tile_copy_display_texture(cache->display_history, r->width, r->height);
+    cache->display_view = r->tile_view;
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     glBindTexture(GL_TEXTURE_2D, r->canvas_texture);
 }

@@ -32,6 +32,9 @@ there is no canvas-format change or permanent flattening.
   resident resolution reuse. Cancel pending work and release all worker-owned
   GL resources before deleting its context; report worker failures explicitly.
 - [x] Avoid reallocating foreground viewport textures on same-size pan updates.
+- [x] Initialize renderer dimensions together with its viewport textures, so
+  same-size startup resume has a valid presentation size before its first
+  frame without restoring per-pan resize housekeeping.
 - [x] Retain full-quality same-view paint while drawing and committing strokes.
   Let in-flight drawing finish and display intermediate progress while keeping
   only the latest queued update. Navigation/history and incompatible edits still
@@ -39,6 +42,16 @@ there is no canvas-format change or permanent flattening.
 - [x] Preserve the worker's full-quality replay prefix across same-view sample
   updates. Updating scene snapshots must not unconditionally invalidate cached
   blur/Preserve opacity history; camera changes still update view state.
+- [x] Reproject a pinned GPU snapshot during camera pan/zoom/rotation/flip/resize,
+  instead of replaying foreground strokes. Skip the redundant foreground scene
+  traversal while the worker owns rendering; do not resize textures or update
+  picker resources on a same-size pan.
+- [x] Fill newly exposed regions with asynchronous half-resolution, effect-free
+  worker frames, reprojecting older compatible coverage rather than waiting for
+  the newest camera request. Keep the original snapshot immutable through
+  navigation and settling, then fade to accurate completed paint.
+- [x] Invalidate camera snapshots for history, selection transforms, and
+  incompatible scene edits. Never pin placeholder background as artwork.
 
 - [x] Canvas-space 256-pixel tile cores with sampling gutters and power-of-two
   resolution levels, including negative coordinates.
@@ -60,7 +73,7 @@ there is no canvas-format change or permanent flattening.
   tile-texture budget. The reusable workspace has a separate 128 MiB limit that
   includes its possible opacity-history and blur intermediates.
 - [x] Retain resident coarse and fine levels across navigation. Stop starting
-  reconstruction jobs when navigation controls activate.
+  full-quality tile reconstruction jobs when navigation controls activate.
 - [x] Cross-fade the whole view over 50 ms toward preview and 100 ms toward
   rendered quality. Replace interrupted fades rather than queueing them, and
   hold preview mode throughout active transforms and settling. Hold the preview
@@ -133,3 +146,7 @@ GPU-complete publication, and observed submission-to-display-texture time.
 The worker's output is compared with synchronous rendering within 2 LSB/channel.
 These measurements exclude display refresh/presentation and the initial cold
 rebuild, which can still be expensive after camera or history changes.
+Navigation profiling also compares raw-stroke replay with snapshot presentation
+for pan/zoom/rotation, both with a blocked worker and with live gap coverage.
+Reprojection checks use an independent CPU texture sampler for pan, zoom,
+rotation, mirroring, resize, and newly exposed regions (within 2 LSB/channel).

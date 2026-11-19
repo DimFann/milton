@@ -779,8 +779,8 @@ gpu_init(RenderBackend* r, CanvasView* view, ColorPicker* picker)
 
     // Call gpu_update_picker() to initialize the color picker
     if ( picker ) { gpu_update_picker(r, picker); }
-    r->allocated_width = view->screen_size.w;
-    r->allocated_height = view->screen_size.h;
+    r->width = r->allocated_width = view->screen_size.w;
+    r->height = r->allocated_height = view->screen_size.h;
     return result;
 }
 
@@ -1446,6 +1446,11 @@ gpu_clip_strokes_and_update(Arena* arena,
 
     reset(clip_array);
     r->cook_pending = 0;
+    if ( r->canvas_worker && (flags & ClipFlags_TILE_SCENE) ) {
+        // The worker owns scene traversal; presentation only needs the references above.
+        r->cook_burst_done = 0;
+        return;
+    }
     i64 cooked_this_pass = 0;
 
     if (screen_bounds.left != screen_bounds.right &&

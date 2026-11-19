@@ -47,6 +47,11 @@ test_tile_cache()
         SDL_Quit();
         return false;
     }
+    MiltonGLState startup_graphics = {};
+    milton.gl = &startup_graphics;
+    milton_resize_and_pan(&milton, {}, {size, size});
+    milton.gl = NULL;
+    bool startup_sized = r->width == size && r->height == size;
     gpu_resize(r, view);
     gpu_update_canvas(r, milton.canvas, view);
     gpu_update_brush_outline(r, -100, -100, 1);
@@ -64,6 +69,7 @@ test_tile_cache()
             passed = false;
         }
     };
+    check(startup_sized, "same-size startup must initialize renderer dimensions before the first frame");
     gpu_update_brush_outline(r, 100, 100, -1, BrushOutline_NO_FILL, {}, 1, 0.5f, 35);
     check(!r->brush_outline_visible, "a native cursor must suppress the stale GPU outline completely");
     gpu_update_brush_outline(r, -100, -100, 1);

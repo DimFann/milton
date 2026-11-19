@@ -59,14 +59,20 @@ struct CanvasWorker
     CanvasSnapshot* pending;
     CanvasView pending_view;
     int pending_generation;
+    bool pending_preview;
     GLuint result;
     int result_generation;
+    CanvasView result_view;
+    bool result_preview;
     CanvasSnapshot* scene;           // Main-thread-owned reference and request state.
     CanvasView requested_view;
     int requested_generation;
     bool requested;
+    bool requested_preview;
     GLuint front;
     int front_generation;
+    GLuint preview;
+    CanvasView preview_view;
     CanvasView initial_view;
 #if defined(TESTING)
     SDL_atomic_t hold, entered, completed, render_thread, hold_after_completion, reference_only;
@@ -439,6 +445,7 @@ canvas_worker_thread(void* data)
         CanvasSnapshot* scene = worker->pending;
         CanvasView view = worker->pending_view;
         int generation = worker->pending_generation;
+        bool preview = worker->pending_preview;
         worker->pending = NULL;
         SDL_UnlockMutex(worker->mutex);
         if ( SDL_AtomicGet(&worker->stop) ) { canvas_snapshot_release(scene); break; }
@@ -448,6 +455,13 @@ canvas_worker_thread(void* data)
         while ( SDL_AtomicGet(&worker->hold) && !SDL_AtomicGet(&worker->stop) ) { SDL_Delay(1); }
 #endif
         if ( generation < SDL_AtomicGet(&worker->minimum_generation) ) { canvas_snapshot_release(scene); continue; }
+        if ( preview && view.scale <= INT_MAX / 2 ) {
+            // Guard texels cover odd viewport/center rounding when reprojected.
+            view.screen_size = {max(1, (view.screen_size.w + 1) / 2) + 2,
+                                max(1, (view.screen_size.h + 1) / 2) + 2};
+            view.zoom_center = view.zoom_center / 2 + v2i{1, 1};
+            view.scale *= 2;
+        }
 #if defined(TESTING)
         CanvasWorkerProfile profile = {};
         u64 install_started = SDL_GetPerformanceCounter();
@@ -481,11 +495,12 @@ canvas_worker_thread(void* data)
 #if defined(TESTING)
             use_tiles = SDL_AtomicGet(&worker->reference_only) == 0;
 #endif
-            bool tiled = use_tiles && gpu_render_tile_cache(r, 0, 0, r->width, r->height);
+            bool tiled = !preview && use_tiles && gpu_render_tile_cache(r, 0, 0, r->width, r->height);
             if ( !tiled ) {
                 gpu_clip_strokes_and_update(&arena, r, &view, view.scale, canvas.root_layer, &working,
-                                            0, 0, r->width, r->height, ClipFlags_JUST_CLIP);
-                gpu_render_canvas(r, 0, 0, r->width, r->height, 1, false);
+                                            0, 0, r->width, r->height,
+                                            preview ? ClipFlags_NAVIGATION_PREVIEW : ClipFlags_JUST_CLIP);
+                gpu_render_canvas(r, 0, 0, r->width, r->height, 1, preview);
             }
 #if defined(TESTING)
             profile.render_ms += canvas_profile_elapsed(render_started);
@@ -524,6 +539,8 @@ canvas_worker_thread(void* data)
             if ( generation >= SDL_AtomicGet(&worker->minimum_generation) && !SDL_AtomicGet(&worker->stop) ) {
                 swap(texture, worker->result);
                 worker->result_generation = generation;
+                worker->result_view = view;
+                worker->result_preview = preview;
                 SDL_AtomicSet(&worker->result_ready, 1);
 #if defined(TESTING)
                 worker->profile = profile;
@@ -574,7 +591,7 @@ gpu_stop_canvas_worker(RenderBackend* r)
     if ( worker->thread ) { SDL_WaitThread(worker->thread, NULL); }
     canvas_snapshot_release(worker->pending);
     canvas_snapshot_release(worker->scene);
-    GLuint textures[] = {worker->result, worker->front};
+    GLuint textures[] = {worker->result, worker->front, worker->preview};
     glDeleteTextures(array_count(textures), textures);
     SDL_GL_DeleteContext(worker->context);
     SDL_DestroyCond(worker->condition);
@@ -652,7 +669,16 @@ canvas_worker_render(RenderBackend* r)
     r->tile_builds = r->tile_composites = r->tile_hits = 0;
 #endif
     bool navigating = (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW) != 0;
-    if ( navigating ) {
+    bool scene_control = (r->flags & (RenderBackendFlags_HISTORY_CHANGED
+                                     | RenderBackendFlags_SELECTION_TRANSFORMING)) != 0;
+    if ( scene_control ) {
+        cache->navigation_valid = false;
+        if ( worker->preview ) { glDeleteTextures(1, &worker->preview); worker->preview = 0; }
+    }
+    bool camera_preview = navigating && !scene_control
+                          && ((r->flags & RenderBackendFlags_CANVAS_TRANSFORMING)
+                              || cache->navigation_valid || (worker->requested && worker->requested_preview));
+    if ( navigating && !camera_preview ) {
         canvas_worker_cancel(worker);
     } else {
         bool changed = !canvas_snapshot_matches(worker->scene, r);
@@ -663,22 +689,31 @@ canvas_worker_render(RenderBackend* r)
             canvas_snapshot_release(worker->scene);
             worker->scene = scene;
         }
+        if ( changed && !continuing ) {
+            cache->navigation_valid = false;
+            if ( worker->preview ) { glDeleteTextures(1, &worker->preview); worker->preview = 0; }
+        }
+        if ( camera_preview && (!changed || continuing) ) { gpu_capture_navigation(r); }
         bool view_changed = memcmp(&worker->requested_view, &r->tile_view, sizeof(CanvasView)) != 0;
-        if ( changed || !worker->requested || view_changed ) {
+        bool mode_changed = worker->requested_preview != camera_preview;
+        if ( changed || !worker->requested || view_changed || mode_changed ) {
             SDL_AtomicAdd(&worker->generation, 1);
             worker->requested_generation = SDL_AtomicGet(&worker->generation);
-            if ( !continuing || !worker->requested || view_changed
-                 || (r->flags & (RenderBackendFlags_HISTORY_CHANGED | RenderBackendFlags_CANVAS_TRANSFORMING)) ) {
+            bool compatible = camera_preview && worker->requested_preview && (!changed || continuing);
+            compatible |= !camera_preview && continuing && !view_changed;
+            if ( !compatible || !worker->requested || mode_changed || scene_control ) {
                 SDL_AtomicSet(&worker->minimum_generation, worker->requested_generation);
             }
             worker->requested_view = r->tile_view;
             worker->requested = true;
+            worker->requested_preview = camera_preview;
             SDL_AtomicIncRef(&worker->scene->refs);
             SDL_LockMutex(worker->mutex);
             CanvasSnapshot* obsolete = worker->pending;
             worker->pending = worker->scene;
             worker->pending_view = r->tile_view;
             worker->pending_generation = worker->requested_generation;
+            worker->pending_preview = camera_preview;
             SDL_CondSignal(worker->condition);
             SDL_UnlockMutex(worker->mutex);
             canvas_snapshot_release(obsolete);
@@ -687,30 +722,52 @@ canvas_worker_render(RenderBackend* r)
     SDL_LockMutex(worker->mutex);
     GLuint result = worker->result;
     int generation = worker->result_generation;
+    CanvasView result_view = worker->result_view;
+    bool result_preview = worker->result_preview;
     worker->result = 0;
     SDL_AtomicSet(&worker->result_ready, 0);
     SDL_UnlockMutex(worker->mutex);
     if ( result ) {
         if ( worker->requested && generation >= SDL_AtomicGet(&worker->minimum_generation) ) {
-            if ( worker->front ) { glDeleteTextures(1, &worker->front); }
-            worker->front = result; worker->front_generation = generation;
+            if ( result_preview ) {
+                if ( worker->preview ) { glDeleteTextures(1, &worker->preview); }
+                worker->preview = result;
+                worker->preview_view = result_view;
+            } else {
+                if ( worker->front ) { glDeleteTextures(1, &worker->front); }
+                worker->front = result; worker->front_generation = generation;
+            }
         } else { glDeleteTextures(1, &result); }
     }
-    bool ready = !navigating && worker->requested && worker->front
+    bool ready = !navigating && worker->requested && !worker->requested_preview && worker->front
                  && worker->front_generation >= SDL_AtomicGet(&worker->minimum_generation);
+    cache->capture_ready = ready;
     if ( ready ) {
+        cache->navigation_valid = false;
+        if ( worker->preview ) { glDeleteTextures(1, &worker->preview); worker->preview = 0; }
         glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
         glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, worker->front);
         glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST);
         gpu_fill_with_texture(r);
+    } else if ( camera_preview || cache->navigation_valid ) {
+        glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
+        glViewport(0, 0, r->width, r->height);
+        glScissor(0, 0, r->width, r->height);
+        glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST);
+        glClearColor(r->background_color.r, r->background_color.g, r->background_color.b, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        if ( worker->preview ) { gpu_draw_view_texture(r, worker->preview, worker->preview_view); }
+        if ( cache->navigation_valid ) { gpu_draw_view_texture(r, cache->navigation_texture, cache->navigation_view); }
     } else {
         gpu_set_cook_budget(r, 0.002f);
         gpu_clip_strokes_and_update(r->tile_arena, r, &r->tile_view, r->tile_view.scale, r->tile_root,
                                     r->tile_working, 0, 0, r->width, r->height, ClipFlags_NAVIGATION_PREVIEW);
         gpu_set_cook_budget(r, 0);
         gpu_render_canvas(r, 0, 0, r->width, r->height, 1, true);
+        cache->capture_ready = true;
     }
     cache->display_ready = ready;
     cache->pending = !ready;

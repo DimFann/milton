@@ -40,6 +40,54 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
         }
         return SDL_AtomicGet(value) == desired;
     };
+    auto compare_view_texture = [&](GLuint texture, CanvasView source, const char* label) {
+        read(actual);
+        glBindFramebufferEXT(GL_FRAMEBUFFER, r->tiles->fbo);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+        glReadPixels(0, 0, source.screen_size.w, source.screen_size.h, GL_RGBA, GL_UNSIGNED_BYTE, expected);
+        double cs = cos(source.angle), ss = sin(source.angle), fs = source.flipped ? -1 : 1;
+        double ct = cos(view->angle), st = sin(view->angle), ft = view->flipped ? -1 : 1;
+        int worst = 0;
+        for ( int y = 0; y < r->height; ++y ) {
+            for ( int x = 0; x < r->width; ++x ) {
+                double dx = x + 0.5 - view->zoom_center.x;
+                double dy = r->height - y - 0.5 - view->zoom_center.y;
+                double wx = (view->pan_center.x - source.pan_center.x
+                             + view->scale * (ct * ft * dx - st * dy)) / source.scale;
+                double wy = (view->pan_center.y - source.pan_center.y
+                             + view->scale * (st * ft * dx + ct * dy)) / source.scale;
+                double sx = fs * (cs * wx + ss * wy) + source.zoom_center.x;
+                double sy = -ss * wx + cs * wy + source.zoom_center.y;
+                if ( fabs(sx) < 0.001 || fabs(sy) < 0.001
+                     || fabs(sx - source.screen_size.w) < 0.001
+                     || fabs(sy - source.screen_size.h) < 0.001 ) { continue; }
+                bool inside = sx >= 0 && sy >= 0 && sx < source.screen_size.w && sy < source.screen_size.h;
+                sx -= 0.5; sy = source.screen_size.h - sy - 0.5;
+                int ix = (int)floor(sx), iy = (int)floor(sy);
+                double tx = sx - ix, ty = sy - iy;
+                for ( int channel = 0; channel < 4; ++channel ) {
+                    double value = channel == 3 ? 255 : 255 * r->background_color.d[channel];
+                    if ( inside ) {
+                        value = 0;
+                        for ( int j = 0; j < 2; ++j ) {
+                            for ( int i = 0; i < 2; ++i ) {
+                                int px = clamp(ix + i, 0, source.screen_size.w - 1);
+                                int py = clamp(iy + j, 0, source.screen_size.h - 1);
+                                value += expected[((size_t)py * source.screen_size.w + px) * 4 + channel]
+                                         * (i ? tx : 1 - tx) * (j ? ty : 1 - ty);
+                            }
+                        }
+                    }
+                    worst = max(worst, abs((int)actual[((size_t)y * r->width + x) * 4 + channel]
+                                           - (int)floor(value + 0.5)));
+                }
+            }
+        }
+        fprintf(stdout, "Canvas worker %s reprojection: %d LSB\n", label, worst);
+        check(worst <= 2, label);
+        glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
+    };
     auto compare = [&](bool preview, const char* label) {
         read(actual);
         if ( preview ) {
@@ -126,10 +174,11 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
         check(platform.is_space_down && platform.is_panning && delta == v2l{32, 24}
               && view->pan_center != saved_view.pan_center
               && SDL_AtomicGet(&worker->hold) && SDL_AtomicGet(&worker->completed) != first
-              && !worker->requested && !r->tiles->display_fading
+              && worker->requested && worker->requested_preview && r->tiles->navigation_valid
+              && r->clip_array.count == 0 && !r->tiles->display_fading
               && r->tile_builds == 0 && r->tile_composites == 0,
               "real queued navigation must update and display without waiting for a blocked worker");
-        compare(true, "navigation while worker blocked");
+        compare_view_texture(r->tiles->navigation_texture, r->tiles->navigation_view, "navigation while worker blocked");
         key.type = SDL_KEYUP;
         mouse.type = SDL_MOUSEBUTTONUP;
         check(SDL_PushEvent(&key) == 1 && SDL_PushEvent(&mouse) == 1, "must queue navigation release");
@@ -147,7 +196,8 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
         input.flags |= MiltonInputFlags_IMGUI_GRABBED_INPUT;
         milton_update_and_render(milton, &input);
         check(undo_layer->strokes.count == undo_count - 1
-              && SDL_AtomicGet(&worker->hold) && !worker->requested && !r->tiles->display_fading,
+              && SDL_AtomicGet(&worker->hold) && !worker->requested
+              && !r->tiles->navigation_valid && !r->tiles->display_fading,
               "queued undo must register without waiting for the worker");
         compare(true, "undo while worker blocked");
         key.key.keysym.mod = KMOD_LCTRL | KMOD_LSHIFT;
@@ -243,6 +293,67 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
         check(wait(&worker->completed, latest), "worker must converge after rapid camera requests");
         frame();
         compare(false, "rapid camera requests");
+
+        frame();
+        CanvasView navigation_start = *view;
+        SDL_AtomicSet(&worker->hold, 1);
+        GLuint frozen_texture = 0;
+        for ( int transform = 0; transform < 5; ++transform ) {
+            *view = navigation_start;
+            if ( transform == 0 ) { view->pan_center.x += 8 * view->scale; }
+            if ( transform == 1 ) { view->scale /= 2; }
+            if ( transform == 2 ) { view->angle += 0.37f; }
+            if ( transform == 3 ) { view->flipped = !view->flipped; }
+            if ( transform == 4 ) { view->screen_size = {640, 480}; view->zoom_center = {320, 240}; }
+            gpu_resize(r, view);
+            gpu_update_canvas(r, milton->canvas, view);
+            r->flags = RenderBackendFlags_NAVIGATION_PREVIEW | RenderBackendFlags_CANVAS_TRANSFORMING;
+            frame();
+            if ( !frozen_texture ) { frozen_texture = r->tiles->navigation_texture; }
+            check(r->tiles->navigation_valid && r->tiles->navigation_texture == frozen_texture
+                  && memcmp(&r->tiles->navigation_view, &navigation_start, sizeof(CanvasView)) == 0
+                  && r->clip_array.count == 0 && r->cook_pending == 0,
+                  "camera updates must reproject one immutable snapshot without traversing or cooking strokes");
+            compare_view_texture(frozen_texture, navigation_start, "pan/zoom/rotation/flip/resize");
+        }
+        *view = navigation_start;
+        view->pan_center.x += view->screen_size.w * view->scale;
+        gpu_resize(r, view);
+        gpu_update_canvas(r, milton->canvas, view);
+        frame();
+        latest = worker->requested_generation;
+        SDL_AtomicSet(&worker->hold, 0);
+        check(wait(&worker->completed, latest), "worker must fill newly exposed navigation regions");
+        frame();
+        check(worker->preview && r->tiles->navigation_valid && r->clip_array.count == 0,
+              "exposed navigation regions must use asynchronous raster coverage, not foreground stroke replay");
+        compare_view_texture(worker->preview, worker->preview_view, "newly exposed coverage");
+        float navigation_alpha = milton->canvas->root_layer->alpha;
+        milton->canvas->root_layer->alpha *= 0.5f;
+        frame();
+        frame();
+        check(!r->tiles->navigation_valid && !r->tiles->capture_ready,
+              "scene edits during navigation must not pin stale artwork or capture placeholder background");
+        milton->canvas->root_layer->alpha = navigation_alpha;
+        frame();
+        r->flags = RenderBackendFlags_NAVIGATION_PREVIEW | RenderBackendFlags_SELECTION_TRANSFORMING;
+        frame();
+        check(!r->tiles->navigation_valid && !worker->requested,
+              "selection transforms must invalidate camera snapshots and retain their live-stroke preview");
+        r->flags = RenderBackendFlags_NONE;
+        frame();
+        latest = worker->requested_generation;
+        check(wait(&worker->completed, latest), "accurate refinement must resume after raster navigation");
+        frame();
+        check(!r->tiles->navigation_valid && !worker->preview && r->tiles->display_ready,
+              "accurate completion must retire navigation snapshots and asynchronous gap coverage");
+        compare(false, "after raster navigation");
+        *view = navigation_start;
+        gpu_update_canvas(r, milton->canvas, view);
+        frame();
+        latest = worker->requested_generation;
+        check(wait(&worker->completed, latest), "original view must refine after navigation tests");
+        frame();
 
         Stroke* working = &milton->working_stroke;
         Stroke saved_working = *working;
