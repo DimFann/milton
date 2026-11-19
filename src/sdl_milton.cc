@@ -16,9 +16,72 @@
 static void
 cursor_set_and_show(SDL_Cursor* cursor)
 {
-    SDL_SetCursor(cursor);
+    if ( SDL_GetCursor() != cursor ) { SDL_SetCursor(cursor); }
     platform_cursor_show();
 }
+
+#if MILTON_HARDWARE_BRUSH_CURSOR
+static SDL_Surface*
+brush_cursor_surface(i32 radius, i32 shape, f32 aspect, f32 angle)
+{
+    float reach = shape == 1 ? sqrtf(1 + aspect * aspect) : 1;
+    // Keep large footprints on the canvas; the native tip still tracks independently.
+    if ( radius < 1 || radius * reach + 3 > 127 ) { return NULL; }
+    int center = (int)ceilf(radius * reach) + 3;
+    int size = 2 * center + 1;
+    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(0, size, size, 32, SDL_PIXELFORMAT_RGBA32);
+    if ( !surface ) {
+        milton_log("Cannot allocate native brush cursor: %s\n", SDL_GetError());
+        return NULL;
+    }
+    SDL_FillRect(surface, NULL, 0);
+    float c = cosf(angle * 3.14159265f / 180), s = sinf(angle * 3.14159265f / 180);
+    u32 black = SDL_MapRGBA(surface->format, 0, 0, 0, 255);
+    u32 white = SDL_MapRGBA(surface->format, 255, 255, 255, 255);
+    for ( int y = 0; y < size; ++y ) {
+        u32* row = (u32*)((u8*)surface->pixels + y * surface->pitch);
+        for ( int x = 0; x < size; ++x ) {
+            float dx = (float)(x - center), dy = (float)(y - center);
+            float distance = shape == 1
+                ? max(fabsf(dx * c + dy * s) - radius, fabsf(-dx * s + dy * c) - radius * aspect)
+                : sqrtf(dx * dx + dy * dy) - radius;
+            if ( distance <= 0 && distance > -1.5f ) { row[x] = black; }
+            else if ( distance > 0 && distance < 1.5f ) { row[x] = white; }
+        }
+    }
+    return surface;
+}
+
+bool
+platform_update_brush_cursor(PlatformState* platform, i32 radius, i32 shape, f32 aspect, f32 angle)
+{
+    if ( !platform->cursor_brush_cached || platform->cursor_brush_radius != radius
+         || platform->cursor_brush_shape != shape || platform->cursor_brush_aspect != aspect
+         || platform->cursor_brush_angle != angle ) {
+        SDL_Cursor* previous = platform->cursor_brush_outline;
+        SDL_Cursor* outline = NULL;
+        SDL_Surface* surface = brush_cursor_surface(radius, shape, aspect, angle);
+        if ( surface ) {
+            outline = SDL_CreateColorCursor(surface, surface->w / 2, surface->h / 2);
+            if ( !outline ) { milton_log("Cannot create native brush cursor: %s; using the native tip and canvas footprint.\n", SDL_GetError()); }
+            SDL_FreeSurface(surface);
+        }
+        SDL_Cursor* current = SDL_GetCursor();
+        if ( current == platform->cursor_brush || (previous && current == previous) ) {
+            SDL_SetCursor(outline ? outline : platform->cursor_brush);
+        }
+        if ( previous ) { SDL_FreeCursor(previous); }
+        platform->cursor_brush_outline = outline;
+        platform->cursor_brush_radius = radius;
+        platform->cursor_brush_shape = shape;
+        platform->cursor_brush_aspect = aspect;
+        platform->cursor_brush_angle = angle;
+        platform->cursor_brush_cached = true;
+    }
+    return platform->cursor_brush_outline && SDL_GetCursor() == platform->cursor_brush_outline
+           && SDL_ShowCursor(SDL_QUERY) == SDL_ENABLE;
+}
+#endif
 
 LayoutType
 get_current_keyboard_layout()
@@ -1077,18 +1140,15 @@ milton_main(bool is_fullscreen, char* file_to_open)
                               milton->current_mode == MiltonMode::BLUR ||
                               mode_is_for_primitives(milton->current_mode) ) {
                         #if MILTON_HARDWARE_BRUSH_CURSOR
-                            // The shaped outline already marks the tip; skip the small round cursor.
-                            if ( (milton->current_mode == MiltonMode::PEN || milton->current_mode == MiltonMode::ERASER)
-                                 && milton->brushes[milton_get_brush_enum(milton)].shape != BrushShape_ROUND ) {
-                                platform_cursor_hide();
-                            } else {
-                                cursor_set_and_show(platform.cursor_brush);
-                            }
+                            cursor_set_and_show(platform.cursor_brush_outline
+                                                ? platform.cursor_brush_outline : platform.cursor_brush);
                         #else
                             platform_cursor_hide();
                         #endif
                     }
-                    else if ( milton->current_mode == MiltonMode::TRANSFORM ) {
+                    else if ( milton->current_mode == MiltonMode::TRANSFORM
+                              || milton->current_mode == MiltonMode::DRAG_ZOOM
+                              || milton->current_mode == MiltonMode::PEEK_OUT ) {
                         cursor_set_and_show(platform.cursor_crosshair);
                     }
                     else if ( milton->current_mode == MiltonMode::HISTORY ) {
@@ -1097,8 +1157,8 @@ milton_main(bool is_fullscreen, char* file_to_open)
                     else if ( milton->current_mode == MiltonMode::DRAG_BRUSH_SIZE ) {
                         platform_cursor_hide();
                     }
-                    else if ( milton->current_mode != MiltonMode::PEN || milton->current_mode != MiltonMode::ERASER ) {
-                        platform_cursor_hide();
+                    else {
+                        cursor_set_and_show(platform.cursor_default);
                     }
                 }
         }
@@ -1294,6 +1354,12 @@ milton_main(bool is_fullscreen, char* file_to_open)
     }
 
     gui_save_tool_state(milton);
+#if MILTON_HARDWARE_BRUSH_CURSOR
+    if ( platform.cursor_brush_outline ) {
+        SDL_SetCursor(platform.cursor_default);
+        SDL_FreeCursor(platform.cursor_brush_outline);
+    }
+#endif
     platform_deinit(&platform);
 
     arena_free(&milton->root_arena);

@@ -5,6 +5,10 @@ there is no canvas-format change or permanent flattening.
 
 ## Implemented
 
+- [x] Windows OS-managed brush outlines, cached by size/shape/orientation rather
+  than pointer position, independent of canvas rendering. Oversized footprints
+  retain an independently tracked native tip; their canvas preview can lag.
+
 - [x] Canvas-space 256-pixel tile cores with sampling gutters and power-of-two
   resolution levels, including negative coordinates.
 - [x] Per-layer paint tiles and composited-prefix tiles, validated against exact

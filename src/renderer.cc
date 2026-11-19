@@ -155,6 +155,7 @@ struct RenderBackend
     int exporter_indices_count;
 
     u32 imm_flags;  // ImmediateFlag
+    bool brush_outline_visible;
 
     // Objects used in rendering.
     GLuint canvas_texture;
@@ -408,6 +409,8 @@ gpu_update_brush_outline(RenderBackend* r, i32 cx, i32 cy, i32 radius,
                          BrushOutlineEnum outline_enum, v4f color,
                          i32 shape, f32 shape_aspect, f32 shape_angle_deg)
 {
+    r->brush_outline_visible = radius >= 0;
+    if ( !r->brush_outline_visible ) { return; }
     if ( r->vbo_outline == 0 ) {
         mlt_assert(r->vbo_outline_sizes == 0);
         glGenBuffers(1, &r->vbo_outline);
@@ -2377,7 +2380,7 @@ gpu_render(RenderBackend* r,  i32 view_x, i32 view_y, i32 view_width, i32 view_h
 
     PUSH_GRAPHICS_GROUP("outlines");
     // Brush outline
-    {
+    if ( r->brush_outline_visible ) {
         gl::use_program(r->outline_program);
         GLint loc = glGetAttribLocation(r->outline_program, "a_position");
         if ( loc >= 0 ) {

@@ -1159,9 +1159,76 @@ test_vram_stats()
 
 #include "tile_tests.cc"
 
+#if MILTON_HARDWARE_BRUSH_CURSOR
+static bool
+test_brush_cursor()
+{
+    if ( SDL_Init(SDL_INIT_VIDEO) != 0 ) {
+        fprintf(stderr, "Native cursor SDL initialization failed: %s\n", SDL_GetError());
+        return false;
+    }
+    bool passed = true;
+    auto check = [&](bool condition, const char* message) {
+        if ( !condition ) { fprintf(stderr, "Native cursor FAILED: %s\n", message); passed = false; }
+    };
+    auto alpha = [](SDL_Surface* surface, int dx, int dy) {
+        int x = surface->w / 2 + dx, y = surface->h / 2 + dy;
+        u32 pixel = ((u32*)((u8*)surface->pixels + y * surface->pitch))[x];
+        u8 r, g, b, a;
+        SDL_GetRGBA(pixel, surface->format, &r, &g, &b, &a);
+        return a;
+    };
+    SDL_Surface* circle = brush_cursor_surface(12, 0, 1, 0);
+    check(circle != NULL, "round outline must allocate");
+    if ( circle ) {
+        check(alpha(circle, 12, 0) == 255 && alpha(circle, 0, 12) == 255
+              && alpha(circle, 0, 0) == 0 && alpha(circle, 14, 0) == 0,
+              "round outline must surround a transparent center at the brush radius");
+        SDL_FreeSurface(circle);
+    }
+    for ( int angle = 0; angle <= 90; angle += 90 ) {
+        SDL_Surface* rectangle = brush_cursor_surface(12, 1, 0.25f, (float)angle);
+        check(rectangle != NULL, "rectangular outline must allocate");
+        if ( rectangle ) {
+            check((angle == 0
+                       ? alpha(rectangle, 0, 3) == 255 && alpha(rectangle, 0, 8) == 0
+                       : alpha(rectangle, 3, 0) == 255 && alpha(rectangle, 8, 0) == 0),
+                  "rectangular outline must retain aspect and rotation");
+            SDL_FreeSurface(rectangle);
+        }
+    }
+    PlatformState platform = {};
+    platform.cursor_brush = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR);
+    check(platform.cursor_brush != NULL, "fallback tip must be available");
+    if ( platform.cursor_brush ) {
+        platform_update_brush_cursor(&platform, 24, 1, 0.5f, 35);
+        SDL_Cursor* outline = platform.cursor_brush_outline;
+        check(outline != NULL, "shaped outline must create a native cursor");
+        platform.pointer = {140, 180};
+        platform_update_brush_cursor(&platform, 24, 1, 0.5f, 35);
+        check(platform.cursor_brush_outline == outline, "pointer movement must not rebuild cursor resources");
+        platform_update_brush_cursor(&platform, 1000, 1, 0.5f, 35);
+        check(!platform.cursor_brush_outline, "oversized brushes must retain the native tip and canvas footprint");
+        platform_update_brush_cursor(&platform, 12, 0, 1, 0);
+        check(platform.cursor_brush_outline != NULL, "returning to a normal brush must restore the native outline");
+        if ( platform.cursor_brush_outline ) { SDL_FreeCursor(platform.cursor_brush_outline); }
+        SDL_FreeCursor(platform.cursor_brush);
+    }
+    fprintf(passed ? stdout : stderr, "Native brush cursor shape, rotation, caching and oversized fallback: %s\n",
+            passed ? "passed" : "FAILED");
+    SDL_Quit();
+    return passed;
+}
+#endif
+
 extern "C" int
 main(int argc, char** argv)
 {
+#if MILTON_HARDWARE_BRUSH_CURSOR
+    if ( argc == 2 && strcmp(argv[1], "--brush-cursor") == 0 ) {
+        return test_brush_cursor() ? 0 : 1;
+    }
+#endif
     if ( argc == 2 && strcmp(argv[1], "--tile-cache") == 0 ) {
         return test_tile_cache() ? 0 : 1;
     }

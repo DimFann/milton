@@ -77,6 +77,12 @@ struct PlatformState
     SDL_Cursor* cursor_pick;  // High-contrast crosshair for the eyedropper and lasso.
     SDL_Cursor* cursor_sizeall;
     SDL_Cursor* cursor_brush;  // Custom cursor.
+#if MILTON_HARDWARE_BRUSH_CURSOR
+    SDL_Cursor* cursor_brush_outline;
+    i32 cursor_brush_radius, cursor_brush_shape;
+    f32 cursor_brush_aspect, cursor_brush_angle;
+    bool cursor_brush_cached;
+#endif
 
     // Current keyboard layout.
     LayoutType keyboard_layout;
@@ -109,6 +115,9 @@ void    platform_init(PlatformState* platform, SDL_SysWMinfo* sysinfo);
 void    platform_deinit(PlatformState* platform);
 
 void    platform_setup_cursor(Arena* arena, PlatformState* platform);
+#if MILTON_HARDWARE_BRUSH_CURSOR
+bool    platform_update_brush_cursor(PlatformState* platform, i32 radius, i32 shape, f32 aspect, f32 angle);
+#endif
 
 void    platform_cursor_set_position(PlatformState* platform, v2i pos);
 // Get cursor position in client-rect space, whether or not it is within the client rect.

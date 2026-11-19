@@ -62,6 +62,11 @@ test_tile_cache()
             passed = false;
         }
     };
+    gpu_update_brush_outline(r, 100, 100, -1, BrushOutline_NO_FILL, {}, 1, 0.5f, 35);
+    check(!r->brush_outline_visible, "a native cursor must suppress the stale GPU outline completely");
+    gpu_update_brush_outline(r, -100, -100, 1);
+    check(r->brush_outline_visible, "canvas footprint previews must remain available");
+    gpu_update_brush_outline(r, -100, -100, -1);
     auto add = [&](Layer* layer, u32 flags, v3f color, float alpha, int radius,
                    v2l a, v2l b, float p0, float p1) {
         Stroke stroke = {};

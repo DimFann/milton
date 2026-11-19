@@ -2095,6 +2095,12 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
 
         i32 outline_shape = 0; f32 outline_aspect = 1.0f; f32 outline_angle = 0.0f;
         get_outline_shape(milton, &outline_shape, &outline_aspect, &outline_angle);
+#if MILTON_HARDWARE_BRUSH_CURSOR
+        if ( radius > 0 && platform_update_brush_cursor(milton->platform, (i32)radius,
+                                                       outline_shape, outline_aspect, outline_angle) ) {
+            radius = -1;
+        }
+#endif
         gpu_update_brush_outline(milton->renderer,
                                 brush_point.x, brush_point.y,
                                 radius, BrushOutline_NO_FILL, {},
