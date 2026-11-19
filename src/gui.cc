@@ -1660,8 +1660,16 @@ gui_perf_stats(Milton* milton)
     } else {
         snprintf(lines[n++], 96, "GPU n/a");
     }
-    if ( stats.vram_budget_mb > 0 ) {
-        snprintf(lines[n++], 96, "VRAM %.0f / %.0f MB", stats.vram_used_mb, stats.vram_budget_mb);
+    if ( stats.vram_total_mb > 0 ) {
+        char used[24] = "n/a";
+        if ( stats.vram_system_used_mb >= 0 ) { snprintf(used, sizeof(used), "%.0f", stats.vram_system_used_mb); }
+        if ( stats.vram_used_mb >= 0 ) {
+            snprintf(lines[n++], 96, "VRAM %s / %.0f MB  (Milton %.0f MB)", used, stats.vram_total_mb, stats.vram_used_mb);
+        } else {
+            snprintf(lines[n++], 96, "VRAM %s / %.0f MB", used, stats.vram_total_mb);
+        }
+    } else {
+        snprintf(lines[n++], 96, "VRAM n/a");
     }
     if ( stats.cpu_percent >= 0 ) {
         snprintf(lines[n++], 96, "CPU %.0f%%", stats.cpu_percent);

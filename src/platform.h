@@ -241,7 +241,8 @@ struct SystemStats
     float gpu_percent;        // Whole-machine GPU 3D engine utilisation.
     float gpu_app_percent;    // Share of that used by this process.
     double vram_used_mb;      // This process.
-    double vram_budget_mb;    // OS budget for this process.
+    double vram_total_mb;     // Dedicated memory on the selected hardware adapter.
+    double vram_system_used_mb;
     double ram_used_mb;       // This process (working set).
     double ram_total_mb;      // Physical memory in the machine.
     double ram_system_used_mb;

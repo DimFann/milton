@@ -1096,9 +1096,55 @@ test_preserve_opacity_binding()
     return passed;
 }
 
+#if defined(_WIN32)
+static bool
+test_vram_stats()
+{
+    if ( SDL_Init(SDL_INIT_VIDEO) != 0 ) {
+        fprintf(stderr, "Cannot initialize VRAM test video: %s\n", SDL_GetError());
+        return false;
+    }
+    SDL_Window* window = SDL_CreateWindow("VRAM stats test", 0, 0, 64, 64, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+    SDL_GLContext context = window ? SDL_GL_CreateContext(window) : NULL;
+    if ( !context || !gl::load() ) {
+        fprintf(stderr, "Cannot initialize VRAM test OpenGL: %s\n", SDL_GetError());
+        if ( context ) { SDL_GL_DeleteContext(context); }
+        if ( window ) { SDL_DestroyWindow(window); }
+        SDL_Quit();
+        return false;
+    }
+    GLuint texture = gl::new_color_texture(2048, 2048);
+    GLuint framebuffer = gl::new_fbo(texture, 0, GL_TEXTURE_2D);
+    glBindFramebufferEXT(GL_FRAMEBUFFER, framebuffer);
+    glClearColor(0.25f, 0.5f, 0.75f, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    u8 pixel[4];
+    glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    SystemStats stats = {};
+    platform_system_stats(&stats);
+    SDL_Delay(1100);
+    platform_system_stats(&stats);
+    bool passed = stats.vram_total_mb > 0 && stats.vram_system_used_mb >= 0
+                  && stats.vram_system_used_mb <= stats.vram_total_mb && stats.vram_used_mb > 0
+                  && glGetError() == GL_NO_ERROR;
+    fprintf(passed ? stdout : stderr, "VRAM system %.0f / %.0f MB, Milton %.0f MB: %s\n",
+            stats.vram_system_used_mb, stats.vram_total_mb, stats.vram_used_mb, passed ? "passed" : "FAILED");
+    glDeleteTextures(1, &texture);
+    SDL_GL_DeleteContext(context);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return passed;
+}
+#endif
+
 extern "C" int
 main(int argc, char** argv)
 {
+#if defined(_WIN32)
+    if ( argc == 2 && strcmp(argv[1], "--vram-stats") == 0 ) {
+        return test_vram_stats() ? 0 : 1;
+    }
+#endif
     if ( argc == 2 && strcmp(argv[1], "--blur-performance") == 0 ) {
         return test_navigation_preview() && test_preserve_opacity(false, true) ? 0 : 1;
     }

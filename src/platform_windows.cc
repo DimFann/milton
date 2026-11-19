@@ -1028,7 +1028,9 @@ platform_system_stats(SystemStats* out)
 {
     *out = {};
     out->cpu_percent = out->gpu_percent = out->gpu_app_percent = -1.0f;
+    out->vram_used_mb = out->vram_system_used_mb = -1.0;
     const double MB = 1024.0 * 1024.0;
+    static wchar_t vram_adapter_tag[64] = {};
 
     // CPU: delta of system times since the last call.
     {
@@ -1068,6 +1070,7 @@ platform_system_stats(SystemStats* out)
     // VRAM via DXGI: use the adapter with the most dedicated memory.
     {
         static IDXGIAdapter3* adapter = NULL;
+        static double total_mb = 0;
         static bool tried = false;
         if ( !tried ) {
             tried = true;
@@ -1075,26 +1078,27 @@ platform_system_stats(SystemStats* out)
             if ( SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&factory)) ) {
                 SIZE_T best = 0;
                 IDXGIAdapter1* a = NULL;
-                for ( UINT i = 0; factory->EnumAdapters1(i, &a) != DXGI_ERROR_NOT_FOUND; ++i ) {
-                    DXGI_ADAPTER_DESC1 desc;
-                    a->GetDesc1(&desc);
-                    IDXGIAdapter3* a3 = NULL;
-                    if ( !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) && desc.DedicatedVideoMemory >= best
-                         && SUCCEEDED(a->QueryInterface(__uuidof(IDXGIAdapter3), (void**)&a3)) ) {
-                        if ( adapter ) { adapter->Release(); }
-                        adapter = a3;
+                for ( UINT i = 0; SUCCEEDED(factory->EnumAdapters1(i, &a)); ++i ) {
+                    DXGI_ADAPTER_DESC1 desc = {};
+                    if ( SUCCEEDED(a->GetDesc1(&desc)) && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
+                         && desc.DedicatedVideoMemory > best ) {
+                        if ( adapter ) { adapter->Release(); adapter = NULL; }
+                        a->QueryInterface(__uuidof(IDXGIAdapter3), (void**)&adapter);
                         best = desc.DedicatedVideoMemory;
+                        total_mb = (double)best / MB;
+                        swprintf(vram_adapter_tag, array_count(vram_adapter_tag), L"luid_0x%08lx_0x%08lx_",
+                                 (unsigned long)desc.AdapterLuid.HighPart, desc.AdapterLuid.LowPart);
                     }
                     a->Release();
                 }
                 factory->Release();
             }
         }
+        out->vram_total_mb = total_mb;
         if ( adapter ) {
             DXGI_QUERY_VIDEO_MEMORY_INFO info = {};
             if ( SUCCEEDED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)) ) {
                 out->vram_used_mb = (double)info.CurrentUsage / MB;
-                out->vram_budget_mb = (double)info.Budget / MB;
             }
         }
     }
@@ -1103,6 +1107,7 @@ platform_system_stats(SystemStats* out)
     {
         static PDH_HQUERY query = NULL;
         static PDH_HCOUNTER counter = NULL;
+        static PDH_HCOUNTER memory_counter = NULL;
         static bool tried = false;
         static bool primed = false;
         if ( !tried ) {
@@ -1110,6 +1115,11 @@ platform_system_stats(SystemStats* out)
             if ( PdhOpenQueryW(NULL, 0, &query) != ERROR_SUCCESS
                  || PdhAddEnglishCounterW(query, L"\\GPU Engine(*)\\Utilization Percentage", 0, &counter) != ERROR_SUCCESS ) {
                 query = NULL;
+            }
+            if ( query && PdhAddEnglishCounterW(query, L"\\GPU Adapter Memory(*)\\Dedicated Usage", 0,
+                                                &memory_counter) != ERROR_SUCCESS ) {
+                memory_counter = NULL;
+                milton_log("VRAM usage counter unavailable; performance stats will show n/a.\n");
             }
         }
         if ( query ) {
@@ -1133,6 +1143,28 @@ platform_system_stats(SystemStats* out)
                         out->gpu_app_percent = (float)min(app, 100.0);
                     }
                     free(items);
+                }
+                if ( memory_counter && vram_adapter_tag[0] ) {
+                    DWORD memory_bytes = 0, memory_count = 0;
+                    if ( PdhGetFormattedCounterArrayW(memory_counter, PDH_FMT_LARGE, &memory_bytes, &memory_count, NULL)
+                         == PDH_MORE_DATA && memory_bytes > 0 ) {
+                        auto* memory_items = (PDH_FMT_COUNTERVALUE_ITEM_W*)malloc(memory_bytes);
+                        if ( memory_items && PdhGetFormattedCounterArrayW(memory_counter, PDH_FMT_LARGE,
+                                                                         &memory_bytes, &memory_count, memory_items) == ERROR_SUCCESS ) {
+                            double used = 0;
+                            bool found = false;
+                            for ( DWORD i = 0; i < memory_count; ++i ) {
+                                const auto& item = memory_items[i];
+                                if ( _wcsnicmp(item.szName, vram_adapter_tag, wcslen(vram_adapter_tag)) == 0
+                                     && (item.FmtValue.CStatus == PDH_CSTATUS_VALID_DATA || item.FmtValue.CStatus == PDH_CSTATUS_NEW_DATA) ) {
+                                    used += (double)item.FmtValue.largeValue;
+                                    found = true;
+                                }
+                            }
+                            if ( found ) { out->vram_system_used_mb = used / MB; }
+                        }
+                        free(memory_items);
+                    }
                 }
             }
             primed = true;

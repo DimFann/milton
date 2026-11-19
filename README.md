@@ -12,6 +12,7 @@ This fork adds some quality of life features I've been wanting for years, as wel
 ### Notable additions
 * Rebindable hotkeys
 * Reorganized UI, with dark mode
+* Bottom resource stats show dedicated GPU VRAM usage versus physical capacity, plus Milton's own VRAM usage when available. Figures refresh about once a second; unavailable counters show `n/a`.
 * Pressure response tuning, pressure and position smoothing
 * Pen and eraser pressure-opacity options are saved separately, including when you quit with the eraser active. Opening a canvas keeps the current pressure-opacity option.
 * From 8 to 16 bit color values for smoother stroke appearances

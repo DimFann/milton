@@ -395,4 +395,5 @@ platform_system_stats(SystemStats* out)
 {
     *out = {};
     out->cpu_percent = out->gpu_percent = out->gpu_app_percent = -1.0f;
+    out->vram_used_mb = out->vram_system_used_mb = -1.0;
 }
