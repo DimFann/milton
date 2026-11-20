@@ -213,6 +213,8 @@ struct RenderBackend
     i32 allocated_width;
     i32 allocated_height;
     u64 navigation_cache_budget;
+    u8* sampling_pixels;
+    CanvasView sampling_view;
 
     v3f background_color;
     i32 scale;  // zoom
@@ -1367,7 +1369,11 @@ gpu_free_strokes(Stroke* strokes, i64 count, RenderBackend* r, bool content_chan
 void
 gpu_free_strokes(RenderBackend* r, CanvasState* canvas, bool content_changed)
 {
-    if ( content_changed ) { gpu_clear_tile_cache(r); }
+    if ( content_changed ) {
+        free(r->sampling_pixels);
+        r->sampling_pixels = NULL;
+        gpu_clear_tile_cache(r);
+    }
     if ( canvas->root_layer != NULL ) {
         for ( Layer* l = canvas->root_layer;
               l != NULL;
@@ -2292,6 +2298,40 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
     POP_GRAPHICS_GROUP();  // render_canvas
 }
 
+static u8*
+gpu_read_sampling_pixels(RenderBackend* r, u8* pixels = NULL)
+{
+    const size_t bytes = (size_t)r->width * r->height * 4;
+    if ( !pixels ) { pixels = (u8*)malloc(bytes); }
+    if ( !pixels ) {
+        milton_log("Cannot allocate completed canvas sampling image.\n");
+        return NULL;
+    }
+    glReadPixels(0, 0, r->width, r->height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    GLenum error = glGetError();
+    if ( error != GL_NO_ERROR ) {
+        milton_log("Cannot read completed canvas sampling pixels: OpenGL error 0x%x\n", error);
+        free(pixels);
+        return NULL;
+    }
+    u32* colors = (u32*)pixels;
+    for ( int y = 0; y < r->height / 2; ++y ) {
+        for ( int x = 0; x < r->width; ++x ) {
+            swap(colors[(size_t)y * r->width + x], colors[(size_t)(r->height - 1 - y) * r->width + x]);
+        }
+    }
+    return pixels;
+}
+
+bool
+gpu_get_last_rendered_canvas(RenderBackend* r, const u8** pixels, CanvasView* view)
+{
+    if ( !r->sampling_pixels ) { return false; }
+    *pixels = r->sampling_pixels;
+    *view = r->sampling_view;
+    return true;
+}
+
 #include "tile_renderer.cc"
 #include "canvas_worker.cc"
 
@@ -2328,6 +2368,17 @@ gpu_render(RenderBackend* r,  i32 view_x, i32 view_y, i32 view_width, i32 view_h
         bool preview = (r->flags & RenderBackendFlags_NAVIGATION_PREVIEW) != 0
                        || (tiled && !r->tiles->display_ready);
         gpu_present_tile_transition(r, tiled && preview && !r->canvas_worker, preview, SDL_GetTicks());
+        if ( !r->canvas_worker && !preview && !r->cook_pending && (!r->tiles || !r->tiles->display_fading) ) {
+            glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
+            glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
+            u8* pixels = gpu_read_sampling_pixels(r);
+            if ( !pixels ) { platform_dialog("Cannot cache the completed canvas for color sampling; see the log.", "Rendering error"); }
+            else {
+                free(r->sampling_pixels);
+                r->sampling_pixels = pixels;
+                r->sampling_view = r->tile_view;
+            }
+        }
     }
 
     GLenum texture_target;
@@ -2568,6 +2619,8 @@ gpu_render_to_buffer(Milton* milton, u8* buffer, i32 scale, i32 x, i32 y, i32 w,
 void
 gpu_release_data(RenderBackend* r)
 {
+    free(r->sampling_pixels);
+    r->sampling_pixels = NULL;
     gpu_stop_canvas_worker(r);
     gpu_clear_tile_cache(r);
     release(&r->clip_array);

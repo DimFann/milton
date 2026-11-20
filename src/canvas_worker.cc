@@ -78,6 +78,9 @@ struct CanvasWorker
     bool pending_preview;
     u64 pending_scene;
     GLuint result;
+    u8* result_pixels;
+    u8* spare_pixels;
+    size_t spare_bytes;
     int result_generation;
     CanvasView result_view;
     bool result_preview;
@@ -114,6 +117,17 @@ static u64
 canvas_raster_bytes(const CanvasView& view)
 {
     return (u64)view.screen_size.w * view.screen_size.h * 4;
+}
+
+static void
+canvas_worker_recycle_pixels(CanvasWorker* worker, u8* pixels, size_t bytes)
+{
+    if ( !pixels ) { return; }
+    SDL_LockMutex(worker->mutex);
+    swap(pixels, worker->spare_pixels);
+    worker->spare_bytes = bytes;
+    SDL_UnlockMutex(worker->mutex);
+    free(pixels);
 }
 
 static void
@@ -824,6 +838,21 @@ canvas_worker_thread(void* data)
             glBindFramebufferEXT(GL_FRAMEBUFFER, r->fbo);
             glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
             tile_copy_display_texture(texture, r->width, r->height);
+            u8* pixels = NULL;
+            size_t retired_bytes = (size_t)canvas_raster_bytes(view);
+            if ( complete && !preview ) {
+                SDL_LockMutex(worker->mutex);
+                if ( worker->spare_bytes == retired_bytes ) {
+                    pixels = worker->spare_pixels;
+                    worker->spare_pixels = NULL;
+                }
+                SDL_UnlockMutex(worker->mutex);
+                pixels = gpu_read_sampling_pixels(r, pixels);
+            }
+            if ( complete && !preview && !pixels ) {
+                glDeleteTextures(1, &texture);
+                failed = true; break;
+            }
             glFinish();  // Publish only after writes are visible to the presentation context.
 #if defined(TESTING)
             profile.publish_ms += canvas_profile_elapsed(publish_started);
@@ -832,11 +861,14 @@ canvas_worker_thread(void* data)
             if ( error != GL_NO_ERROR ) {
                 milton_log("Cannot publish background canvas texture: OpenGL error 0x%x\n", error);
                 glDeleteTextures(1, &texture);
+                free(pixels);
                 failed = true; break;
             }
             SDL_LockMutex(worker->mutex);
             if ( generation >= SDL_AtomicGet(&worker->minimum_generation) && !SDL_AtomicGet(&worker->stop) ) {
+                retired_bytes = (size_t)canvas_raster_bytes(worker->result_view);
                 swap(texture, worker->result);
+                swap(pixels, worker->result_pixels);
                 worker->result_generation = generation;
                 worker->result_view = view;
                 worker->result_preview = preview;
@@ -858,6 +890,7 @@ canvas_worker_thread(void* data)
 #endif
             }
             SDL_UnlockMutex(worker->mutex);
+            canvas_worker_recycle_pixels(worker, pixels, retired_bytes);
             if ( texture ) { glDeleteTextures(1, &texture); }
             canvas_worker_wake(worker);
             if ( complete ) { break; }
@@ -932,6 +965,8 @@ gpu_stop_canvas_worker(RenderBackend* r)
     if ( worker->thread ) { SDL_WaitThread(worker->thread, NULL); }
     canvas_snapshot_release(worker->pending);
     canvas_snapshot_release(worker->scene);
+    free(worker->result_pixels);
+    free(worker->spare_pixels);
     GLuint textures[] = {worker->result, worker->front, worker->preview, worker->refinement,
                          worker->peripheral[0].texture, worker->peripheral[1].texture};
     glDeleteTextures(array_count(textures), textures);
@@ -1093,6 +1128,7 @@ canvas_worker_render(RenderBackend* r)
     }
     SDL_LockMutex(worker->mutex);
     GLuint result = worker->result;
+    u8* result_pixels = worker->result_pixels;
     int generation = worker->result_generation;
     CanvasView result_view = worker->result_view;
     bool result_preview = worker->result_preview;
@@ -1101,6 +1137,7 @@ canvas_worker_render(RenderBackend* r)
     CanvasPeripheralFrame peripheral[2] = {worker->peripheral[0], worker->peripheral[1]};
     worker->peripheral[0] = {}; worker->peripheral[1] = {};
     worker->result = 0;
+    worker->result_pixels = NULL;
     SDL_AtomicSet(&worker->result_ready, 0);
     SDL_UnlockMutex(worker->mutex);
     for ( int slot = 0; slot < 2; ++slot ) {
@@ -1119,6 +1156,10 @@ canvas_worker_render(RenderBackend* r)
                 worker->preview_view = result_view;
                 worker->preview_scene = result_scene;
             } else {
+                canvas_worker_recycle_pixels(worker, r->sampling_pixels, (size_t)canvas_raster_bytes(r->sampling_view));
+                r->sampling_pixels = result_pixels;
+                result_pixels = NULL;
+                r->sampling_view = result_view;
                 canvas_raster_retain(r, &worker->front, worker->front_view, false, worker->front_scene);
                 worker->front = result; worker->front_generation = generation;
                 worker->front_view = result_view;
@@ -1126,6 +1167,7 @@ canvas_worker_render(RenderBackend* r)
             }
         } else { glDeleteTextures(1, &result); }
     }
+    free(result_pixels);
     bool ready = !navigating && worker->requested && !worker->requested_preview && worker->front
                  && worker->front_generation >= SDL_AtomicGet(&worker->minimum_generation);
     cache->capture_ready = ready;

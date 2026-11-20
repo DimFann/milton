@@ -118,24 +118,44 @@ milton_update_brushes(Milton* milton)
 void
 eyedropper_init(Milton* milton)
 {
-    size_t bpp = 4;
-    i32 w = milton->view->screen_size.w;
-    i32 h = milton->view->screen_size.h;
-
     Eyedropper* e = milton->eyedropper;
     if (!e->buffer)
     {
-        e->buffer = (u8*)mlt_calloc(w*h*bpp, 1, "Bitmap");
-        gpu_render_to_buffer(milton, e->buffer, 1, 0, 0, w, h, 1.0f);
+        const u8* pixels = NULL;
+        if ( !gpu_get_last_rendered_canvas(milton->renderer, &pixels, &e->sample_view) ) {
+            if ( !e->waiting ) { milton_log("Color sampling is waiting for the first completed canvas frame.\n"); }
+            e->waiting = true;
+            return;
+        }
+        size_t bytes = (size_t)e->sample_view.screen_size.w * e->sample_view.screen_size.h * 4;
+        e->buffer = (u8*)mlt_calloc(bytes, 1, "Bitmap");
+        memcpy(e->buffer, pixels, bytes);
+        e->waiting = false;
     }
 }
 
 void
-eyedropper_input(Eyedropper* e, MiltonGui* gui, i32 w, i32 h, v2i point)
+eyedropper_input(Eyedropper* e, MiltonGui* gui, i32 w, i32 h, v2i point, CanvasView* view = NULL)
 {
-
+    if ( !e->buffer ) { return; }
+    if ( view ) {
+        if ( point.x < 0 || point.y < 0 || point.x >= view->screen_size.w || point.y >= view->screen_size.h ) { return; }
+        const CanvasView& source = e->sample_view;
+        double dx = (point.x + 0.5 - view->zoom_center.x) * (view->flipped ? -1 : 1);
+        double dy = point.y + 0.5 - view->zoom_center.y;
+        double c = cos(view->angle), s = sin(view->angle);
+        double wx = ((double)view->pan_center.x - source.pan_center.x)
+                    + view->scale * (c * dx - s * dy);
+        double wy = ((double)view->pan_center.y - source.pan_center.y)
+                    + view->scale * (s * dx + c * dy);
+        c = cos(source.angle); s = sin(source.angle);
+        double x = source.zoom_center.x + (source.flipped ? -1 : 1) * (c * wx + s * wy) / source.scale;
+        double y = source.zoom_center.y + (-s * wx + c * wy) / source.scale;
+        if ( x < 0 || x >= w || y < 0 || y >= h ) { return; }
+        point = {(i32)floor(x), (i32)floor(y)};
+    }
     u32* pixels = (u32*)e->buffer;
-    if ( point.y > 0 && point.y <= h && point.x > 0 && point.x <= w ) {
+    if ( point.y >= 0 && point.y < h && point.x >= 0 && point.x < w ) {
         v4f color = color_u32_to_v4f(pixels[point.y * w + point.x]);
         gui_picker_from_rgb(&gui->picker, color.rgb);
     }
@@ -148,6 +168,7 @@ eyedropper_deinit(Eyedropper* e)
         mlt_free(e->buffer, "Bitmap");
         e->buffer = NULL;
     }
+    e->waiting = false;
 }
 
 // Screen-space tip angle in degrees. With tilt enabled the long axis is perpendicular to the pen's lean.
@@ -1097,6 +1118,10 @@ milton_leave_mode(Milton* milton)
 {
     if (milton->current_mode == MiltonMode::EYEDROPPER) {
         eyedropper_deinit(milton->eyedropper);
+        if ( milton->platform && milton->platform->cursor_eyedropper
+             && SDL_GetCursor() == milton->platform->cursor_eyedropper ) {
+            SDL_SetCursor(milton->platform->cursor_pick);
+        }
     }
     MiltonMode leaving = milton->current_mode;
     milton->current_mode = pop_mode(milton);
@@ -1983,11 +2008,12 @@ milton_update_and_render(Milton* milton, MiltonInput const* input)
     }
     else if ( milton->current_mode == MiltonMode::EYEDROPPER ) {
         v2i point = milton->platform->pointer;
-
+        if ( !milton->eyedropper->buffer ) { eyedropper_init(milton); }
         eyedropper_input(milton->eyedropper, milton->gui,
-                         milton->view->screen_size.w,
-                         milton->view->screen_size.h,
-                         point);
+                         milton->eyedropper->sample_view.screen_size.w,
+                         milton->eyedropper->sample_view.screen_size.h,
+                         point, milton->view);
+        platform_update_eyedropper_cursor(milton->platform, gui_get_picker_rgb(milton->gui), milton->gui->scale);
         gpu_update_picker(milton->renderer, &milton->gui->picker);
         if( input->flags & MiltonInputFlags_CLICKUP ) {
             milton_update_brushes(milton);

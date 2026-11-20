@@ -738,7 +738,14 @@ test_tile_cache()
             upper->flags &= ~LayerFlags_VISIBLE;
             aligned("before load");
             changed("pre-load scene must differ from saved scene");
+            gpu_render(r, 0, 0, r->width, r->height);
+            const u8* sampling_pixels = NULL;
+            CanvasView sampling_view = {};
+            check(gpu_get_last_rendered_canvas(r, &sampling_pixels, &sampling_view),
+                  "completed foreground frames must be available for CPU sampling");
             milton_load(&milton);
+            check(!gpu_get_last_rendered_canvas(r, &sampling_pixels, &sampling_view),
+                  "loading another canvas must discard the previous document's sampling frame");
             gpu_update_canvas(r, milton.canvas, view);
             if ( draw_tiles("load") ) {
                 check(r->tile_builds > 0, "load must clear cached tiles");

@@ -20,6 +20,66 @@ cursor_set_and_show(SDL_Cursor* cursor)
     platform_cursor_show();
 }
 
+static SDL_Surface*
+pick_cursor_surface(i32 unit, bool swatch, u32 color)
+{
+    const int size = (swatch ? 49 : 32) * unit;
+    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(0, size, size, 32, SDL_PIXELFORMAT_RGBA32);
+    if ( !surface ) {
+        milton_log("Cannot allocate native eyedropper cursor: %s\n", SDL_GetError());
+        return NULL;
+    }
+    SDL_FillRect(surface, NULL, 0);
+    auto fill = [&](int x, int y, int w, int h, u32 value) {
+        SDL_Rect rect = {x * unit, y * unit, w * unit, h * unit};
+        SDL_FillRect(surface, &rect, value);
+    };
+    const u32 white = SDL_MapRGBA(surface->format, 255, 255, 255, 255);
+    const u32 black = SDL_MapRGBA(surface->format, 0, 0, 0, 255);
+    for ( int pass = 0; pass < 2; ++pass ) {
+        int t = pass == 0 ? 2 : 0;
+        u32 value = pass == 0 ? white : black;
+        for ( int i = 3; i <= 14; ++i ) {
+            for ( int w = -t; w <= 1 + t; ++w ) {
+                fill(15 - i, 15 + w, 1, 1, value); fill(16 + i, 15 + w, 1, 1, value);
+                fill(15 + w, 15 - i, 1, 1, value); fill(15 + w, 16 + i, 1, 1, value);
+            }
+        }
+    }
+    if ( swatch ) {
+        const v4i c = color_u32_to_v4i(color);
+        fill(33, 33, 16, 16, black);
+        fill(34, 34, 14, 14, white);
+        fill(35, 35, 12, 12, SDL_MapRGBA(surface->format, (u8)c.r, (u8)c.g, (u8)c.b, 255));
+    }
+    return surface;
+}
+
+void
+platform_update_eyedropper_cursor(PlatformState* platform, v3f rgb, f32 scale)
+{
+    const u32 color = color_v4i_to_u32(v4i{(i32)roundf(rgb.r * 255), (i32)roundf(rgb.g * 255),
+                                           (i32)roundf(rgb.b * 255), 255});
+    const i32 unit = clamp((i32)roundf(scale), 1, 4);
+    if ( platform->cursor_eyedropper_scale == unit && platform->cursor_eyedropper_color == color ) { return; }
+    SDL_Cursor* previous = platform->cursor_eyedropper;
+    SDL_Cursor* cursor = NULL;
+    SDL_Surface* surface = pick_cursor_surface(unit, true, color);
+    if ( surface ) {
+        cursor = SDL_CreateColorCursor(surface, 15 * unit, 15 * unit);
+        if ( !cursor ) { milton_log("Cannot create native eyedropper cursor: %s; using the plain crosshair.\n", SDL_GetError()); }
+        SDL_FreeSurface(surface);
+    }
+    SDL_Cursor* current = SDL_GetCursor();
+    if ( current == platform->cursor_pick || (previous && current == previous) ) {
+        cursor_set_and_show(cursor ? cursor : platform->cursor_pick);
+    }
+    if ( previous ) { SDL_FreeCursor(previous); }
+    platform->cursor_eyedropper = cursor;
+    platform->cursor_eyedropper_color = color;
+    platform->cursor_eyedropper_scale = unit;
+}
+
 #if MILTON_HARDWARE_BRUSH_CURSOR
 static SDL_Surface*
 brush_cursor_surface(i32 radius, i32 shape, f32 aspect, f32 angle)
@@ -82,6 +142,13 @@ platform_update_brush_cursor(PlatformState* platform, i32 radius, i32 shape, f32
            && SDL_ShowCursor(SDL_QUERY) == SDL_ENABLE;
 }
 #endif
+
+static bool
+eyedropper_uses_tablet(Milton* milton, const MiltonInput* input)
+{
+    return EasyTab && EasyTab->PenInProximity
+           && (milton->current_mode == MiltonMode::EYEDROPPER || input->mode_to_set == MiltonMode::EYEDROPPER);
+}
 
 LayoutType
 get_current_keyboard_layout()
@@ -548,6 +615,7 @@ sdl_event_loop(Milton* milton, PlatformState* platform)
                 if (event.motion.windowID != platform->window_id) {
                     break;
                 }
+                if ( eyedropper_uses_tablet(milton, &milton_input) ) { break; }
 
                 input_point = {event.motion.x, event.motion.y};
 
@@ -939,27 +1007,11 @@ milton_main(bool is_fullscreen, char* file_to_open)
         platform.cursor_sizeall   = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEALL);
 
         platform.cursor_pick = platform.cursor_crosshair;
-        const int cs = 32, c0 = 15;
-        SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormat(0, cs, cs, 32, SDL_PIXELFORMAT_RGBA32);
+        SDL_Surface* surf = pick_cursor_surface(1, false, 0);
         if ( surf ) {
-            SDL_FillRect(surf, NULL, 0);
-            auto px = [&](int x, int y, u32 col) {
-                if ( x >= 0 && y >= 0 && x < cs && y < cs ) { ((u32*)surf->pixels)[y * (surf->pitch / 4) + x] = col; }
-            };
-            const u32 white = SDL_MapRGBA(surf->format, 255, 255, 255, 255);
-            const u32 black = SDL_MapRGBA(surf->format, 0, 0, 0, 255);
-            for ( int pass = 0; pass < 2; ++pass ) {
-                int t = pass == 0 ? 2 : 0;  // Outline grows 2 px each side of the 2 px core.
-                u32 col = pass == 0 ? white : black;
-                for ( int i = 3; i <= 14; ++i ) {
-                    for ( int w = -t; w <= 1 + t; ++w ) {
-                        px(c0 - i, c0 + w, col); px(c0 + 1 + i, c0 + w, col);
-                        px(c0 + w, c0 - i, col); px(c0 + w, c0 + 1 + i, col);
-                    }
-                }
-            }
-            SDL_Cursor* cur = SDL_CreateColorCursor(surf, c0, c0);
+            SDL_Cursor* cur = SDL_CreateColorCursor(surf, 15, 15);
             if ( cur ) { platform.cursor_pick = cur; }
+            else { milton_log("Cannot create pick crosshair: %s\n", SDL_GetError()); }
             SDL_FreeSurface(surf);
         }
 
@@ -977,6 +1029,16 @@ milton_main(bool is_fullscreen, char* file_to_open)
         ImGuiIO& imgui_io = ImGui::GetIO();
 
         MiltonInput milton_input = sdl_event_loop(milton, &platform);
+        if ( eyedropper_uses_tablet(milton, &milton_input) && SDL_GetKeyboardFocus() == window
+             && platform.pointer.x >= 0 && platform.pointer.x < platform.width
+             && platform.pointer.y >= 0 && platform.pointer.y < platform.height ) {
+            v2l point = VEC2L(platform.pointer);
+            platform_pixel_to_point(&platform, &point);
+            if ( platform_cursor_get_position(&platform) != platform.pointer ) {
+                // Unlike platform_cursor_set_position, do not flush queued pen or mouse samples.
+                SDL_WarpMouseInWindow(window, (int)point.x, (int)point.y);
+            }
+        }
 
         // Handle pen orientation to switch to eraser or pen.
         if ( EasyTab != NULL && EasyTab->PenInProximity ) {
@@ -1125,7 +1187,8 @@ milton_main(bool is_fullscreen, char* file_to_open)
                     else if ( milton->current_mode == MiltonMode::EYEDROPPER
                               || (current_mode_is_for_drawing(milton) && (SDL_GetModState() & KMOD_ALT)
                                   && !platform.is_right_button_down) ) {
-                        cursor_set_and_show(platform.cursor_pick);
+                        cursor_set_and_show(milton->current_mode == MiltonMode::EYEDROPPER && platform.cursor_eyedropper
+                                            ? platform.cursor_eyedropper : platform.cursor_pick);
                         platform.is_pointer_down = false;
                     }
                     else if ( milton->gui->visible
@@ -1299,7 +1362,6 @@ milton_main(bool is_fullscreen, char* file_to_open)
         PROFILE_GRAPH_BEGIN(GL);
         milton_update_and_render(milton, &milton_input);
         selection_draw_overlay(milton);
-        gui_rendering_indicator(milton);
         gui_perf_stats(milton);
         optimize_draw(milton);
         {
@@ -1356,6 +1418,10 @@ milton_main(bool is_fullscreen, char* file_to_open)
     }
 
     gui_save_tool_state(milton);
+    if ( platform.cursor_eyedropper ) {
+        SDL_SetCursor(platform.cursor_default);
+        SDL_FreeCursor(platform.cursor_eyedropper);
+    }
 #if MILTON_HARDWARE_BRUSH_CURSOR
     if ( platform.cursor_brush_outline ) {
         SDL_SetCursor(platform.cursor_default);

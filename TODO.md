@@ -72,9 +72,23 @@ there is no canvas-format change or permanent flattening.
   replay fallbacks remain atomic and replace the preview without a fade.
 - [x] Explicitly restore worker viewport/VAO state for full and reduced-resolution
   jobs so preview raster pixels correspond to their published camera metadata.
-- [x] Show a thin, noninteractive animated bar at the canvas top during queued
-  or active rendering, including full replay and idle peripheral previews.
-  Hide it when idle, without treating stale foreground upload counts as work.
+- [x] Show a noninteractive pulsing blue dot beside the resource readout during
+  queued or active rendering, including full replay and idle peripheral previews.
+  Hide it when idle or the readout is disabled, without treating stale foreground
+  upload counts as work.
+- [x] Show the eyedropper's currently picked color in a small bordered native
+  cursor swatch, updated after sampling and cached by color/DPI rather than
+  pointer position. Keep motion independent of GPU presentation; retain the
+  plain crosshair for lasso and Alt hover, and the normal cursor over UI.
+- [x] Match native swatch packing to the HSV selection, including mixed colors
+  and gray. Keep tablet picking authoritative over mouse aliases, synchronize
+  the native cursor to the pen without flushing samples, and use zero-based
+  pixel bounds when sampling near canvas edges.
+- [x] Pin the last completed full-quality frame for CPU-only eyedropper sampling.
+  Read pixels on the rendering worker, transfer ownership with completed frames,
+  and keep previews/partial results out of the sampling cache. Picking does not
+  replay strokes or wait for GPU readback; map camera changes into the captured
+  view and defer sampling nonblockingly until the first complete frame exists.
 
 - [x] Canvas-space 256-pixel tile cores with sampling gutters and power-of-two
   resolution levels, including negative coordinates.

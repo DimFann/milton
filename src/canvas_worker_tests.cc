@@ -29,31 +29,45 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
         io.DisplaySize = ImVec2((float)r->width, (float)r->height);
         io.Fonts->AddFontDefault();
         io.Fonts->Build();
-        bool menu_visible = milton->gui->menu_visible;
-        for ( int menu = 0; menu < 2; ++menu ) {
-            milton->gui->menu_visible = menu != 0;
+        io.DeltaTime = 0.25f;
+        int previous_alpha = -1;
+        const ImVec2 center(io.DisplaySize.x - 20, io.DisplaySize.y - 20);
+        for ( int pulse = 0; pulse < 2; ++pulse ) {
             ImGui::NewFrame();
-            float top = menu ? ImGui::GetFrameHeight() : 0;
-            io.MousePos = ImVec2(io.DisplaySize.x * 0.5f, top + 1);
-            gui_rendering_indicator(milton);
+            io.MousePos = center;
+            gui_rendering_indicator(milton, center);
             ImDrawList* draw = ImGui::GetOverlayDrawList();
-            check((draw->VtxBuffer.Size > 0) == visible, "render bar must disappear when idle");
+            check((draw->VtxBuffer.Size > 0) == visible, "render dot must disappear when idle");
             if ( visible ) {
                 float min_y = FLT_MAX, max_y = -FLT_MAX, min_x = FLT_MAX, max_x = -FLT_MAX;
+                int alpha = 0;
                 for ( const ImDrawVert& vertex : draw->VtxBuffer ) {
                     min_y = min(min_y, vertex.pos.y); max_y = max(max_y, vertex.pos.y);
                     min_x = min(min_x, vertex.pos.x); max_x = max(max_x, vertex.pos.x);
+                    alpha = max(alpha, (int)(vertex.col >> IM_COL32_A_SHIFT));
                 }
-                check(min_y == top && max_y - min_y <= max(2.0f, 3 * milton->gui->scale)
-                      && min_x == 0 && max_x == io.DisplaySize.x,
-                      "render bar must span the canvas top and remain only a few pixels thick");
+                check(max_y - min_y <= 10 * milton->gui->scale && max_x - min_x <= 10 * milton->gui->scale
+                      && fabsf((min_x + max_x) * 0.5f - center.x) < 1
+                      && fabsf((min_y + max_y) * 0.5f - center.y) < 1,
+                      "render dot must remain compact at the resource-readout position");
+                check(alpha > 0 && alpha != previous_alpha, "render dot must pulse while work is active");
+                previous_alpha = alpha;
             }
             ImGui::Render();
-            check(!io.WantCaptureMouse, "render bar must not intercept canvas input");
+            check(!io.WantCaptureMouse, "render dot must not intercept canvas input");
         }
-        milton->gui->menu_visible = menu_visible;
         ImGui::DestroyContext();
         ImGui::SetCurrentContext(previous);
+        if ( visible ) {
+            PlatformState pointer = {};
+            pointer.cursor_pick = SDL_GetCursor();
+            platform_update_eyedropper_cursor(&pointer, v3f{0.25f, 0.5f, 0.75f}, 1);
+            check(pointer.cursor_eyedropper && SDL_GetCursor() == pointer.cursor_eyedropper
+                  && gpu_canvas_rendering(r),
+                  "eyedropper swatch must install on the native cursor while reconstruction is blocked");
+            SDL_SetCursor(pointer.cursor_pick);
+            if ( pointer.cursor_eyedropper ) { SDL_FreeCursor(pointer.cursor_eyedropper); }
+        }
     };
     auto clip = [&](ClipFlags flags) {
         gpu_clip_strokes_and_update(&milton->root_arena, r, view, view->scale, milton->canvas->root_layer,
@@ -666,6 +680,27 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
             check(r->tiles->display_ready && !r->tiles->display_preview
                   && memcmp(actual, expected, (size_t)r->width * r->height * 4) == 0,
                   "starting a stroke must retain rendered paint while the worker is blocked");
+            if ( tool == 0 ) {
+                Eyedropper sample = {};
+                Eyedropper* saved_eyedropper = milton->eyedropper;
+                milton->eyedropper = &sample;
+                int request = worker->requested_generation;
+                u64 began = SDL_GetPerformanceCounter();
+                eyedropper_init(milton);
+                double elapsed = canvas_profile_elapsed(began);
+                bool matches = sample.buffer && sample.sample_view.screen_size == view->screen_size;
+                size_t row_bytes = (size_t)r->width * 4;
+                for ( int y = 0; matches && y < r->height; ++y ) {
+                   matches = memcmp(sample.buffer + y * row_bytes,
+                                    expected + (r->height - 1 - y) * row_bytes, row_bytes) == 0;
+                }
+                check(matches && worker->requested_generation == request && SDL_AtomicGet(&worker->hold),
+                     "picking while rendering must copy the last completed frame, not replay the pending stroke");
+                check(elapsed < 50, "starting cached color picking must not wait for reconstruction");
+                fprintf(stdout, "Cached eyedropper start with blocked renderer: %.2f ms\n", elapsed);
+                eyedropper_deinit(&sample);
+                milton->eyedropper = saved_eyedropper;
+            }
             check(worker->history.count == 0, "new paint must invalidate cached peripheral artwork");
             working->pressures[1] = 0.6f;
             frame();

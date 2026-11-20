@@ -75,6 +75,9 @@ struct PlatformState
     SDL_Cursor* cursor_hand;
     SDL_Cursor* cursor_crosshair;
     SDL_Cursor* cursor_pick;  // High-contrast crosshair for the eyedropper and lasso.
+    SDL_Cursor* cursor_eyedropper;
+    u32 cursor_eyedropper_color;
+    i32 cursor_eyedropper_scale;
     SDL_Cursor* cursor_sizeall;
     SDL_Cursor* cursor_brush;  // Custom cursor.
 #if MILTON_HARDWARE_BRUSH_CURSOR
@@ -115,6 +118,7 @@ void    platform_init(PlatformState* platform, SDL_SysWMinfo* sysinfo);
 void    platform_deinit(PlatformState* platform);
 
 void    platform_setup_cursor(Arena* arena, PlatformState* platform);
+void    platform_update_eyedropper_cursor(PlatformState* platform, v3f rgb, f32 scale);
 #if MILTON_HARDWARE_BRUSH_CURSOR
 bool    platform_update_brush_cursor(PlatformState* platform, i32 radius, i32 shape, f32 aspect, f32 angle);
 #endif

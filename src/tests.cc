@@ -97,6 +97,25 @@ test_windows_ink()
     passed = passed && platform.num_point_results == 40 && platform.num_pressure_results == 40
              && input.points[0].x == 33 && input.points[39].x == 72 && input.pressures[39] == 1.0f;
 
+    milton.current_mode = MiltonMode::EYEDROPPER;
+    test_ink_message(hwnd, WM_POINTERUPDATE, 90, 3, false);
+    SDL_Event alias = {};
+    alias.type = SDL_MOUSEMOTION;
+    alias.motion.windowID = platform.window_id;
+    alias.motion.x = 4; alias.motion.y = 5;
+    passed = passed && SDL_PushEvent(&alias) == 1;
+    input = sdl_event_loop(&milton, &platform);
+    passed = passed && platform.pointer == v2i{92, 20} && platform.num_point_results == 0
+             && eyedropper_uses_tablet(&milton, &input);
+    test_ink_message(hwnd, WM_POINTERUP, 93, 1, true);
+    input = sdl_event_loop(&milton, &platform);
+    passed = passed && platform.pointer == v2i{93, 20} && (input.flags & MiltonInputFlags_CLICKUP);
+    tablet.PenInProximity = EASYTAB_FALSE;
+    alias.motion.x = 120; alias.motion.y = 130;
+    passed = passed && SDL_PushEvent(&alias) == 1;
+    input = sdl_event_loop(&milton, &platform);
+    passed = passed && platform.pointer == v2i{120, 130} && !eyedropper_uses_tablet(&milton, &input);
+
     ink_deinit();
     EasyTab = NULL;
     ImGui::DestroyContext();
@@ -258,6 +277,104 @@ test_picker_slider_input()
     if ( !passed ) {
         fprintf(stderr, "HSV slider did not respond to dragging or typed input\n");
     }
+    return passed;
+}
+
+static bool
+test_eyedropper_preview()
+{
+    if ( SDL_Init(SDL_INIT_VIDEO) != 0 ) {
+        fprintf(stderr, "Cannot initialize eyedropper cursor test: %s\n", SDL_GetError());
+        return false;
+    }
+    SDL_Window* window = SDL_CreateWindow("Eyedropper cursor test", 0, 0, 64, 64, SDL_WINDOW_HIDDEN);
+    if ( !window ) {
+        fprintf(stderr, "Cannot create eyedropper test window: %s\n", SDL_GetError());
+        SDL_Quit();
+        return false;
+    }
+    MiltonGui gui = {};
+    PlatformState platform = {};
+    gui.picker.bounds_radius_px = 40;
+    platform.cursor_pick = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR);
+    if ( !platform.cursor_pick ) {
+        fprintf(stderr, "Cannot create eyedropper test crosshair: %s\n", SDL_GetError());
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return false;
+    }
+    SDL_SetCursor(platform.cursor_pick);
+    u32 pixels[4] = {};
+    Eyedropper eyedropper = {};
+    eyedropper.buffer = (u8*)pixels;
+    bool passed = true;
+    auto check = [&](bool condition, const char* message) {
+        if ( !condition ) { fprintf(stderr, "Eyedropper preview FAILED: %s\n", message); passed = false; }
+    };
+    const v4i colors[] = {{0, 0, 255, 255}, {255, 0, 0, 255},
+                          {23, 147, 211, 255}, {102, 102, 102, 255}};
+    for ( int unit = 1; unit <= 2; ++unit ) {
+        for ( v4i color : colors ) {
+            pixels[3] = (u32)color.r | ((u32)color.g << 8) | ((u32)color.b << 16) | (255u << 24);
+            eyedropper_input(&eyedropper, &gui, 2, 2, v2i{1, 1});
+            const v3f selected = gui_get_picker_rgb(&gui);
+            check((i32)roundf(selected.r * 255) == color.r && (i32)roundf(selected.g * 255) == color.g
+                  && (i32)roundf(selected.b * 255) == color.b, "resulting HSV must preserve the sampled RGB channels");
+            platform_update_eyedropper_cursor(&platform, gui_get_picker_rgb(&gui), (f32)unit);
+            check(platform.cursor_eyedropper && SDL_GetCursor() == platform.cursor_eyedropper,
+                  "sampled color must install a native cursor without presenting a GPU frame");
+            SDL_Cursor* cursor = platform.cursor_eyedropper;
+            platform.pointer = {319, 199};
+            platform_update_eyedropper_cursor(&platform, gui_get_picker_rgb(&gui), (f32)unit);
+            check(platform.cursor_eyedropper == cursor, "cursor movement must not rebuild swatch resources");
+            SDL_Surface* surface = pick_cursor_surface(unit, true, platform.cursor_eyedropper_color);
+            check(surface != NULL, "native cursor pixels must be available");
+            if ( surface ) {
+                auto pixel = [&](int x, int y) {
+                    return ((u32*)((u8*)surface->pixels + y * unit * surface->pitch))[x * unit];
+                };
+                check(pixel(35, 35) == SDL_MapRGBA(surface->format, (u8)color.r, (u8)color.g, (u8)color.b, 255)
+                      && pixel(33, 33) == SDL_MapRGBA(surface->format, 0, 0, 0, 255)
+                      && pixel(34, 34) == SDL_MapRGBA(surface->format, 255, 255, 255, 255),
+                      "native swatch must preserve the sampled color and contrasting borders");
+                check(pixel(15, 15) == 0, "native swatch must not cover the sampling hotspot");
+                SDL_FreeSurface(surface);
+            }
+            pixels[0] = color_v4f_to_u32(v4f{0, 1, 0, 1});
+            eyedropper_input(&eyedropper, &gui, 2, 2, v2i{0, 0});
+            check(gui_get_picker_rgb(&gui) == v3f{0, 1, 0}, "top-left pixel must be sampled using zero-based bounds");
+            eyedropper_input(&eyedropper, &gui, 2, 2, v2i{2, 2});
+            check(gui_get_picker_rgb(&gui) == v3f{0, 1, 0}, "out-of-bounds tablet coordinates must not read past the sample image");
+            pixels[1] = color_v4f_to_u32(v4f{0, 0, 1, 1});
+            eyedropper.sample_view.scale = 100;
+            eyedropper.sample_view.screen_size = {2, 2};
+            eyedropper.sample_view.zoom_center = {1, 1};
+            CanvasView transformed = eyedropper.sample_view;
+            transformed.pan_center.x = 100;
+            eyedropper_input(&eyedropper, &gui, 2, 2, v2i{0, 0}, &transformed);
+            check(gui_get_picker_rgb(&gui) == v3f{0, 0, 1}, "sampling a cached frame must account for a newer camera pan");
+            transformed = eyedropper.sample_view;
+            transformed.flipped = true;
+            eyedropper_input(&eyedropper, &gui, 2, 2, v2i{0, 0}, &transformed);
+            check(gui_get_picker_rgb(&gui) == v3f{0, 0, 1}, "sampling a cached frame must account for a flipped camera");
+        }
+    }
+    Milton mode = {};
+    Eyedropper empty = {};
+    mode.current_mode = MiltonMode::EYEDROPPER;
+    mode.eyedropper = &empty;
+    mode.platform = &platform;
+    milton_leave_mode(&mode);
+    check(SDL_GetCursor() == platform.cursor_pick, "leaving eyedropper mode must remove the color swatch immediately");
+    SDL_SetCursor(SDL_GetDefaultCursor());
+    platform_update_eyedropper_cursor(&platform, v3f{0, 1, 0}, 1);
+    check(SDL_GetCursor() == SDL_GetDefaultCursor(), "color updates must not replace the normal UI cursor");
+    if ( platform.cursor_eyedropper ) { SDL_FreeCursor(platform.cursor_eyedropper); }
+    SDL_FreeCursor(platform.cursor_pick);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    fprintf(passed ? stdout : stderr, "Native eyedropper color, DPI and pointer-independent caching: %s\n",
+            passed ? "passed" : "FAILED");
     return passed;
 }
 
@@ -1352,6 +1469,12 @@ main(int argc, char** argv)
 #endif
     if ( argc == 2 && strcmp(argv[1], "--tile-cache") == 0 ) {
         return test_tile_cache() ? 0 : 1;
+    }
+    if ( argc == 2 && strcmp(argv[1], "--eyedropper-preview") == 0 ) {
+#if defined(_WIN32)
+        if ( !test_windows_ink() ) { return 1; }
+#endif
+        return test_eyedropper_preview() ? 0 : 1;
     }
 #if defined(_WIN32)
     if ( argc == 2 && strcmp(argv[1], "--vram-stats") == 0 ) {

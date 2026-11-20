@@ -1617,18 +1617,13 @@ gui_menu(MiltonInput* input, PlatformState* platform, Milton* milton, b32& show_
 
 
 static void
-gui_rendering_indicator(Milton* milton)
+gui_rendering_indicator(Milton* milton, ImVec2 center)
 {
     if ( !gpu_canvas_rendering(milton->renderer) ) { return; }
-    const f32 width = ImGui::GetIO().DisplaySize.x;
-    const f32 top = milton->gui->menu_visible ? ImGui::GetFrameHeight() : 0.0f;
-    const f32 bottom = top + max(2.0f, floorf(2 * milton->gui->scale));
-    const f32 phase = (f32)fmod(ImGui::GetTime(), 2.0);
-    const f32 left = (phase <= 1 ? phase : 2 - phase) * width * 0.75f;
-    ImDrawList* dl = ImGui::GetOverlayDrawList();
-    dl->AddRectFilled(ImVec2(0, top), ImVec2(width, bottom),
-                      milton->settings->light_theme ? IM_COL32(0, 0, 0, 55) : IM_COL32(255, 255, 255, 45));
-    dl->AddRectFilled(ImVec2(left, top), ImVec2(left + width * 0.25f, bottom), IM_COL32(0, 160, 255, 255));
+    const f32 pulse = 0.5f + 0.5f * (f32)sin(ImGui::GetTime() * 2 * kPi);
+    const int alpha = (int)(100 + 155 * pulse);
+    ImGui::GetOverlayDrawList()->AddCircleFilled(center, milton->gui->scale * 3,
+                                                IM_COL32(0, 160, 255, alpha), 16);
 }
 
 // Faint CPU / GPU / memory readout in the bottom centre, refreshed about once a second.
@@ -1680,12 +1675,14 @@ gui_perf_stats(Milton* milton)
     f32 fsize = ImGui::GetFontSize() * 0.8f;
     ImVec2 sz = font->CalcTextSizeA(fsize, FLT_MAX, 0.0f, text);
     f32 pad = ui * 5;
-    ImVec2 p0 = ImVec2((ds.x - sz.x) * 0.5f - pad, ds.y - sz.y - pad * 2 - ui * 4);
-    ImVec2 p1 = ImVec2(p0.x + sz.x + pad * 2, p0.y + sz.y + pad * 2);
+    f32 dot_space = ui * 14;
+    ImVec2 p0 = ImVec2((ds.x - sz.x - dot_space) * 0.5f - pad, ds.y - sz.y - pad * 2 - ui * 4);
+    ImVec2 p1 = ImVec2(p0.x + sz.x + dot_space + pad * 2, p0.y + sz.y + pad * 2);
     ImDrawList* dl = ImGui::GetOverlayDrawList();
     const bool light = milton->settings->light_theme != 0;
     dl->AddRectFilled(p0, p1, light ? IM_COL32(255, 255, 255, 70) : IM_COL32(0, 0, 0, 90), ui * 4);
     dl->AddText(font, fsize, ImVec2(p0.x + pad, p0.y + pad), light ? IM_COL32(30, 30, 30, 170) : IM_COL32(230, 230, 230, 160), text);
+    gui_rendering_indicator(milton, ImVec2(p0.x + pad + sz.x + ui * 8, p0.y + pad + sz.y * 0.5f));
 }
 void
 milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, PlatformSettings* prefs)

@@ -726,6 +726,7 @@ gpu_render_tile_cache(RenderBackend* r, i32, i32, i32, i32)
         cache->worker = *r;
         RenderBackend* w = &cache->worker;
         w->tiles = NULL;
+        w->sampling_pixels = NULL;
         w->tile_internal = true;
         w->canvas_texture = w->eraser_texture = w->helper_texture = w->stroke_info_texture = w->stencil_texture = 0;
         w->opacity_history_texture = w->opacity_stroke_texture = 0;

@@ -145,6 +145,8 @@ void  pressure_curve_reset(MiltonSettings* s);
 struct Eyedropper
 {
     u8* buffer;
+    CanvasView sample_view;
+    bool waiting;
 };
 
 struct SmoothFilter
