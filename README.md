@@ -5,40 +5,23 @@ This fork adds some quality of life features I've been wanting for years, as wel
 
 ### Downloading
 [Releases](https://github.com/DimFann/milton/releases)
-1) Download milton_YYYYMMDD_HHmm.zip from the latest release.
+1) Download milton_YYYYMMDD.HHmmss.zip from the latest release.
 2) Extract to a folder of your choosing.
 3) Run milton.exe
 
 ### Notable additions
 * Rebindable hotkeys
 * Reorganized UI, with dark mode
-* Bottom resource stats show dedicated GPU VRAM usage versus physical capacity, plus Milton's own VRAM usage when available. Figures refresh about once a second; unavailable counters show `n/a`.
+* Resource usage readout
 * Pressure response tuning, pressure and position smoothing
 * Pen and eraser pressure-opacity options are saved separately, including when you quit with the eraser active. Opening a canvas keeps the current pressure-opacity option.
 * From 8 to 16 bit color values for smoother stroke appearances
-* The triangle color picker keeps the selected hue fully saturated along the edge from pure hue to black.
-* Below the color wheel, H/S/V sliders preview the colors they produce. Type a hue in degrees or saturation and value as percentages, then press Enter. Ten recent color swatches sit below the sliders.
+* Improved/expanded color picker
 * Better precision for stroke placement
 * Allow for deeper zoom, start canvas zoom further out for more in/out by default.
 * Variable hardness for brush and eraser + other brush options & tilt support
-* Preserve opacity has been removed, including its Pen option and shortcut. Older canvases still load, but previously preserving strokes now accumulate opacity as ordinary paint, which can change their appearance. Old toggle bindings are discarded without resetting other settings or shortcuts.
 * Rectangular brushes
-* On Windows, brush outlines up to 255 pixels across use OS-managed cursors, including rectangular shape, aspect, and rotation, so their position does not wait for canvas rendering or reconstruction. Larger brushes retain a system-tracked tip with a separate canvas footprint preview; the footprint can update later while rendering is busy.
-* Brush resizing takes priority over canvas reconstruction and fades: scrub resizing, brush-preview sliders, and size shortcuts hold the current canvas image while the size feedback updates. Background work and the paused fade resume after 120 ms of settling; drawing or canvas navigation takes priority over that hold.
-* Pan, zoom, and rotation controls display the updated view immediately. This includes held controls, wheel zoom, and direct menu/view changes. After settling, completed native tiles replace the preview immediately; normal background rendering no longer adds a whole-view fade.
-* A pulsing blue dot beside the bottom resource readout indicates queued or active rendering, including navigation previews and idle peripheral snapshots. It disappears when processing finishes and follows the resource-readout visibility setting.
-* While using the eyedropper, a small bordered swatch in the OS-managed cursor shows the currently picked color, matching the resulting HSV selection. Its position follows the cursor independently of canvas/GPU redraws; tablet picking synchronizes the native cursor to the pen without flushing queued samples or accepting stale mouse aliases. Like other native cursors, it can extend beyond the canvas edge.
-* Eyedropper sampling pins a CPU copy of the last completed full-quality canvas, rather than forcing a render or GPU readback when picking starts. Pending paint is not included until a later picking session; camera changes are mapped into the captured view. If no completed frame exists yet, picking waits for that first frame without blocking input. On the normal threaded path, completed-frame readbacks run on the render worker; retained sampling pixels and the active pick snapshot consume additional CPU memory, not navigation-cache VRAM.
-* Camera navigation transforms an immutable GPU snapshot instead of redrawing foreground strokes. Temporary zoom softness is expected. Newly exposed areas fill asynchronously from half-resolution, effect-free worker previews while the original snapshot retains its appearance; uncovered areas show the canvas background until coverage arrives. Accurate paint replaces the preview after settling. Undo, selection transforms, and incompatible scene edits invalidate the snapshot so stale artwork is not retained.
-* **Settings > Navigation cache** controls VRAM retained for previously rendered regions: **64–2048 MiB**, default **512 MiB**. Full-quality views and lower-resolution gap previews are reused immediately when panning back, with full-quality coverage preferred. Memory grows on demand; least-recently-used views are freed when the target is exceeded or lowered. This is an additional preview-cache target, not a cap on total application VRAM. Artwork, layer, background, and history changes discard flattened previews to prevent stale paint; unvisited regions can still briefly show background. Offscreen and already-covered previews are skipped during presentation.
-* After **200 ms of render-worker idle time**, low-priority, effect-free previews cover the surrounding area (at least four viewport spans) and the whole visible artwork. They are refreshed after stable camera/artwork changes, not redrawn endlessly while nothing changes. Both 512-pixel-square levels share the navigation-cache budget and are preferentially retained, so zooming out can show context before accurate reconstruction finishes. Pending foreground work takes priority between preview jobs. Separate worker-owned overview resources preserve the drawing renderer's warm replay cache.
-* Undo/redo also cancel active or resize-paused fades immediately. Each edit shows the updated inexpensive preview without reconstructing tiles first; full-quality refinement resumes after 120 ms of settling.
-* Window events, keyboard/tablet input, UI, snapshot navigation, and presentation stay on the main thread. Expensive blur reconstruction and navigation gap previews run on a dedicated, lower-priority thread with its own OpenGL context, programs, buffers, and tile cache. Immutable scene snapshots share unchanged stroke samples; only the latest queued request is retained. Navigation cancels incompatible requests without waiting for the worker; compatible camera previews can finish and be reprojected while newer views are queued. Completed whole-view textures are handed back only after GPU writes finish, and incompatible results are rejected.
-* Drawing retains the last full-quality image for the current view instead of switching to the effect-free preview. In-flight stroke updates finish and display while only the latest newer snapshot is queued, so continuous drawing does not starve rendering. Stroke commits retain that progress too. New ink, including blur-brush updates, arrives asynchronously; the preview remains necessary until the first valid full-quality frame exists. Navigation, undo/redo, and incompatible scene edits still discard obsolete frames immediately. Existing fades and resize priority still apply. Completion events wake an idle UI rather than requiring it to poll. Frame-cap waits also wake on input, and shortcuts use each key event's recorded modifiers. An already-submitted GPU job or driver/presentation stall can still delay visible pixels; this is not a hard real-time guarantee. Worker failures are logged and reported before falling back to foreground rendering.
-* **Blur brush (F)** softens existing paint on the current layer without adding the selected color. Select Blur in the left toolbar; size, strength, hardness, and pressure controls appear in Tool Options. Strength ramps up quickly: 75% is approximately the original full-strength effect; previously saved strokes retain their appearance. Each stroke is undoable and saved with the canvas; repeated strokes increase the blur. Layer optimization and erased-stroke cleanup are disabled on layers containing blur strokes.
-    * Canvas-space tiles retain completed layer paint and composited results across pan, zoom, rotation, and viewport resize. Resident resolution levels remain reusable without replaying effects. Camera navigation uses the snapshot and asynchronous gap previews until all navigation controls are released and the view has settled for 120 ms, then refines incrementally. Each batch of completed native tiles appears over the retained preview immediately; unfinished regions remain preview rather than becoming blank. There is no whole-view fade on the normal worker path. Resident coarse/fine levels can also provide immediate coverage during native-resolution refinement. Blur-heavy dependency/workspace fallbacks still require a complete full replay; the preview remains visible and the completed result replaces it without an additional fade. Moving, scaling, or rotating a lasso selection uses the inexpensive blur-free stroke preview and pauses expensive effects for the entire drag. The foreground compatibility renderer retains its legacy 50/100 ms fades. Undo/redo and earlier edits invalidate dependent tiles without changing saved artwork. Export always uses the full-quality stroke renderer, never preview tiles.
-    * Full-quality blur masks and composites are limited to padded stroke bounds. Blur only filters the actual layer paint; there are no per-color opacity histories or repeated history-filter passes. Tile-cache implementation details and follow-ups are tracked in [TODO.md](TODO.md).
-    * The worker's tile pool is limited to 128 MiB of GPU textures and its reusable reconstruction workspace to 128 MiB. Main/worker viewport resources, bounded published-frame textures, transition buffers, one pinned navigation snapshot, one retained partial-refinement frame, a half-resolution gap preview, and the overview renderer's 512-square buffers/geometry are additional to the navigation-cache target. Two bounded overview publication slots hand completed images into that cache. Scene snapshots copy changed strokes and share unchanged sample arrays; the request queue does not grow with input frequency. Reconstruction checks cancellation between completed tile jobs, with an approximately 4 ms cooperative batch budget. Large filter/dependency footprints or views exceeding these limits explicitly use the original renderer on the worker. Export remains a synchronous full-quality operation. Tile resampling may differ slightly from direct stroke rasterization; saved strokes and canvas format are unchanged.
+* Blur brush (F)
 * Lasso Functions
     * Arm with S
     * D to delete selected strokes
@@ -49,20 +32,12 @@ This fork adds some quality of life features I've been wanting for years, as wel
     * Hold Alt+RMB + scrub to resize brush, alternatively Ctrl+Alt+Drag (PaintToolSai)
     * Hold Alt for eyedropper
     * Press V to flip canvas horizontally
-* Improved loading times, and responsiveness during loading for stroke-heavy files
+* Tiled loading/rendering, and snapshot-based navigation to smooth out navigation for stroke heavy files.
 
 ### Current Issues
-* Layer optimizer function doesn't catch all stray/orphaned strokes
-* Cut eraser doesn't always cut strokes out
-* Merge Down is temporarily hidden from the Layers panel; the implementation is retained.
-    * Eraser strokes get applied to the layer below, or don't get cut out precisely if using stroke conversion feature.
 * Untested with Wacom/Huion/XP-Pen manufacturer-provided drivers
-* Wintab may not work yet, untested
+* Wintab may not work yet, untested.
 * Only tested with OpenTabletDriver, using WindowsInk plugin by Kuuuube (Absolute).
-
-Milton reads Windows Ink pen position and pressure history before each native message expires. A
-lower display refresh rate can delay the on-screen preview, but it no longer discards the pen samples
-that Windows groups into a single message.
 
 ### Notes, caution, from DimFann
 * I'm not committed to actively maintaining this fork.
@@ -70,8 +45,6 @@ that Windows groups into a single message.
 * The changes made are just what work for how I draw. If you have suggestions DM me on twitter, but the goal of this fork will mostly be to minimize friction with how I want to draw.
 * The vast majority of changes I'll be making and pushing will be implemented by Copilot (AI). At this point I don't think there's a clean path for a merge back into Milton. While that repo seems inactive, I wouldn't want to burden anyone with a huge pile of vibe code if they're by any chance still watching pull requests.
 * I take no credit for the hard work done by Sergio and all other original contributors, or by Copilot for that matter. I'm just someone who draws and really, really, really, misses Mischief.
-
-![LatestUi](https://i.imgur.com/iwFWa1o.png)
 
 **Preserving the readme below for posterity.**
 
@@ -133,6 +106,17 @@ build.bat
 ```
 
 Milton will be compiled to `build\Milton.exe`
+
+### Draft releases
+
+Run `draft-release.bat` to package the existing build into
+`build\milton-yyyymmdd.hhmmss.zip` and upload it to `DimFann/milton` as an
+unpublished draft. The ZIP contains the executable, Carlito font and license,
+application license, and icon, ready to extract into one folder.
+Requires GitHub CLI (`gh`) authenticated
+with `gh auth login`. The tag and title use local time in `yyyymmdd.hhmmss`
+format, with no release notes. The script does not build, commit, or push source;
+GitHub creates the release tag from the remote default branch.
 
 
 This repo provides a binary SDL.lib that was compiled by running
