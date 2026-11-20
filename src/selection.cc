@@ -536,7 +536,7 @@ static bool
 layer_has_replay_dependencies(Layer* layer)
 {
     for ( i64 i = 0; i < layer->strokes.count; ++i ) {
-        if ( get(&layer->strokes, i)->flags & (StrokeFlag_PRESERVE_OPACITY | StrokeFlag_BLUR) ) { return true; }
+        if ( get(&layer->strokes, i)->flags & StrokeFlag_BLUR ) { return true; }
     }
     return false;
 }
@@ -547,7 +547,7 @@ sel_cleanup_layer(Milton* milton, Layer* l)
 {
     if ( !l || l->strokes.count < 2 ) { sel_toast(milton, 0); return; }
     if ( layer_has_replay_dependencies(l) ) {
-        platform_dialog("Cleanup could change the appearance of Preserve opacity or Blur strokes on this layer.", "Cannot clean up layer");
+        platform_dialog("Cleanup could change the appearance of Blur strokes on this layer.", "Cannot clean up layer");
         return;
     }
     i64 count = l->strokes.count;
@@ -810,7 +810,7 @@ optimize_request(Milton* milton)
     if ( g_opt.phase != 0 || !milton->canvas->working_layer ) { return; }
     selection_finish(milton);
     if ( layer_has_replay_dependencies(milton->canvas->working_layer) ) {
-        platform_dialog("Optimization could change the appearance of Preserve opacity or Blur strokes on this layer.", "Cannot optimize layer");
+        platform_dialog("Optimization could change the appearance of Blur strokes on this layer.", "Cannot optimize layer");
         return;
     }
     g_opt.phase = 1;

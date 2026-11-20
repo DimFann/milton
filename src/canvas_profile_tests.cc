@@ -70,18 +70,17 @@ test_profile_canvas(const char* path)
     gpu_update_brush_outline(r, -100, -100, -1);
     r->tile_cache_unlimited = true;
     r->disable_display_transitions = true;
-    i64 strokes = 0, points = 0, blur = 0, preserving = 0;
+    i64 strokes = 0, points = 0, blur = 0;
     for ( Layer* layer = milton.canvas->root_layer; layer; layer = layer->next ) {
         StrokeIterator iterator = {};
         for ( Stroke* s = stroke_iter_init(&layer->strokes, &iterator); s; s = stroke_iter_next(&iterator) ) {
             ++strokes; points += s->num_points;
             blur += (s->flags & StrokeFlag_BLUR) != 0;
-            preserving += (s->flags & StrokeFlag_PRESERVE_OPACITY) != 0;
         }
     }
-    fprintf(stdout, "Canvas profile: %dx%d scale %lld angle %.3f; %lld strokes, %lld samples, %lld blur, %lld preserving; GPU %s\n",
+    fprintf(stdout, "Canvas profile: %dx%d scale %lld angle %.3f; %lld strokes, %lld samples, %lld blur; GPU %s\n",
             width, height, (long long)view->scale, view->angle, (long long)strokes, (long long)points,
-            (long long)blur, (long long)preserving, (const char*)glGetString(GL_RENDERER));
+            (long long)blur, (const char*)glGetString(GL_RENDERER));
     auto clip = [&](ClipFlags flags) {
         gpu_clip_strokes_and_update(&milton.root_arena, r, view, view->scale, milton.canvas->root_layer,
                                     &milton.working_stroke, 0, 0, width, height, flags);
@@ -98,8 +97,8 @@ test_profile_canvas(const char* path)
         if ( !done ) { fprintf(stderr, "Canvas profiling worker timed out or failed\n"); }
         return done;
     };
-    const u32 flags[] = {0, StrokeFlag_ERASER, StrokeFlag_BLUR, StrokeFlag_PRESERVE_OPACITY};
-    const char* tools[] = {"pen", "eraser", "blur", "preserve"};
+    const u32 flags[] = {0, StrokeFlag_ERASER, StrokeFlag_BLUR};
+    const char* tools[] = {"pen", "eraser", "blur"};
     const char* modes[] = {"direct", "tiles", "worker"};
     size_t pixel_bytes = (size_t)width * height * 4;
     u8* actual = (u8*)calloc(max(pixel_bytes, (size_t)512 * 512 * 4), 1);
@@ -110,6 +109,14 @@ test_profile_canvas(const char* path)
         glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
         glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     };
+    r->replay_valid = false;
+    u64 cold_started = SDL_GetPerformanceCounter();
+    clip(ClipFlags_JUST_CLIP);
+    gpu_render_canvas(r, 0, 0, width, height, 1, false);
+    glFinish();
+    double cold_replay_ms = canvas_profile_elapsed(cold_started);
+    fprintf(stdout, "GPU-complete cold replay: %.2f ms; blur_filter_runs %d\n",
+            cold_replay_ms, r->blur_filter_runs);
     for ( int mode = 0; passed && mode < 3; ++mode ) {
         gpu_clear_tile_cache(r);
         reset_working_stroke(&milton);

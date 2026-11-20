@@ -657,23 +657,22 @@ test_blur_performance(Milton* milton)
     };
     double blur_ms = measure(true);
     double cached_blur_ms = measure(false);
-    for ( int i = 0; i < 12; ++i ) { add(i, StrokeFlag_PRESERVE_OPACITY); }
     Stroke* working = &milton->working_stroke;
     working->layer_id = layer->id;
     working->num_points = 2;
     working->points[0] = raster_to_canvas(view, v2l{700, 500});
     working->points[1] = raster_to_canvas(view, v2l{1250, 570});
     working->pressures[0] = working->pressures[1] = 1;
-    working->flags = StrokeFlag_PRESERVE_OPACITY;
+    working->flags = 0;
     working->brush = default_brush();
     working->brush.radius = 32 * view->scale;
     working->brush.color = to_premultiplied(v3f{0.2f, 0.5f, 0.75f}, 0.6f);
     working->bounding_rect = bounding_box_for_stroke(working);
-    double preserving_ms = measure(true);
-    double cached_preserving_ms = measure(false);
+    double pen_ms = measure(true);
+    double cached_pen_ms = measure(false);
     bool passed = r->replay_cache_hit && r->blur_filter_runs == 0;
-    fprintf(stdout, "1080p blur replay uncached/cached: %.2f / %.2f ms; 12 preserving colors + moving pen: %.2f / %.2f ms\n",
-            blur_ms, cached_blur_ms, preserving_ms, cached_preserving_ms);
+    fprintf(stdout, "1080p blur replay uncached/cached: %.2f / %.2f ms; ordinary pen uncached/cached: %.2f / %.2f ms\n",
+            blur_ms, cached_blur_ms, pen_ms, cached_pen_ms);
 
     size_t bytes = (size_t)width * height * 4;
     auto* reference = (u8*)mlt_calloc(bytes, 1, "Blur cache test");
@@ -681,12 +680,8 @@ test_blur_performance(Milton* milton)
     auto read = [&](u8* pixels) { glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels); };
     auto matches_reference = [&]() {
         read(cached);
-        r->disable_opacity_regions = true;
-        r->disable_opacity_history_cache = true;
         draw(true);
         read(reference);
-        r->disable_opacity_regions = false;
-        r->disable_opacity_history_cache = false;
         return memcmp(reference, cached, bytes) == 0;
     };
     passed = passed && matches_reference();
@@ -724,7 +719,7 @@ test_blur_performance(Milton* milton)
     draw(true, true);
     passed = passed && get_render_element(working->render_handle)->revision == working_revision
              && r->blur_filter_runs == 0 && r->opacity_stroke_runs == 0;
-    working->flags = StrokeFlag_PRESERVE_OPACITY;
+    working->flags = 0;
     r->flags |= RenderBackendFlags_NAVIGATION_PREVIEW;
     draw(true);
     read(cached);
@@ -732,7 +727,7 @@ test_blur_performance(Milton* milton)
              && get_render_element(hidden_blur->render_handle)->vbo_stroke != 0
              && memcmp(reference, cached, bytes) == 0;
     r->flags &= ~RenderBackendFlags_NAVIGATION_PREVIEW;
-    fprintf(stdout, "Navigation preview: %.2f ms; no opacity history or hidden blur uploads; full quality restored pixel-for-pixel\n", preview_ms);
+    fprintf(stdout, "Navigation preview: %.2f ms; no blur masks or hidden blur uploads; full quality restored pixel-for-pixel\n", preview_ms);
     working->num_points = 0;
     draw();
     draw();
@@ -746,12 +741,9 @@ test_blur_performance(Milton* milton)
     passed = passed && r->replay_cache_hit && r->blur_filter_runs == 0 && matches_reference();
     working->flags = StrokeFlag_BLUR;
     draw();
-    passed = passed && r->replay_cache_hit && r->blur_filter_runs <= 2 && matches_reference();
-    working->flags = StrokeFlag_PRESERVE_OPACITY;
-    // A different working color reconstructs its history once, then reuses that snapshot.
+    passed = passed && r->replay_cache_hit && r->blur_filter_runs == 1 && matches_reference();
+    working->flags = 0;
     working->brush.color = to_premultiplied(v3f{0.24f, 0.5f, 0.75f}, 0.6f);
-    draw();
-    passed = passed && r->replay_cache_hit && r->blur_filter_runs > 0;
     draw();
     passed = passed && r->replay_cache_hit && r->blur_filter_runs == 0 && matches_reference();
 
@@ -820,65 +812,6 @@ test_blur_performance(Milton* milton)
     passed = passed && !r->replay_cache_hit && matches_reference();
     layer->effects = nullptr;
 
-    lower->flags &= ~LayerFlags_VISIBLE;
-    layer->flags &= ~LayerFlags_VISIBLE;
-    milton_new_layer(milton);
-    layer = milton->canvas->working_layer;
-    add(0, StrokeFlag_PRESERVE_OPACITY);
-    add(0, StrokeFlag_PRESERVE_OPACITY);
-    draw(true);
-    read(reference);
-    draw(true, true);
-    read(cached);
-    passed = passed && gpu_needs_navigation_preview(r) && r->opacity_stroke_runs == 0
-             && memcmp(reference, cached, bytes) != 0;
-    draw(true);
-    read(cached);
-    passed = passed && r->opacity_stroke_runs > 0 && memcmp(reference, cached, bytes) == 0;
-
-    for ( int i = 0; i < 12; ++i ) {
-        add(i % 3, StrokeFlag_PRESERVE_OPACITY | StrokeFlag_DISTANCE_TO_OPACITY | StrokeFlag_PRESSURE_TO_OPACITY);
-        if ( i % 4 == 0 ) { add(1, StrokeFlag_BLUR); }
-        if ( i % 4 == 2 ) { add(0, StrokeFlag_ERASER); }
-    }
-    r->disable_opacity_regions = true;
-    r->disable_opacity_history_cache = true;
-    double original_ms = measure(true);
-    int original_masks = r->opacity_stroke_runs;
-    read(reference);
-    r->disable_opacity_regions = false;
-    double regional_ms = measure(true);
-    read(cached);
-    passed = passed && memcmp(reference, cached, bytes) == 0;
-    r->disable_opacity_history_cache = false;
-    double optimized_ms = measure(true);
-    int optimized_masks = r->opacity_stroke_runs;
-    read(cached);
-    passed = passed && r->opacity_history_cache_hits > 0 && optimized_masks < original_masks
-             && memcmp(reference, cached, bytes) == 0;
-    fprintf(stdout, "Opacity/blur replay original/regional/cached histories: %.2f / %.2f / %.2f ms; masks %d / %d; history cache hits %d\n",
-            original_ms, regional_ms, optimized_ms, original_masks, optimized_masks, r->opacity_history_cache_hits);
-    for ( int i = 0; i < 6; ++i ) { add(i, StrokeFlag_PRESERVE_OPACITY); }
-    add(0, StrokeFlag_PRESERVE_OPACITY);
-    draw(true);
-    passed = passed && matches_reference();
-    u64 allocated_history_bytes = 0;
-    for ( GLuint texture : r->opacity_history_cache_textures ) {
-        if ( texture ) { allocated_history_bytes += (u64)width * height * 4; }
-    }
-    passed = passed && allocated_history_bytes <= OPACITY_HISTORY_CACHE_BYTES;
-    gpu_resize(r, view);
-    for ( GLuint texture : r->opacity_history_cache_textures ) { passed = passed && texture == 0; }
-    draw(true);
-    passed = passed && matches_reference();
-    milton_new_layer(milton);
-    layer = milton->canvas->working_layer;
-    add(1, StrokeFlag_PRESERVE_OPACITY);
-    add(0, StrokeFlag_PRESERVE_OPACITY);
-    add(2, StrokeFlag_PRESERVE_OPACITY);
-    draw(true);
-    passed = passed && matches_reference();
-
     view->screen_size = {3200, 900};
     view->zoom_center = view->screen_size / 2;
     gpu_resize(r, view);
@@ -887,12 +820,6 @@ test_blur_performance(Milton* milton)
     gpu_clip_strokes_and_update(&milton->root_arena, r, view, view->scale, milton->canvas->root_layer,
                                 working, 0, 0, 3200, 900);
     gpu_render_canvas(r, 0, 0, 3200, 900, background_alpha);
-    allocated_history_bytes = 0;
-    for ( GLuint texture : r->opacity_history_cache_textures ) {
-        if ( texture ) { allocated_history_bytes += 3200ULL * 900 * 4; }
-    }
-    passed = passed && allocated_history_bytes > 0 && allocated_history_bytes <= OPACITY_HISTORY_CACHE_BYTES;
-
     mlt_free(reference, "Blur cache test");
     mlt_free(cached, "Blur cache test");
     passed = passed && glGetError() == GL_NO_ERROR;
@@ -902,10 +829,10 @@ test_blur_performance(Milton* milton)
 }
 
 static bool
-test_preserve_opacity(bool blur_tests = false, bool benchmark = false)
+test_blur(bool benchmark = false)
 {
     if ( SDL_Init(SDL_INIT_VIDEO) != 0 ) {
-        fprintf(stderr, "Cannot initialize opacity test video: %s\n", SDL_GetError());
+        fprintf(stderr, "Cannot initialize blur test video: %s\n", SDL_GetError());
         return false;
     }
 #if USE_GL_3_2
@@ -914,10 +841,10 @@ test_preserve_opacity(bool blur_tests = false, bool benchmark = false)
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 #endif
     const int size = 320;
-    SDL_Window* window = SDL_CreateWindow("Opacity test", 0, 0, size, size, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+    SDL_Window* window = SDL_CreateWindow("Blur test", 0, 0, size, size, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
     SDL_GLContext context = window ? SDL_GL_CreateContext(window) : NULL;
     if ( !context || !gl::load() ) {
-        fprintf(stderr, "Cannot initialize opacity test OpenGL: %s\n", SDL_GetError());
+        fprintf(stderr, "Cannot initialize blur test OpenGL: %s\n", SDL_GetError());
         if ( context ) { SDL_GL_DeleteContext(context); }
         if ( window ) { SDL_DestroyWindow(window); }
         SDL_Quit();
@@ -931,7 +858,7 @@ test_preserve_opacity(bool blur_tests = false, bool benchmark = false)
     view->screen_size = {size, size};
     gui_anchor_picker_top_right(milton.gui, size);
     if ( !gpu_init(r, view, &milton.gui->picker) ) {
-        fprintf(stderr, "Cannot initialize opacity test renderer\n");
+        fprintf(stderr, "Cannot initialize blur test renderer\n");
         SDL_GL_DeleteContext(context);
         SDL_DestroyWindow(window);
         SDL_Quit();
@@ -952,9 +879,7 @@ test_preserve_opacity(bool blur_tests = false, bool benchmark = false)
     }
     Layer* layer = milton.canvas->working_layer;
     v2l line[] = {raster_to_canvas(view, v2l{100, 160}), raster_to_canvas(view, v2l{220, 160})};
-    v2l offscreen[] = {raster_to_canvas(view, v2l{400, 160}), raster_to_canvas(view, v2l{460, 160})};
     f32 pressure[] = {1, 1};
-    f32 low_pressure[] = {0.5f, 0.5f};
     auto add = [&](u32 flags, f32 alpha, v2l* points, f32* pressures,
                    v3f color = v3f{0.25f, 0.5f, 0.75f}, f32 hardness = k_max_hardness,
                    i32 shape = BrushShape_ROUND) {
@@ -984,7 +909,7 @@ test_preserve_opacity(bool blur_tests = false, bool benchmark = false)
         glReadPixels(size / 2, size / 2 - offset_y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
         return (int)pixel[3];
     };
-    if ( blur_tests ) {
+    {
         auto sample = [&](int offset_y) {
             return alpha_at_center(0.0f, offset_y);
         };
@@ -1000,6 +925,7 @@ test_preserve_opacity(bool blur_tests = false, bool benchmark = false)
         add_blur(0.0f);
         bool passed = sample(20) == outside && sample(0) == center;
         pop(&layer->strokes);
+        f32 low_pressure[] = {0.5f, 0.5f};
         add_blur(1.0f, StrokeFlag_PRESSURE_TO_OPACITY, low_pressure);
         int weak = sample(20);
         pop(&layer->strokes);
@@ -1033,19 +959,6 @@ test_preserve_opacity(bool blur_tests = false, bool benchmark = false)
         view->scale = (i32)original_scale;
         gpu_update_canvas(r, milton.canvas, view);
 
-        // Reconstruct opacity history through blur, not through its white mask color.
-        add(StrokeFlag_PRESERVE_OPACITY, 0.1f, line, pressure, v3f{1, 0, 0});
-        int protected_center = sample(0);
-        passed = passed && protected_center < center;
-        pop(&layer->strokes);
-        Stroke blur = pop(&layer->strokes);
-        add(StrokeFlag_PRESERVE_OPACITY, 1.0f, line, pressure, v3f{1, 0, 0});
-        push(&layer->strokes, blur);
-        passed = passed && abs(sample(20) - full) <= 1;
-        // Drop the extra preserving stroke but retain blur for the save/load regression.
-        pop(&layer->strokes);
-        pop(&layer->strokes);
-        push(&layer->strokes, blur);
         milton.persist->mlt_file_path = TO_PATH_STR("TEST_blur.mlt");
         milton_save(&milton);
         milton_load(&milton);
@@ -1054,15 +967,57 @@ test_preserve_opacity(bool blur_tests = false, bool benchmark = false)
         passed = passed && sample(20) == full
                  && (get(&layer->strokes, layer->strokes.count - 1)->flags & StrokeFlag_BLUR);
 
+        constexpr u32 retired_flag = 1u << 5;
+        size_t image_bytes = (size_t)size * size * 4;
+        u8* flagged_pixels = (u8*)mlt_calloc(image_bytes, 1, "Reserved stroke flag test");
+        u8* ordinary_pixels = (u8*)mlt_calloc(image_bytes, 1, "Reserved stroke flag test");
+        auto capture = [&](u8* pixels) {
+            gpu_clip_strokes_and_update(&milton.root_arena, r, view, view->scale, milton.canvas->root_layer,
+                                        &milton.working_stroke, 0, 0, size, size);
+            gpu_render_canvas(r, 0, 0, size, size, 0.0f);
+            glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->canvas_texture, 0);
+            glReadPixels(0, 0, size, size, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        };
+        gpu_free_strokes(r, milton.canvas);
+        gpu_release_data(r);
+        reset(&layer->strokes);
+        add(retired_flag, 0.5f, line, pressure);
+        add(retired_flag, 0.5f, line, pressure);
+        capture(flagged_pixels);
+        gpu_free_strokes(r, milton.canvas);
+        gpu_release_data(r);
+        reset(&layer->strokes);
+        add(0, 0.5f, line, pressure);
+        add(0, 0.5f, line, pressure);
+        capture(ordinary_pixels);
+        passed = passed && memcmp(flagged_pixels, ordinary_pixels, image_bytes) == 0;
+
+        gpu_free_strokes(r, milton.canvas);
+        gpu_release_data(r);
+        reset(&layer->strokes);
+        add(retired_flag, 0.5f, line, pressure);
+        add(retired_flag, 0.5f, line, pressure);
+        milton.persist->mlt_file_path = TO_PATH_STR("TEST_reserved_stroke_flag.mlt");
+        milton_save(&milton);
+        milton_load(&milton);
+        layer = milton.canvas->working_layer;
+        gpu_update_canvas(r, milton.canvas, view);
+        capture(flagged_pixels);
+        passed = passed && memcmp(flagged_pixels, ordinary_pixels, image_bytes) == 0
+                 && (get(&layer->strokes, 0)->flags & retired_flag);
+        mlt_free(flagged_pixels, "Reserved stroke flag test");
+        mlt_free(ordinary_pixels, "Reserved stroke flag test");
+
         // A blur on an empty upper layer must not sample the paint below.
+        int lower_edge = sample(20);
         milton_new_layer(&milton);
         layer = milton.canvas->working_layer;
         add_blur(1.0f);
-        passed = passed && sample(20) == full;
+        passed = passed && sample(20) == lower_edge;
         GLenum error = glGetError();
         passed = passed && error == GL_NO_ERROR;
         fprintf(passed ? stdout : stderr,
-                "Blur: base/half/full/repeated edge alpha %d/%d/%d/%d; replay, pressure, transparent red, layers, opacity history: %s (GL 0x%x)\n",
+                "Blur: base/half/full/repeated edge alpha %d/%d/%d/%d; replay, pressure, transparent red, layers, retired stroke flag: %s (GL 0x%x)\n",
                 outside, weak, full, repeated, passed ? "passed" : "FAILED", error);
         gpu_free_strokes(r, milton.canvas);
         gpu_release_data(r);
@@ -1072,110 +1027,6 @@ test_preserve_opacity(bool blur_tests = false, bool benchmark = false)
         SDL_Quit();
         return passed;
     }
-
-    constexpr u32 preserve = StrokeFlag_PRESERVE_OPACITY;
-    // The base stroke predates Preserve opacity and carries no new flags.
-    add(0, 0.5f, line, pressure);
-    int single = alpha_at_center();
-    add(preserve, 0.5f, line, pressure);
-    int repeated = alpha_at_center();
-    add(preserve | StrokeFlag_PRESSURE_TO_OPACITY, 1.0f, line, low_pressure);
-    int same_pressure_opacity = alpha_at_center();
-    add(preserve | StrokeFlag_PRESSURE_TO_OPACITY, 0.75f, line, pressure);
-    int stronger = alpha_at_center();
-    add(StrokeFlag_ERASER, 1.0f, offscreen, pressure);
-    add(preserve, 0.5f, line, pressure);
-    int separated = alpha_at_center();
-    add(0, 0.5f, line, pressure);
-    int ordinary = alpha_at_center();
-    bool passed = abs(single - 128) <= 1 && abs(repeated - single) <= 1
-                  && abs(same_pressure_opacity - single) <= 1 && abs(stronger - 191) <= 1
-                  && abs(separated - stronger) <= 1 && abs(ordinary - 223) <= 1;
-    fprintf(passed ? stdout : stderr, "Opacity readback (single, repeat, pressure, stronger, separated, ordinary): %d %d %d %d %d %d\n",
-            single, repeated, same_pressure_opacity, stronger, separated, ordinary);
-
-    // Returning to a color after another preserving color rebuilds its history.
-    add(preserve, 0.4f, line, pressure, v3f{0.75f, 0.25f, 0.5f});
-    int with_other_color = alpha_at_center();
-    u8 other_color_pixel[4];
-    memcpy(other_color_pixel, pixel, sizeof(pixel));
-    add(preserve, 0.5f, line, pressure);
-    int returned_color = alpha_at_center();
-    passed = passed && abs(returned_color - with_other_color) <= 1
-             && memcmp(other_color_pixel, pixel, sizeof(pixel)) == 0;
-
-    auto clear_strokes = [&]() {
-        gpu_free_strokes(r, milton.canvas);
-        gpu_release_data(r);
-        reset(&layer->strokes);
-    };
-    // Soft and square strokes must protect their actual per-pixel coverage, not master alpha.
-    clear_strokes();
-    add(StrokeFlag_DISTANCE_TO_OPACITY, 0.5f, line, pressure, v3f{0.25f, 0.5f, 0.75f}, 2.0f, BrushShape_RECTANGLE);
-    int soft = alpha_at_center(0.0f, 3);
-    add(preserve | StrokeFlag_DISTANCE_TO_OPACITY, 0.5f, line, pressure, v3f{0.25f, 0.5f, 0.75f}, 2.0f, BrushShape_RECTANGLE);
-    int soft_repeat = alpha_at_center(0.0f, 3);
-    passed = passed && soft > 0 && abs(soft_repeat - soft) <= 1;
-
-    // Erasing matching paint must lower its remembered opacity before a fresh pass.
-    clear_strokes();
-    add(0, 0.5f, line, pressure);
-    add(StrokeFlag_ERASER, 0.5f, line, pressure);
-    add(preserve, 0.5f, line, pressure);
-    int after_erasing = alpha_at_center();
-    passed = passed && after_erasing > single && after_erasing < ordinary;
-    alpha_at_center(1.0f);
-    // On white, the old 50% pass, half erasing, and preserving repaint must return to 50% color.
-    passed = passed && abs(pixel[0] - 159) <= 2 && abs(pixel[1] - 191) <= 2 && abs(pixel[2] - 223) <= 2;
-
-    clear_strokes();
-    add(0, 0.5f, line, pressure);
-    add(0, 0.5f, line, pressure);
-    int old_overlap = alpha_at_center();
-    add(preserve, 0.5f, line, pressure);
-    passed = passed && abs(old_overlap - 191) <= 1 && abs(alpha_at_center() - old_overlap) <= 1;
-
-    // Check true save/load: a legacy stroke remains protected after GPU handles are rebuilt.
-    clear_strokes();
-    add(0, 0.5f, line, pressure);
-    milton.persist->mlt_file_path = TO_PATH_STR("TEST_preserve_opacity.mlt");
-    milton_save(&milton);
-    milton_load(&milton);
-    layer = milton.canvas->working_layer;
-    gpu_update_canvas(r, milton.canvas, view);
-    int reopened = alpha_at_center();
-    add(preserve, 0.5f, line, pressure);
-    int reopened_repeat = alpha_at_center();
-    passed = passed && reopened > 0 && abs(reopened_repeat - reopened) <= 1;
-    fprintf(passed ? stdout : stderr,
-            "Legacy/other-color/soft/erased/reopened opacity: %d %d / %d %d / %d / %d %d (%s)\n",
-            with_other_color, returned_color, soft, soft_repeat, after_erasing,
-            reopened, reopened_repeat, passed ? "passed" : "FAILED");
-
-    milton_new_layer(&milton);
-    layer = milton.canvas->working_layer;
-    add(preserve, 0.5f, line, pressure);
-    int other_layer = alpha_at_center();
-    Stroke undone = pop(&layer->strokes);
-    int undo_alpha = alpha_at_center();
-    push(&layer->strokes, undone);
-    int redo_alpha = alpha_at_center();
-    bool layer_ok = abs(other_layer - 191) <= 1 && abs(undo_alpha - reopened) <= 1
-                    && abs(redo_alpha - other_layer) <= 1;
-    passed = passed && layer_ok;
-    fprintf(layer_ok ? stdout : stderr, "Separate layer, undo, redo opacity: %d %d %d (%s)\n",
-            other_layer, undo_alpha, redo_alpha, layer_ok ? "passed" : "FAILED");
-    GLenum error = glGetError();
-    if ( error != GL_NO_ERROR ) {
-        fprintf(stderr, "OpenGL error after opacity history rendering: 0x%x\n", error);
-        passed = false;
-    }
-    gpu_free_strokes(r, milton.canvas);
-    arena_free(&milton.root_arena);
-    SDL_GL_DeleteContext(context);
-    SDL_DestroyWindow(window);
-    SDL_Quit();
-    return passed;
 }
 
 static bool
@@ -1277,14 +1128,18 @@ test_tool_pressure_persistence()
 }
 
 static bool
-test_preserve_opacity_binding()
+test_retired_opacity_compatibility()
 {
     MiltonSettings saved = {};
     settings_init(&saved);
     set_default_bindings(&saved.bindings);
-    saved.preserve_opacity = 1;
+    saved.reserved_preserve_opacity = 1;
     saved.position_smoothing = 0.73f;
+    saved.pressure_smoothing = 0.61f;
+    saved.navigation_cache_mb = 768;
     binding_with_release(&saved.bindings, Modifier_ALT, 'p', Action_PEEK_OUT, ActionRelease_PEEK_OUT);
+    binding(&saved.bindings, Modifier_CTRL, 'k', Action_RESERVED_PRESERVE_OPACITY);
+    binding(&saved.bindings, Modifier_NONE, 'g', Action_MODE_BLUR);
 
     auto round_trip = [](const MiltonSettings& source, int missing, MiltonSettings* loaded, bool legacy_tail = false) {
         FILE* file = tmpfile();
@@ -1295,7 +1150,7 @@ test_preserve_opacity_binding()
             for ( int i = ActionRelease_PEEK_OUT; i < Action_COUNT_WITH_RELEASE; ++i ) {
                 fixture.bindings.bindings[i].action = (BindableAction)(i - missing);
             }
-            const int first = missing == 2 ? Action_TOGGLE_PRESERVE_OPACITY : Action_MODE_BLUR;
+            const int first = missing == 2 ? Action_RESERVED_PRESERVE_OPACITY : Action_MODE_BLUR;
             const size_t offset = offsetof(MiltonSettings, bindings) + first * sizeof(Binding);
             const u16 size = (u16)(offsetof(MiltonSettings, navigation_cache_mb) - missing * sizeof(Binding));
             const auto* bytes = reinterpret_cast<const u8*>(&fixture);
@@ -1314,39 +1169,49 @@ test_preserve_opacity_binding()
 
     MiltonSettings loaded = {};
     bool passed = round_trip(saved, 2, &loaded);
-    const Binding& toggle = loaded.bindings.bindings[Action_TOGGLE_PRESERVE_OPACITY];
+    const Binding& retired = loaded.bindings.bindings[Action_RESERVED_PRESERVE_OPACITY];
     const Binding& release = loaded.bindings.bindings[ActionRelease_PEEK_OUT];
-    passed = passed && toggle.bound_key == 'a' && !toggle.accepts_repeats
+    passed = passed && retired.bound_key == Binding::UNBOUND
              && release.action == ActionRelease_PEEK_OUT && release.modifiers == Modifier_ALT
              && release.bound_key == 'p' && release.on_release
-             && loaded.preserve_opacity && loaded.position_smoothing == saved.position_smoothing;
+             && loaded.reserved_preserve_opacity == 0
+             && loaded.position_smoothing == saved.position_smoothing
+             && loaded.pressure_smoothing == saved.pressure_smoothing;
     binding(&saved.bindings, Modifier_NONE, 'a', Action_MODE_PEN);
-    passed = passed && round_trip(saved, 2, &loaded) && toggle.bound_key == Binding::UNBOUND
+    passed = passed && round_trip(saved, 2, &loaded) && retired.bound_key == Binding::UNBOUND
              && loaded.bindings.bindings[Action_MODE_PEN].bound_key == 'a';
-    binding(&saved.bindings, Modifier_CTRL, 'k', Action_TOGGLE_PRESERVE_OPACITY);
-    passed = passed && round_trip(saved, false, &loaded) && toggle.bound_key == 'k'
-             && toggle.modifiers == Modifier_CTRL && toggle.action == Action_TOGGLE_PRESERVE_OPACITY;
-    passed = passed && round_trip(saved, 1, &loaded) && toggle.bound_key == 'k'
+    binding(&saved.bindings, Modifier_CTRL, 'k', Action_RESERVED_PRESERVE_OPACITY);
+    passed = passed && round_trip(saved, 0, &loaded) && retired.bound_key == Binding::UNBOUND
+             && loaded.reserved_preserve_opacity == 0
+             && loaded.bindings.bindings[Action_MODE_BLUR].bound_key == 'g';
+    // A retired F shortcut must not reserve the default key for the newly added blur action.
+    binding(&saved.bindings, Modifier_NONE, 'f', Action_RESERVED_PRESERVE_OPACITY);
+    passed = passed && round_trip(saved, 1, &loaded)
+             && retired.bound_key == Binding::UNBOUND
              && loaded.bindings.bindings[Action_MODE_BLUR].bound_key == 'f'
              && release.action == ActionRelease_PEEK_OUT
-             && loaded.preserve_opacity && loaded.position_smoothing == saved.position_smoothing;
+             && loaded.reserved_preserve_opacity == 0
+             && loaded.position_smoothing == saved.position_smoothing;
     binding(&saved.bindings, Modifier_NONE, 'f', Action_MODE_PEN);
     passed = passed && round_trip(saved, 1, &loaded)
              && loaded.bindings.bindings[Action_MODE_BLUR].bound_key == Binding::UNBOUND;
-    binding(&saved.bindings, Modifier_NONE, 'g', Action_MODE_BLUR);
     passed = passed && round_trip(saved, 0, &loaded)
              && loaded.bindings.bindings[Action_MODE_BLUR].bound_key == 'g';
     settings_init(&loaded);
     passed = passed && round_trip(saved, 0, &loaded, true)
              && loaded.navigation_cache_mb == 512
              && loaded.bindings.bindings[Action_MODE_BLUR].bound_key == 'g'
-             && toggle.bound_key == 'k' && toggle.modifiers == Modifier_CTRL;
+             && retired.bound_key == Binding::UNBOUND && loaded.reserved_preserve_opacity == 0;
     saved.navigation_cache_mb = 1536;
     passed = passed && round_trip(saved, 0, &loaded) && loaded.navigation_cache_mb == 1536;
     MiltonInput input = {};
+    input.flags = MiltonInputFlags_SAVE_FILE;
+    input.mode_to_set = MiltonMode::PEN;
+    binding_dispatch_action(Action_RESERVED_PRESERVE_OPACITY, &input, nullptr, {});
+    passed = passed && input.flags == MiltonInputFlags_SAVE_FILE && input.mode_to_set == MiltonMode::PEN;
     binding_dispatch_action(Action_MODE_BLUR, &input, nullptr, {});
     passed = passed && input.mode_to_set == MiltonMode::BLUR && mode_is_for_drawing(input.mode_to_set);
-    if ( !passed ) { fprintf(stderr, "Settings compatibility, cache budget persistence, or shortcut rebinding failed\n"); }
+    if ( !passed ) { fprintf(stderr, "Retired action/settings compatibility or neighboring blur binding failed\n"); }
     return passed;
 }
 
@@ -1483,21 +1348,18 @@ main(int argc, char** argv)
 #endif
     if ( argc == 2 && strcmp(argv[1], "--blur-performance") == 0 ) {
         return test_navigation_preview() && test_input_priority() && test_brush_resize_priority()
-               && test_preserve_opacity(false, true) ? 0 : 1;
+               && test_blur(true) ? 0 : 1;
     }
     if ( argc == 2 && strcmp(argv[1], "--blur") == 0 ) {
         bool ui = test_blur_tool_ui();
-        bool gpu = test_preserve_opacity(true);
+        bool gpu = test_blur();
         return ui && gpu ? 0 : 1;
     }
     if ( argc == 2 && strcmp(argv[1], "--tool-pressure") == 0 ) {
         return test_tool_pressure_persistence() ? 0 : 1;
     }
-    if ( argc == 2 && strcmp(argv[1], "--preserve-opacity-binding") == 0 ) {
-        return test_preserve_opacity_binding() ? 0 : 1;
-    }
-    if ( argc == 2 && strcmp(argv[1], "--preserve-opacity") == 0 ) {
-        return test_preserve_opacity() ? 0 : 1;
+    if ( argc == 2 && strcmp(argv[1], "--retired-opacity-compatibility") == 0 ) {
+        return test_retired_opacity_compatibility() ? 0 : 1;
     }
 #if defined(_WIN32)
     if ( !test_windows_ink() ) { return 1; }

@@ -961,7 +961,7 @@ read_milton_settings(MiltonSettings* settings, FILE* fd)
     constexpr size_t legacy_max_size = pre_blur_max_size - sizeof(Binding);
     constexpr size_t bindings_end = offsetof(MiltonSettings, pressure_smoothing);
     const int missing = struct_size <= legacy_max_size ? 2 : struct_size <= pre_blur_max_size ? 1 : 0;
-    const BindableAction first_new = missing == 2 ? Action_TOGGLE_PRESERVE_OPACITY : Action_MODE_BLUR;
+    const BindableAction first_new = missing == 2 ? Action_RESERVED_PRESERVE_OPACITY : Action_MODE_BLUR;
     const size_t new_binding_offset = offsetof(MiltonSettings, bindings) + first_new * sizeof(Binding);
     if ( struct_size < bindings_end - missing * sizeof(Binding) ) { return false; }
 
@@ -980,9 +980,11 @@ read_milton_settings(MiltonSettings* settings, FILE* fd)
         }
 
         for ( int action = first_new; action <= Action_MODE_BLUR; ++action ) {
-            i8 key = action == Action_MODE_BLUR ? 'f' : 'a';
+            if ( action == Action_RESERVED_PRESERVE_OPACITY ) { continue; }
+            i8 key = 'f';
             bool in_use = loaded.rotate_key == key;
             for ( int i = Action_FIRST; i < first_new; ++i ) {
+                if ( i == Action_RESERVED_PRESERVE_OPACITY ) { continue; }
                 const Binding& existing = loaded.bindings.bindings[i];
                 in_use |= existing.bound_key == key && existing.modifiers == Modifier_NONE;
             }
@@ -992,6 +994,8 @@ read_milton_settings(MiltonSettings* settings, FILE* fd)
         size_t n = min((size_t)struct_size, sizeof(loaded));
         if ( fread(&loaded, 1, n, fd) != n ) { return false; }
     }
+    loaded.bindings.bindings[Action_RESERVED_PRESERVE_OPACITY] = {};
+    loaded.reserved_preserve_opacity = 0;
     *settings = loaded;
     return true;
 }

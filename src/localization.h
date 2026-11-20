@@ -85,7 +85,6 @@ enum Texts
     TXT_could_not_delete_default_canvas,
     TXT_peek_out_increment_percent,
     TXT_opacity_pressure,
-    TXT_preserve_opacity,
     TXT_soft_brush,
     TXT_minimum,
     TXT_hardness,
@@ -151,7 +150,7 @@ enum Texts
     TXT_Action_TOGGLE_DEBUG_WINDOW,
 #endif
 
-    TXT_Action_TOGGLE_PRESERVE_OPACITY,
+    TXT_Action_RESERVED_PRESERVE_OPACITY,
     TXT_Action_MODE_BLUR,
     TXT_Count,
 };

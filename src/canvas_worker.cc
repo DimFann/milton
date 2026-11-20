@@ -560,7 +560,7 @@ canvas_worker_release_renderer(RenderBackend* r)
 {
     gpu_release_data(r);
     GLuint textures[] = {r->canvas_texture, r->eraser_texture, r->helper_texture, r->stencil_texture,
-                         r->stroke_info_texture, r->opacity_stroke_texture, r->opacity_history_texture,
+                         r->stroke_info_texture, r->opacity_stroke_texture,
                          r->blur_brush_textures[0], r->blur_brush_textures[1]};
     glDeleteTextures(array_count(textures), textures);
     GLuint buffers[] = {r->vbo_screen_quad, r->vbo_screen_uv, r->vbo_picker, r->vbo_picker_norm,

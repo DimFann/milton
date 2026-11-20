@@ -1180,14 +1180,6 @@ gui_brush_window(MiltonInput* input, PlatformState* platform, Milton* milton, Pl
                 gui->flags |= (i32)MiltonGuiFlags_SHOWING_PREVIEW;
             }
         }
-        if ( milton->current_mode == MiltonMode::PEN ) {
-            bool preserve = milton->settings->preserve_opacity != 0;
-            if ( ImGui::Checkbox(loc(TXT_preserve_opacity), &preserve) ) {
-                milton->settings->preserve_opacity = preserve;
-                milton_settings_save(milton->settings);
-            }
-        }
-
         const auto size = milton_get_brush_radius(milton);
         auto mut_size = size;
         ImGui::SliderInt(loc(TXT_brush_size), &mut_size, 1, MILTON_MAX_BRUSH_SIZE);
@@ -1917,6 +1909,7 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
 
                 MiltonBindings* bs = &st->bindings;
                 for ( int i = Action_FIRST; i < Action_COUNT; ++i ) {
+                    if ( i == Action_RESERVED_PRESERVE_OPACITY ) { continue; }
                     if ( i == Action_DRAG_BRUSH_SIZE || i == Action_DRAG_ZOOM || i == Action_TRANSFORM || i == Action_SELECT_COMMIT ) {
                         continue;  // Fixed modifier gestures.
                     }
@@ -2104,6 +2097,7 @@ milton_imgui_tick(MiltonInput* input, PlatformState* platform,  Milton* milton, 
                 MiltonBindings* bs = &milton->settings->bindings;
 
                 for (sz i = Action_FIRST; i < Action_COUNT; ++i ) {
+                    if ( i == Action_RESERVED_PRESERVE_OPACITY ) { continue; }
                     Binding* b = bs->bindings + i;
 
                     char control_lbl[64] = {};

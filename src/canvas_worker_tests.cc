@@ -656,8 +656,8 @@ test_canvas_worker(Milton* milton, SDL_Window* window)
         Stroke saved_working = *working;
         i32 saved_stroke_id = milton->canvas->stroke_id_count;
         Layer* drawing_layer = milton->canvas->root_layer;
-        const u32 drawing_flags[] = {0, StrokeFlag_ERASER, StrokeFlag_BLUR, StrokeFlag_PRESERVE_OPACITY};
-        const char* drawing_labels[] = {"drawing pen", "drawing eraser", "drawing blur", "drawing preserve opacity"};
+        const u32 drawing_flags[] = {0, StrokeFlag_ERASER, StrokeFlag_BLUR};
+        const char* drawing_labels[] = {"drawing pen", "drawing eraser", "drawing blur"};
         for ( int tool = 0; tool < array_count(drawing_flags); ++tool ) {
             frame();
             read(expected);

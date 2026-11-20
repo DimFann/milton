@@ -74,7 +74,7 @@ set_default_bindings(MiltonBindings* bs)
     binding(bs, Modifier_NONE, Binding::UNBOUND, Action_MODE_PRIMITIVE_RECTANGLE);
     binding(bs, Modifier_NONE, Binding::UNBOUND, Action_MODE_PRIMITIVE_GRID);
     binding(bs, Modifier_NONE, 'v', Action_FLIP_CANVAS_H);
-    binding(bs, Modifier_NONE, 'a', Action_TOGGLE_PRESERVE_OPACITY);
+    bs->bindings[Action_RESERVED_PRESERVE_OPACITY] = {};
     binding(bs, Modifier_NONE, 'f', Action_MODE_BLUR);
     binding(bs, Modifier_NONE, Binding::ESC, Action_RESET_ROTATION);
     binding(bs, Modifier_NONE, 's', Action_SELECT_LASSO);
@@ -113,6 +113,7 @@ binding_dispatch_action(BindableAction a, MiltonInput* input, Milton* milton, v2
     char* default_will_be_lost = "The default canvas will be cleared. Save it?";
 
     switch (a) {
+        case Action_RESERVED_PRESERVE_OPACITY: break;
         case Action_DECREASE_BRUSH_SIZE: {
             milton_decrease_brush_size(milton);
         } break;
@@ -291,10 +292,6 @@ binding_dispatch_action(BindableAction a, MiltonInput* input, Milton* milton, v2
         } break;
         case ActionRelease_DRAG_ZOOM: {
             drag_zoom_stop(milton);
-        } break;
-        case Action_TOGGLE_PRESERVE_OPACITY: {
-            milton->settings->preserve_opacity = !milton->settings->preserve_opacity;
-            milton_settings_save(milton->settings);
         } break;
         case Action_FLIP_CANVAS_H: {
             milton_flip_canvas_horizontal(milton);

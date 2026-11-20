@@ -185,10 +185,9 @@ gpu_clear_tile_cache(RenderBackend* r)
     release(&w->replay_elements);
     release(&w->replay_effects);
     GLuint textures[] = {w->canvas_texture, w->eraser_texture, w->helper_texture, w->stroke_info_texture,
-                         w->opacity_stroke_texture, w->opacity_history_texture, w->stencil_texture,
+                         w->opacity_stroke_texture, w->stencil_texture,
                          w->tile_paint_texture, cache->underlay, w->blur_brush_textures[0], w->blur_brush_textures[1]};
     glDeleteTextures(array_count(textures), textures);
-    glDeleteTextures(array_count(w->opacity_history_cache_textures), w->opacity_history_cache_textures);
     GLuint fbos[] = {w->fbo, cache->fbo};
     glDeleteFramebuffersEXT(2, fbos);
     if ( cache->quad ) { glDeleteBuffers(1, &cache->quad); }
@@ -378,11 +377,10 @@ tile_workspace(RenderBackend* r, int size)
     if ( w->width >= size && w->height >= size ) { return true; }
     int rounded = ((size + 127) / 128) * 128;
     u64 rounded_bytes = (u64)rounded * rounded * 4;
-    if ( rounded_bytes * (11 + min((u64)OPACITY_HISTORY_CACHE_SLOTS, OPACITY_HISTORY_CACHE_BYTES / rounded_bytes))
-         <= CANVAS_TILE_WORKSPACE_BUDGET ) { size = rounded; }
+    if ( rounded_bytes * 10 <= CANVAS_TILE_WORKSPACE_BUDGET ) { size = rounded; }
     // Include lazily allocated opacity/blur intermediates in the workspace allowance.
     u64 bytes = (u64)size * size * 4;
-    if ( bytes * (11 + min((u64)OPACITY_HISTORY_CACHE_SLOTS, OPACITY_HISTORY_CACHE_BYTES / bytes)) > CANVAS_TILE_WORKSPACE_BUDGET
+    if ( bytes * 10 > CANVAS_TILE_WORKSPACE_BUDGET
          || size > r->viewport_limits[0] || size > r->viewport_limits[1] ) {
         cache->failed = true;
         return false;
@@ -729,13 +727,12 @@ gpu_render_tile_cache(RenderBackend* r, i32, i32, i32, i32)
         w->sampling_pixels = NULL;
         w->tile_internal = true;
         w->canvas_texture = w->eraser_texture = w->helper_texture = w->stroke_info_texture = w->stencil_texture = 0;
-        w->opacity_history_texture = w->opacity_stroke_texture = 0;
-        w->replay_layer_texture = w->replay_canvas_texture = w->replay_history_texture = 0;
+        w->opacity_stroke_texture = 0;
+        w->replay_layer_texture = w->replay_canvas_texture = 0;
         w->fbo = w->tile_paint_texture = w->tile_underlay_texture = 0;
         w->replay_valid = false;
         w->clip_array = {};
         w->replay_elements = {}; w->replay_effects = {};
-        for ( GLuint& texture : w->opacity_history_cache_textures ) { texture = 0; }
         for ( GLuint& texture : w->blur_brush_textures ) { texture = 0; }
         w->width = w->height = 0;
         w->allocated_width = w->allocated_height = 0;

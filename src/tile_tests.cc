@@ -144,9 +144,9 @@ test_tile_cache()
     // At this view, tile boundaries fall at raster coordinates 128, 384, and 640.
     Layer* lower = milton.canvas->working_layer;
     add(lower, 0, {0.1f, 0.35f, 0.9f}, 0.85f, 34, {175, 340}, {585, 410}, 1, 1);
-    add(lower, StrokeFlag_PRESERVE_OPACITY | StrokeFlag_PRESSURE_TO_OPACITY,
+    add(lower, StrokeFlag_PRESSURE_TO_OPACITY,
         {0.9f, 0.15f, 0.1f}, 0.8f, 30, {190, 385}, {570, 385}, 0.25f, 1);
-    add(lower, StrokeFlag_PRESERVE_OPACITY | StrokeFlag_PRESSURE_TO_OPACITY,
+    add(lower, StrokeFlag_PRESSURE_TO_OPACITY,
         {0.9f, 0.15f, 0.1f}, 0.8f, 30, {195, 388}, {565, 388}, 1, 0.35f);
     add(lower, StrokeFlag_BLUR, {1, 1, 1}, 0.8f, 60, {220, 380}, {540, 380}, 1, 1);
     add(lower, StrokeFlag_BLUR, {1, 1, 1}, 0.7f, 52, {260, 390}, {510, 390}, 1, 1);
@@ -606,7 +606,7 @@ test_tile_cache()
     working->points[1] = raster_to_canvas(view, {440, 435});
     working->pressures[0] = 0.35f;
     working->pressures[1] = 1;
-    working->flags = StrokeFlag_PRESERVE_OPACITY | StrokeFlag_PRESSURE_TO_OPACITY;
+    working->flags = StrokeFlag_PRESSURE_TO_OPACITY;
     working->brush = default_brush();
     working->brush.radius = 24 * view->scale;
     working->brush.alpha = 0.7f;
@@ -617,20 +617,20 @@ test_tile_cache()
     memcpy(before, tiled, bytes);
     // Drawing must finish its dirty tiles even when the ordinary time budget is enabled.
     r->tile_cache_unlimited = false;
-    if ( draw_tiles("working preserve") ) {
+    if ( draw_tiles("working pressure pen") ) {
         check(r->tile_builds > 0 && r->tile_hits > 0 && !gpu_tile_cache_pending(r),
-              "working preserve must rebuild dirty tiles immediately and reuse others");
-        changed("working preserve must change pixels");
-        compare("working preserve");
+              "working pressure pen must rebuild dirty tiles immediately and reuse others");
+        changed("working pressure pen must change pixels");
+        compare("working pressure pen");
     }
     memcpy(before, tiled, bytes);
     working->points[1].y += 35 * view->scale;
     working->bounding_rect = bounding_box_for_stroke(working);
-    if ( draw_tiles("moved working preserve") ) {
+    if ( draw_tiles("moved working pressure pen") ) {
         check(r->tile_builds > 0 && r->tile_hits > 0 && !gpu_tile_cache_pending(r),
-              "moving working preserve must rebuild dirty tiles immediately");
-        changed("moving working preserve must change pixels");
-        compare("moved working preserve");
+              "moving working pressure pen must rebuild dirty tiles immediately");
+        changed("moving working pressure pen must change pixels");
+        compare("moved working pressure pen");
     }
     memcpy(before, tiled, bytes);
     working->flags = StrokeFlag_BLUR;
@@ -816,10 +816,7 @@ test_tile_cache()
         CanvasTileCache* cache = r->tiles;
         u64 pool_bytes = (u64)cache->entries.count * CANVAS_TILE_BYTES;
         u64 workspace_bytes = (u64)cache->worker.width * cache->worker.height * 4;
-        u64 workspace_max = workspace_bytes
-            ? workspace_bytes * (11 + min((u64)OPACITY_HISTORY_CACHE_SLOTS,
-                                          OPACITY_HISTORY_CACHE_BYTES / workspace_bytes))
-            : 0;
+        u64 workspace_max = workspace_bytes * 10;
         fprintf(stdout, "Tile cache pool: %llu / %llu bytes; workspace allowance: %llu / %llu bytes\n",
                 (unsigned long long)pool_bytes, (unsigned long long)CANVAS_TILE_BUDGET,
                 (unsigned long long)workspace_max, (unsigned long long)CANVAS_TILE_WORKSPACE_BUDGET);

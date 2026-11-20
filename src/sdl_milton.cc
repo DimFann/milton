@@ -301,6 +301,7 @@ shortcut_handle_key(Milton* milton, PlatformState* platform, SDL_Event* event, M
         // keydown
         else  {
             for (sz i = 0; i < Action_COUNT; ++i) {
+                if ( i == Action_RESERVED_PRESERVE_OPACITY ) { continue; }
                 Binding* b = &bindings->bindings[i];
                 if ( b->bound_key == Binding::UNBOUND && b->action != Action_DRAG_BRUSH_SIZE && b->action != Action_TRANSFORM &&
                      b->action != ActionRelease_DRAG_BRUSH_SIZE && b->action != ActionRelease_TRANSFORM ) {

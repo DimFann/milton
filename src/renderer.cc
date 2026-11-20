@@ -18,9 +18,6 @@
 
 
 #define RENDER_CHUNK_SIZE_LOG2 28
-#define OPACITY_HISTORY_CACHE_SLOTS 3
-
-static const u64 OPACITY_HISTORY_CACHE_BYTES = 32ULL * 1024 * 1024;
 
 
 enum ImmediateFlag
@@ -36,7 +33,6 @@ enum RenderElementFlags
     RenderElementFlags_PRESSURE_TO_OPACITY  = 1<<1,
     RenderElementFlags_DISTANCE_TO_OPACITY  = 1<<2,
     RenderElementFlags_ERASER               = 1<<3,
-    RenderElementFlags_PRESERVE_OPACITY     = 1<<4,
     RenderElementFlags_BLUR                 = 1<<5,
     RenderElementFlags_WORKING              = 1<<6,
     RenderElementFlags_ACTIVE_LAYER         = 1<<7,
@@ -173,26 +169,18 @@ struct RenderBackend
     GLuint stencil_texture;
     GLuint stroke_info_texture;
     GLuint opacity_stroke_texture;
-    GLuint opacity_history_texture;
-    GLuint opacity_history_cache_textures[OPACITY_HISTORY_CACHE_SLOTS];
     GLuint blur_brush_textures[2];
     GLuint replay_layer_texture;
     GLuint replay_canvas_texture;
-    GLuint replay_history_texture;
     DArray<ReplayCacheElement> replay_elements;
     DArray<ReplayCacheEffect> replay_effects;
     bool replay_valid;
-    bool replay_have_history;
-    v4f replay_history_color;
     float replay_background_alpha;
     u64 stroke_revision;
 #if defined(TESTING)
     bool replay_cache_hit;
     int blur_filter_runs;
     int opacity_stroke_runs;
-    int opacity_history_cache_hits;
-    bool disable_opacity_regions;
-    bool disable_opacity_history_cache;
     bool tile_cache_unlimited;
     int tile_job_limit;
     bool disable_display_transitions;
@@ -795,8 +783,6 @@ gpu_resize(RenderBackend* r, CanvasView* view)
     r->replay_valid = false;
     r->width = view->screen_size.w;
     r->height = view->screen_size.h;
-    glDeleteTextures(array_count(r->opacity_history_cache_textures), r->opacity_history_cache_textures);
-    for ( GLuint& texture : r->opacity_history_cache_textures ) { texture = 0; }
     if ( r->allocated_width == r->width && r->allocated_height == r->height ) { return; }
     r->allocated_width = r->width;
     r->allocated_height = r->height;
@@ -807,7 +793,6 @@ gpu_resize(RenderBackend* r, CanvasView* view)
     gl::resize_color_texture(r->stroke_info_texture, r->width, r->height);
     if ( r->opacity_stroke_texture ) {
         gl::resize_color_texture(r->opacity_stroke_texture, r->width, r->height);
-        gl::resize_color_texture(r->opacity_history_texture, r->width, r->height);
     }
     for ( GLuint texture : r->blur_brush_textures ) {
         if ( texture ) { gl::resize_color_texture(texture, r->width, r->height); }
@@ -815,7 +800,6 @@ gpu_resize(RenderBackend* r, CanvasView* view)
     if ( r->replay_layer_texture ) {
         gl::resize_color_texture(r->replay_layer_texture, r->width, r->height);
         gl::resize_color_texture(r->replay_canvas_texture, r->width, r->height);
-        gl::resize_color_texture(r->replay_history_texture, r->width, r->height);
     }
     gl::resize_depth_stencil_texture(r->stencil_texture, r->width, r->height);
 }
@@ -1318,9 +1302,6 @@ gpu_cook_stroke(Arena* arena, RenderBackend* r, Stroke* stroke, CookStrokeOpt co
             if (stroke->flags & StrokeFlag_DISTANCE_TO_OPACITY) {
                 re->flags |= RenderElementFlags_DISTANCE_TO_OPACITY;
             }
-            if (stroke->flags & StrokeFlag_PRESERVE_OPACITY) {
-                re->flags |= RenderElementFlags_PRESERVE_OPACITY;
-            }
             if (stroke->flags & StrokeFlag_BLUR) {
                 re->flags |= RenderElementFlags_BLUR;
             }
@@ -1407,21 +1388,11 @@ gpu_get_cook_progress(RenderBackend* r, i64* pending, i64* done)
     *done = r->cook_burst_done;
 }
 
-static bool
-same_paint_color(v4f ca, v4f cb)
-{
-    if ( ca.a <= 0.0f || cb.a <= 0.0f ) { return false; }
-    for ( int channel = 0; channel < 3; ++channel ) {
-        if ( fabsf(ca.d[channel] / ca.a - cb.d[channel] / cb.a) > 0.000001f ) { return false; }
-    }
-    return true;
-}
-
 bool
 gpu_needs_navigation_preview(RenderBackend* r)
 {
     for ( const RenderElement& element : r->clip_array ) {
-        if ( element.flags & (RenderElementFlags_BLUR | RenderElementFlags_PRESERVE_OPACITY) ) { return true; }
+        if ( element.flags & RenderElementFlags_BLUR ) { return true; }
         if ( element.flags & RenderElementFlags_LAYER ) {
             for ( LayerEffect* effect = element.effects; effect; effect = effect->next ) {
                 if ( effect->enabled && effect->type == LayerEffectType_BLUR ) { return true; }
@@ -1519,7 +1490,6 @@ gpu_clip_strokes_and_update(Arena* arena,
                                 if ( flags & ClipFlags_TILE_SCENE ) {
                                     RenderElement element = {};
                                     if ( s->flags & StrokeFlag_BLUR ) { element.flags |= RenderElementFlags_BLUR; }
-                                    if ( s->flags & StrokeFlag_PRESERVE_OPACITY ) { element.flags |= RenderElementFlags_PRESERVE_OPACITY; }
                                     push(clip_array, element);
                                     continue;
                                 }
@@ -1580,7 +1550,6 @@ gpu_clip_strokes_and_update(Arena* arena,
                     RenderElement element = {};
                     if ( flags & ClipFlags_TILE_SCENE ) {
                         if ( working_stroke->flags & StrokeFlag_BLUR ) { element.flags |= RenderElementFlags_BLUR; }
-                        if ( working_stroke->flags & StrokeFlag_PRESERVE_OPACITY ) { element.flags |= RenderElementFlags_PRESERVE_OPACITY; }
                     } else if ( (flags & ClipFlags_NAVIGATION_PREVIEW) && (working_stroke->flags & StrokeFlag_BLUR) ) {
                         element.flags = RenderElementFlags_BLUR;
                     } else {
@@ -1603,13 +1572,11 @@ gpu_clip_strokes_and_update(Arena* arena,
 }
 
 static void
-gpu_fill_with_texture(RenderBackend* r, float alpha = 1.0f, bool preserve_opacity = false)
+gpu_fill_with_texture(RenderBackend* r, float alpha = 1.0f)
 {
     // Assumes that texture object is already bound.
     gl::use_program(r->texture_fill_program);
     gl::set_uniform_f(r->texture_fill_program, "u_alpha", alpha);
-    gl::set_uniform_i(r->texture_fill_program, "u_preserve_opacity", preserve_opacity);
-    gl::set_uniform_i(r->texture_fill_program, "u_opacity_history", 1);
     {
         GLint t_loc = glGetAttribLocation(r->texture_fill_program, "a_position");
         if ( t_loc >= 0 ) {
@@ -1657,7 +1624,6 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
     r->replay_cache_hit = false;
     r->blur_filter_runs = 0;
     r->opacity_stroke_runs = 0;
-    r->opacity_history_cache_hits = 0;
 #endif
 
     // FLip it. GL is bottom-left.
@@ -1743,25 +1709,6 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         glDrawElements(GL_TRIANGLES, re->count, GL_UNSIGNED_SHORT, 0);
     };
 
-    bool use_opacity_regions = true;
-    u64 history_texture_bytes = (u64)r->width * r->height * 4;
-    int history_cache_limit = history_texture_bytes
-        ? (int)min((u64)OPACITY_HISTORY_CACHE_SLOTS, OPACITY_HISTORY_CACHE_BYTES / history_texture_bytes) : 0;
-#if defined(TESTING)
-    use_opacity_regions = !r->disable_opacity_regions;
-    if ( r->disable_opacity_history_cache ) { history_cache_limit = 0; }
-#endif
-    struct HistoryEntry
-    {
-        bool valid;
-        v4f color;
-        i64 next;
-        i64 used;
-    };
-    HistoryEntry histories[OPACITY_HISTORY_CACHE_SLOTS] = {};
-    bool have_history = false;
-    v4f history_color = {};
-    i64 layer_start = 0;
     auto scissor_stroke = [&](RenderElement* re, int padding) {
         int left = max(x, re->raster_bounds.left - padding);
         int right = min(x + w, re->raster_bounds.right + padding);
@@ -1773,23 +1720,10 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
 #if defined(TESTING)
         ++r->opacity_stroke_runs;
 #endif
-        if ( use_opacity_regions ) { scissor_stroke(re, 2); }
-        bool eraser = (re->flags & (RenderElementFlags_ERASER | RenderElementFlags_BLUR)) != 0;
+        scissor_stroke(re, 2);
         glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, r->opacity_stroke_texture, 0);
         glClearColor(0,0,0,0);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        if ( !eraser && !(re->flags & (RenderElementFlags_PRESSURE_TO_OPACITY | RenderElementFlags_DISTANCE_TO_OPACITY)) ) {
-            glEnable(GL_DEPTH_TEST);
-            glEnable(GL_BLEND);
-            glBlendEquation(GL_FUNC_ADD);
-            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-            gl::set_uniform_i(r->stroke_program, "u_aa_rim", 0);
-            stroke_pass(re, r->stroke_program);
-            gl::set_uniform_i(r->stroke_program, "u_aa_rim", 1);
-            stroke_pass(re, r->stroke_program);
-            return;
-        }
-
         glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, r->stroke_info_texture, 0);
         glClear(GL_COLOR_BUFFER_BIT);
         glDisable(GL_DEPTH_TEST);
@@ -1798,7 +1732,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         glBlendFunc(GL_ONE, GL_ONE);
         gl::set_uniform_i(r->stroke_info_program, "u_use_pressure", (re->flags & RenderElementFlags_PRESSURE_TO_OPACITY) != 0);
         gl::set_uniform_i(r->stroke_info_program, "u_use_distance", (re->flags & RenderElementFlags_DISTANCE_TO_OPACITY) != 0);
-        gl::set_uniform_f(r->stroke_info_program, "u_master_alpha", eraser ? re->master_alpha : 1.0f);
+        gl::set_uniform_f(r->stroke_info_program, "u_master_alpha", re->master_alpha);
         gl::set_uniform_f(r->stroke_info_program, "u_opacity_min", re->min_opacity);
         gl::set_uniform_f(r->stroke_info_program, "u_hardness", re->hardness);
         stroke_pass(re, r->stroke_info_program);
@@ -1809,7 +1743,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         glBlendEquation(GL_FUNC_ADD);
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         RenderElement fill = *re;
-        if ( eraser ) { fill.color = {1,1,1,1}; }
+        fill.color = {1,1,1,1};
         stroke_pass(&fill, r->stroke_fill_program_pressure);
     };
     auto apply_blur = [&](RenderElement* re, GLuint target) {
@@ -1874,30 +1808,6 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         glBlendEquation(GL_FUNC_ADD);
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     };
-    auto update_opacity_history = [&](RenderElement* re) {
-        if ( use_opacity_regions ) { scissor_stroke(re, 2); }
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(texture_target, 0);
-        glActiveTexture(GL_TEXTURE0);
-        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, r->opacity_history_texture, 0);
-        glBindTexture(texture_target, r->opacity_stroke_texture);
-        glDisable(GL_DEPTH_TEST);
-        glEnable(GL_BLEND);
-        if ( re->flags & RenderElementFlags_ERASER ) {
-            glBlendEquation(GL_FUNC_ADD);
-            glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
-        } else {
-            glBlendEquation((re->flags & RenderElementFlags_PRESERVE_OPACITY) ? GL_MAX : GL_FUNC_ADD);
-            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-        }
-        gpu_fill_with_texture(r);
-        glBlendEquation(GL_FUNC_ADD);
-        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, layer_texture, 0);
-        glEnable(GL_DEPTH_TEST);
-        glScissor(x, y, w, h);
-    };
-
     // Keep the checkpoint before the active layer's marker, even between strokes,
     // so pen-down and pen-up can reuse and extend the same completed prefix.
     i64 cache_end = clip_array->count;
@@ -1962,21 +1872,14 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         glBlendEquation(GL_FUNC_ADD);
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     };
-    auto cache_history = [&]() {
-        r->replay_have_history = have_history;
-        r->replay_history_color = history_color;
-        if ( have_history ) { copy_texture(r->opacity_history_texture, r->replay_history_texture); }
-        resume_layer();
-    };
     auto save_cache = [&]() {
         if ( !r->replay_layer_texture ) {
             r->replay_layer_texture = gl::new_color_texture(r->width, r->height);
             r->replay_canvas_texture = gl::new_color_texture(r->width, r->height);
-            r->replay_history_texture = gl::new_color_texture(r->width, r->height);
         }
         copy_texture(layer_texture, r->replay_layer_texture);
         copy_texture(r->canvas_texture, r->replay_canvas_texture);
-        cache_history();
+        resume_layer();
         reset(&r->replay_elements);
         reset(&r->replay_effects);
         for ( i64 i = 0; i < cache_end; ++i ) {
@@ -1996,13 +1899,7 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         copy_texture(r->replay_layer_texture, layer_texture);
         copy_texture(r->replay_canvas_texture, r->canvas_texture);
         copy_texture(r->replay_canvas_texture, r->eraser_texture);
-        have_history = r->replay_have_history;
-        history_color = r->replay_history_color;
-        if ( have_history ) { copy_texture(r->replay_history_texture, r->opacity_history_texture); }
         resume_layer();
-        for ( i64 i = 0; i < r->replay_elements.count; ++i ) {
-            if ( clip_array->data[i].flags & RenderElementFlags_LAYER ) { layer_start = i + 1; }
-        }
         render_start = r->replay_elements.count;
 #if defined(TESTING)
         r->replay_cache_hit = true;
@@ -2015,10 +1912,6 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
         RenderElement* re = &clip_array->data[i];
 
         if ( re->flags & RenderElementFlags_LAYER ) {
-            have_history = false;
-            for ( HistoryEntry& entry : histories ) { entry.valid = false; }
-            layer_start = i + 1;
-
             // Layer render element.
             // The current framebuffer's color attachment is layer_texture.
 
@@ -2126,88 +2019,11 @@ gpu_render_canvas(RenderBackend* r, i32 view_x, i32 view_y,
                 if ( re->flags & RenderElementFlags_BLUR ) {
                     if ( !r->opacity_stroke_texture ) {
                         r->opacity_stroke_texture = gl::new_color_texture(r->width, r->height);
-                        r->opacity_history_texture = gl::new_color_texture(r->width, r->height);
                     }
                     render_opacity_stroke(re);
                     apply_blur(re, layer_texture);
-                    if ( have_history ) { apply_blur(re, r->opacity_history_texture); }
                     glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, layer_texture, 0);
                     continue;
-                }
-                bool eraser = (re->flags & RenderElementFlags_ERASER) != 0;
-                bool preserve = !navigation_preview && !eraser && (re->flags & RenderElementFlags_PRESERVE_OPACITY);
-                if ( preserve && (!have_history || !same_paint_color(history_color, re->color)) ) {
-                    if ( !r->opacity_stroke_texture ) {
-                        r->opacity_stroke_texture = gl::new_color_texture(r->width, r->height);
-                        r->opacity_history_texture = gl::new_color_texture(r->width, r->height);
-                    }
-                    // A cached color catches up only on operations since it was last active.
-                    // Metadata is local to this replay and is discarded at each layer boundary.
-                    i64 history_start = layer_start;
-                    int slot = -1;
-                    for ( int j = 0; j < history_cache_limit; ++j ) {
-                        // Approximate paint-color equality is not transitive; cache keys must be exact.
-                        if ( histories[j].valid && memcmp(&histories[j].color, &re->color, sizeof(history_color)) == 0 ) {
-                            slot = j;
-                            history_start = histories[j].next;
-#if defined(TESTING)
-                            ++r->opacity_history_cache_hits;
-#endif
-                            break;
-                        }
-                    }
-                    bool found_history = slot >= 0;
-                    if ( !found_history && have_history && history_cache_limit > 0 ) {
-                        slot = 0;
-                        for ( int j = 1; j < history_cache_limit; ++j ) {
-                            if ( !histories[j].valid || histories[j].used < histories[slot].used ) { slot = j; }
-                        }
-                    }
-                    if ( slot >= 0 ) {
-                        if ( !r->opacity_history_cache_textures[slot] ) {
-                            r->opacity_history_cache_textures[slot] = gl::new_color_texture(r->width, r->height);
-                        }
-                        swap(r->opacity_history_texture, r->opacity_history_cache_textures[slot]);
-                        histories[slot] = HistoryEntry{have_history, history_color, i, i};
-                    }
-                    history_color = re->color;
-                    have_history = true;
-                    glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, r->opacity_history_texture, 0);
-                    glClearColor(0,0,0,0);
-                    if ( !found_history ) { glClear(GL_COLOR_BUFFER_BIT); }
-                    for ( i64 previous = history_start; previous < i; ++previous ) {
-                        RenderElement* old = &clip_array->data[previous];
-                        if ( old->count > 0 && (old->flags & RenderElementFlags_BLUR) ) {
-                            if ( !navigation_preview ) {
-                                render_opacity_stroke(old);
-                                apply_blur(old, r->opacity_history_texture);
-                            }
-                        }
-                        else if ( old->count > 0 && ((old->flags & RenderElementFlags_ERASER) || same_paint_color(history_color, old->color)) ) {
-                            render_opacity_stroke(old);
-                            update_opacity_history(old);
-                        }
-                    }
-                    if ( cacheable && i == cache_end && (re->flags & RenderElementFlags_WORKING) ) {
-                        cache_history();
-                    }
-                    glScissor(x, y, w, h);
-                }
-                if ( have_history && (eraser || same_paint_color(history_color, re->color)) ) {
-                    render_opacity_stroke(re);
-                    if ( !eraser ) {
-                        glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture_target, layer_texture, 0);
-                        glBindTexture(texture_target, r->opacity_stroke_texture);
-                        glActiveTexture(GL_TEXTURE1);
-                        glBindTexture(texture_target, r->opacity_history_texture);
-                        glActiveTexture(GL_TEXTURE0);
-                        glDisable(GL_DEPTH_TEST);
-                        gpu_fill_with_texture(r, 1.0f, preserve);
-                    }
-                    update_opacity_history(re);
-                    if ( !eraser ) { continue; }
-                    // The mask pass used the same stroke depth; allow the real eraser pass through.
-                    glClear(GL_DEPTH_BUFFER_BIT);
                 }
                 if (re->flags & RenderElementFlags_ERASER) {
                     if ( (re->flags & (RenderElementFlags_PRESSURE_TO_OPACITY | RenderElementFlags_DISTANCE_TO_OPACITY))
@@ -2626,12 +2442,10 @@ gpu_release_data(RenderBackend* r)
     release(&r->clip_array);
     release(&r->replay_elements);
     release(&r->replay_effects);
-    GLuint textures[] = {r->replay_layer_texture, r->replay_canvas_texture, r->replay_history_texture};
+    GLuint textures[] = {r->replay_layer_texture, r->replay_canvas_texture};
     glDeleteTextures(array_count(textures), textures);
-    r->replay_layer_texture = r->replay_canvas_texture = r->replay_history_texture = 0;
+    r->replay_layer_texture = r->replay_canvas_texture = 0;
     r->replay_valid = false;
-    glDeleteTextures(array_count(r->opacity_history_cache_textures), r->opacity_history_cache_textures);
-    for ( GLuint& texture : r->opacity_history_cache_textures ) { texture = 0; }
 }
 
 

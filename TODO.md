@@ -41,7 +41,7 @@ there is no canvas-format change or permanent flattening.
   invalidate older frames immediately; new ink remains asynchronous.
 - [x] Preserve the worker's full-quality replay prefix across same-view sample
   updates. Updating scene snapshots must not unconditionally invalidate cached
-  blur/Preserve opacity history; camera changes still update view state.
+  blur replay prefixes; camera changes still update view state.
 - [x] Reproject a pinned GPU snapshot during camera pan/zoom/rotation/flip/resize,
   instead of replaying foreground strokes. Skip the redundant foreground scene
   traversal while the worker owns rendering; do not resize textures or update
@@ -98,8 +98,11 @@ there is no canvas-format change or permanent flattening.
   viewport or render origin does not invalidate unchanged paint.
 - [x] Dirty-tile detection and earliest changed history positions for drawing,
   stroke edits, undo/redo, and layer changes.
-- [x] Chronological Preserve opacity, pressure, eraser, legacy-stroke, and blur
+- [x] Chronological pressure, eraser, legacy-stroke, and blur
   replay using the reference stroke renderer.
+- [x] Remove Preserve opacity rendering, per-color histories, brush options, and
+  shortcuts. Ignore its old stroke bit and retire its persisted settings/binding
+  slots without shifting other settings. Older artwork now uses ordinary paint.
 - [x] Reverse chronological filter-footprint expansion: dependent blur operations
   accumulate their required input padding rather than sharing a fixed halo.
 - [x] Cross-layer padded input assembly for erasers followed by blur, preserving
@@ -108,7 +111,7 @@ there is no canvas-format change or permanent flattening.
   retained paint; lower-layer edits invalidate upper paint only where required.
 - [x] Lazy allocation, LRU eviction, canvas-replacement cleanup, and a 128 MiB
   tile-texture budget. The reusable workspace has a separate 128 MiB limit that
-  includes its possible opacity-history and blur intermediates.
+  includes its possible blur-mask and filter intermediates.
 - [x] Retain resident coarse and fine levels across navigation. Stop starting
   full-quality tile reconstruction jobs when navigation controls activate.
 - [x] Keep legacy 50/100 ms whole-view fades for the foreground compatibility
@@ -166,21 +169,24 @@ reuse, output agreement with synchronous tiles within 2 LSB/channel, pixel-exact
 exports during pending work, and shutdown/restart without losing the UI context.
 Drawing checks retain rendered pixels with a blocked worker, display completed
 intermediate samples despite a newer queued update, and compare pen, eraser,
-blur, Preserve opacity, and committed strokes against synchronous tiles. Strokes
+blur, and committed strokes against synchronous tiles. Strokes
 committed entirely between frames also retain rendered paint.
-Worker reference-fallback checks verify that warmed pen, eraser, blur, and
-Preserve opacity samples reuse their replay prefix. Blur after the active layer
+Worker reference-fallback checks verify that warmed pen, eraser, and blur
+samples reuse their replay prefix. Blur after the active layer
 still runs when its result depends on the new ink.
 
 `--profile-canvas <path>` benchmarks a supplied current-version canvas in a
 hidden window at its saved viewport, without saving it or loading user settings.
+It reports a GPU-complete cold full replay and the number of blur applications.
 It compares direct replay, the foreground tile/fallback path, and the worker
 using growing strokes near the view's center-right. Each tool reports six warmed
 updates after two warmup updates, including worker installation, reconstruction,
 GPU-complete publication, and observed submission-to-display-texture time.
+Worker reconstruction timing includes CPU submission; publication can include
+waiting for previously submitted GPU work and is not isolated readback cost.
 The worker's output is compared with synchronous rendering within 2 LSB/channel.
-These measurements exclude display refresh/presentation and the initial cold
-rebuild, which can still be expensive after camera or history changes.
+Warmed-update measurements exclude display refresh/presentation and the initial
+cold rebuild, which can still be expensive after camera or history changes.
 Navigation profiling also compares raw-stroke replay with snapshot presentation
 for pan/zoom/rotation, both with a blocked worker and with live gap coverage.
 It also waits for both idle overview levels and reports whole-artwork preview

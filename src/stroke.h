@@ -45,7 +45,7 @@ enum StrokeFlag
     StrokeFlag_ERASER               = (1<<2),
     StrokeFlag_RELATIVE_TO_CANVAS   = (1<<3),
     StrokeFlag_CUT                  = (1<<4),  // Working stroke only: a cutting eraser path. Never stored or rendered.
-    StrokeFlag_PRESERVE_OPACITY     = (1<<5),
+    StrokeFlag_RESERVED_5           = (1<<5),  // Retired Preserve opacity bit; ignored in older artwork.
     StrokeFlag_BLUR                 = (1<<6),
 };
 

@@ -13,4 +13,7 @@ The color history keeps five swatches in the main file body for older readers.
 Newer saves append an optional `HST1` footer (four-byte tag, followed by five
 RGBA `float32` swatches) for the additional colors.
 
+Stroke flag bit 5 formerly enabled Preserve opacity. It is now reserved and
+ignored: old flagged strokes render as ordinary paint. Bit 6 still denotes blur.
+No stroke layout or file-format version change is required.
 
